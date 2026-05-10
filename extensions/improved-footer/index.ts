@@ -60,10 +60,14 @@ function formatTokens(count: number): string {
 // ─── OpenRouter Cost Tracking ─────────────────────────────────────────────
 
 interface CostState {
-  totalCost: number;
+  /** OpenRouter API cost (more accurate than pi's estimate — fetched from /api/v1/generation) */
+  orCost: number;
+  /** pi's built-in cost for non-OpenRouter providers (accumulated from message_end events) */
+  piCost: number;
   totalCacheDiscount: number;
   lastProvider: string;
   lastModel: string;
+  /** Tracks OpenRouter gen-ids that have already been fetched */
   seenIds: Set<string>;
 }
 
@@ -109,7 +113,8 @@ function getOpenRouterApiKey(ctx: ExtensionContext): string | null {
 
 export default function (pi: ExtensionAPI) {
   let costState: CostState = {
-    totalCost: 0,
+    orCost: 0,
+    piCost: 0,
     totalCacheDiscount: 0,
     lastProvider: "",
     lastModel: "",
@@ -138,30 +143,37 @@ export default function (pi: ExtensionAPI) {
     requestRender();
   });
 
-  // ─── Event: track OpenRouter cost from responses ─────────────────────────
+  // ─── Event: track cost from responses (OpenRouter API or pi built-in) ───
 
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
     const provider = event.message.provider;
-    if (provider !== "openrouter") return;
 
-    const responseId = event.message.responseId;
-    if (!responseId || !responseId.startsWith("gen-")) return;
-    if (costState.seenIds.has(responseId)) return;
-    costState.seenIds.add(responseId);
+    if (provider === "openrouter") {
+      // OpenRouter: use generation API for accurate provider-agnostic cost
+      const responseId = event.message.responseId;
+      if (!responseId || !responseId.startsWith("gen-")) return;
+      if (costState.seenIds.has(responseId)) return;
+      costState.seenIds.add(responseId);
 
-    if (!openRouterApiKey) {
-      openRouterApiKey = getOpenRouterApiKey(ctx);
+      if (!openRouterApiKey) {
+        openRouterApiKey = getOpenRouterApiKey(ctx);
+      }
+      if (!openRouterApiKey) return;
+
+      const gen = await fetchGenerationCost(responseId, openRouterApiKey);
+      if (!gen) return;
+
+      costState.orCost += gen.totalCost;
+      costState.totalCacheDiscount += gen.cacheDiscount;
+      if (gen.provider) costState.lastProvider = gen.provider;
+      if (gen.model) costState.lastModel = gen.model;
+    } else {
+      // Non-OpenRouter: use pi's built-in cost from usage
+      costState.piCost += event.message.usage.cost.total;
+      if (event.message.provider) costState.lastProvider = event.message.provider;
+      if (event.message.model) costState.lastModel = event.message.model;
     }
-    if (!openRouterApiKey) return;
-
-    const gen = await fetchGenerationCost(responseId, openRouterApiKey);
-    if (!gen) return;
-
-    costState.totalCost += gen.totalCost;
-    costState.totalCacheDiscount += gen.cacheDiscount;
-    if (gen.provider) costState.lastProvider = gen.provider;
-    if (gen.model) costState.lastModel = gen.model;
 
     requestRender();
   });
@@ -170,7 +182,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     // Pre-populate cost from existing session entries on restore
-    costState = { totalCost: 0, totalCacheDiscount: 0, lastProvider: "", lastModel: "", seenIds: new Set() };
+    costState = { orCost: 0, piCost: 0, totalCacheDiscount: 0, lastProvider: "", lastModel: "", seenIds: new Set() };
     modelId = ctx.model?.id ?? "";
 
     ctx.ui.setFooter((tui, theme, _footerData) => {
@@ -229,12 +241,14 @@ export default function (pi: ExtensionAPI) {
           if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
           if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
 
-          // Cost from OpenRouter generation API (or fallback to pi's cost)
-          const usingOr = costState.totalCost > 0;
-          if (usingOr) {
-            statsParts.push(`$${costState.totalCost.toFixed(3)}`);
+          // Cost: combines OpenRouter API cost (more accurate) + pi's built-in cost
+          const hasTrackedCosts = costState.orCost > 0 || costState.piCost > 0;
+          if (hasTrackedCosts) {
+            const combinedCost = costState.orCost + costState.piCost;
+            statsParts.push(`$${combinedCost.toFixed(3)}`);
           } else {
-            // Fallback: compute from pi's usage if OpenRouter data not yet available
+            // Fallback on first render before any message_end events fire
+            // (e.g. session restore). Uses pi's cost for all messages.
             let piCost = 0;
             try {
               for (const entry of ctx.sessionManager.getEntries()) {
