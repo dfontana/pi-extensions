@@ -19,14 +19,13 @@ pi install git:github.com/dfontana/pi-extensions
 
 ## Installed Packages
 
-| Package | Source |
-|---------|--------|
-| @tintinweb/pi-subagents | npm |
-| pi-web-access | npm |
-| @juicesharp/rpiv-ask-user-question | npm |
-| @juicesharp/rpiv-todo | npm |
-| dfontana/pi-extensions | git |
-| pi-notify | npm |
+- npm:@tintinweb/pi-subagents
+- npm:pi-web-access
+- npm:@juicesharp/rpiv-ask-user-question
+- npm:@tintinweb/pi-tasks
+- npm:pi-notify
+- npm:@plannotator/pi-extension
+- git:dfontana/pi-extensions
 
 ## Contents
 
@@ -47,3 +46,7 @@ pi install git:github.com/dfontana/pi-extensions
 ### Themes
 
 **rose-pine-dawn** — Rosé Pine Dawn theme — a warm, light theme with soft pastels.
+
+## Future Ideas
+- Custom output styles -- like "caveman", "cowboy", "noir", or other themes (playful or practical)
+- modal/Helix-style input box extension
