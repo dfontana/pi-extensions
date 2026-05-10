@@ -32,7 +32,9 @@ pi install git:github.com/dfontana/pi-extensions
 
 ### Extensions
 
-**jj-bookmark** — Shows the current jujutsu bookmark (or git branch) in the pi footer. Falls back to git if not in a jj repo.
+**improved-footer** — Replaces pi's default footer with:
+- **jj bookmark support**: shows `jj:bookmark` instead of git branch, with git fallback and "(no vcs)" when neither is present
+- **Accurate OpenRouter cost**: queries OpenRouter's `/api/v1/generation` API for actual response cost instead of pi's client-side estimation (which uses static pricing and doesn't account for OpenRouter's dynamic provider pricing)
 
 **no-git-for-jj** — Blocks `git` commands when a `.jj/` directory is detected. Suggests the equivalent `jj` command instead.
 
