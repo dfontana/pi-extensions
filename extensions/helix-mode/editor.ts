@@ -25,16 +25,25 @@ import {
   offsetToLineCol,
   findMatches,
   wrapWordBoundary,
-  selectionRange,
-  extractSelection,
   deleteRange,
-  linesInRange,
   indentLines,
   unindentLines,
   nextWordStart,
   prevWordStart,
   nextWordEnd,
 } from "./buffer.js";
+import {
+  type SelectionState,
+  selectionFromCursor,
+  makeSelection,
+  normalizeRange,
+  selectionStart,
+  selectionEnd,
+  isNonEmpty,
+  selectionCharCount,
+  selectionLineRange,
+  selectionText,
+} from "./selection.js";
 import {
   buildLabelMap,
   applyLabels,
@@ -76,8 +85,8 @@ export class HelixEditor extends CustomEditor {
   // ── Mode ──────────────────────────────────────────────────────────────────
   private mode: Mode = "insert";
 
-  // ── Selection anchor (only meaningful in normal/select when non-null) ─────
-  private selectionAnchor: { line: number; col: number } | null = null;
+  // ── Selection state (only meaningful in select mode when non-null) ────────
+  private selection: SelectionState | null = null;
 
   // ── Two-key sequence state ────────────────────────────────────────────────
   /** Set to "g" when the user presses `g` in normal mode, waiting for second key. */
@@ -107,7 +116,7 @@ export class HelixEditor extends CustomEditor {
 
   private enterInsert(): void {
     this.mode = "insert";
-    this.selectionAnchor = null;
+    this.selection = null;
     this.pendingPrefix = null;
     this.pendingReplace = false;
     this.labelMode = false;
@@ -116,7 +125,7 @@ export class HelixEditor extends CustomEditor {
 
   private enterNormal(): void {
     this.mode = "normal";
-    this.selectionAnchor = null;
+    this.selection = null;
     this.pendingPrefix = null;
     this.pendingReplace = false;
     this.labelMode = false;
@@ -126,7 +135,7 @@ export class HelixEditor extends CustomEditor {
 
   private enterSelect(): void {
     this.mode = "select";
-    this.selectionAnchor = this.getCursor();
+    this.selection = selectionFromCursor(this.getCursor());
     this.pendingPrefix = null;
     this.pendingReplace = false;
   }
@@ -141,10 +150,9 @@ export class HelixEditor extends CustomEditor {
   }
 
   private getSelectionCharCount(): number {
-    if (!this.selectionAnchor) return 0;
+    if (!this.selection) return 0;
     const lines = this.getLines();
-    const { start, end } = selectionRange(lines, this.selectionAnchor, this.getCursor());
-    return end - start + 1;
+    return selectionCharCount(lines, this.selection);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -158,9 +166,9 @@ export class HelixEditor extends CustomEditor {
     if (lines.length === 0) return lines;
 
     // Selection highlight — applied before the mode label, preserves CURSOR_MARKER
-    if (this.mode === "select" && this.selectionAnchor && !this.labelMode) {
+    if (this.mode === "select" && this.selection && !this.labelMode) {
       const logicalLines = this.getLines();
-      const { start, end } = selectionRange(logicalLines, this.selectionAnchor, this.getCursor());
+      const { start, end } = normalizeRange(logicalLines, this.selection);
       const spans = computeSelectionSpans(
         logicalLines, start, end, width, 1, this.getPaddingX(),
       );
@@ -286,7 +294,7 @@ export class HelixEditor extends CustomEditor {
     if (matchesKey(data, "escape")) {
       if (this.mode === "select") {
         this.mode = "normal";
-        this.selectionAnchor = null;
+        this.selection = null;
         this.tui.requestRender();
         return;
       }
@@ -358,10 +366,26 @@ export class HelixEditor extends CustomEditor {
     }
 
     // ── Mode entry ────────────────────────────────────────────────────────
-    if (data === "i") { this.enterInsert(); this.tui.requestRender(); return; }
-    if (data === "a") {
+    if (data === "i") {
+      if (this.selection) {
+        const start = selectionStart(this.getLines(), this.selection);
+        this.navigateTo(start.line, start.col);
+      }
       this.enterInsert();
-      super.handleInput(SEQ.right);
+      this.tui.requestRender();
+      return;
+    }
+    if (data === "a") {
+      if (this.selection) {
+        const end = selectionEnd(this.getLines(), this.selection);
+        const text = this.getText();
+        const endOffset = lineColToOffset(this.getLines(), end.line, end.col);
+        const afterEnd = offsetToLineCol(text, Math.min(endOffset + 1, text.length));
+        this.navigateTo(afterEnd.line, afterEnd.col);
+      } else {
+        super.handleInput(SEQ.right);
+      }
+      this.enterInsert();
       this.tui.requestRender();
       return;
     }
@@ -418,12 +442,23 @@ export class HelixEditor extends CustomEditor {
   // ══════════════════════════════════════════════════════════════════════════
 
   /**
+   * Keep sel.head in sync with the cursor after any movement.
+   * Called at the end of every movement helper and navigateTo.
+   */
+  private syncSelectionHead(): void {
+    if (this.selection) {
+      this.selection = makeSelection(this.selection.anchor, this.getCursor());
+    }
+  }
+
+  /**
    * Emit a movement sequence and request a re-render.
    * In select mode the anchor stays put; the cursor moves, widening the selection.
    * In normal mode this just repositions the cursor.
    */
   private moveOrExtend(seq: string): void {
     super.handleInput(seq);
+    this.syncSelectionHead();
     this.tui.requestRender();
   }
 
@@ -434,6 +469,7 @@ export class HelixEditor extends CustomEditor {
     const next = nextWordStart(text, offset);
     const target = offsetToLineCol(text, next);
     this.navigateTo(target.line, target.col);
+    this.syncSelectionHead();
   }
 
   private moveWordPrev(): void {
@@ -443,6 +479,7 @@ export class HelixEditor extends CustomEditor {
     const prev = prevWordStart(text, offset);
     const target = offsetToLineCol(text, prev);
     this.navigateTo(target.line, target.col);
+    this.syncSelectionHead();
   }
 
   private moveWordEnd(): void {
@@ -452,6 +489,7 @@ export class HelixEditor extends CustomEditor {
     const end = nextWordEnd(text, offset);
     const target = offsetToLineCol(text, end);
     this.navigateTo(target.line, target.col);
+    this.syncSelectionHead();
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -472,6 +510,7 @@ export class HelixEditor extends CustomEditor {
     super.handleInput(SEQ.lineStart);
     for (let i = 0; i < targetCol; i++) super.handleInput(SEQ.right);
 
+    this.syncSelectionHead();
     this.tui.requestRender();
   }
 
@@ -505,35 +544,30 @@ export class HelixEditor extends CustomEditor {
   // 3f. Changes: d, c, r, x
   // ══════════════════════════════════════════════════════════════════════════
 
-  /** Resolve the effective selection offsets, falling back to a single char. */
-  private getEffectiveRange(): { start: number; end: number } {
+  /** Resolve the effective selection offsets. Returns null if no selection is active. */
+  private getEffectiveRange(): { start: number; end: number } | null {
+    if (!this.selection) return null;
     const lines = this.getLines();
-    const cursor = this.getCursor();
-
-    if (this.selectionAnchor) {
-      return selectionRange(lines, this.selectionAnchor, cursor);
-    }
-    // No selection: treat cursor position as a 0-length "selection" at point
-    const offset = lineColToOffset(lines, cursor.line, cursor.col);
-    return { start: offset, end: offset };
+    return normalizeRange(lines, this.selection);
   }
 
   private actionDelete(): void {
     const text = this.getText();
-    const { start, end } = this.getEffectiveRange();
-    if (start === end) {
-      // No real selection — delete char under cursor
+    const range = this.getEffectiveRange();
+    if (!range || !isNonEmpty(this.getLines(), this.selection!)) {
+      // No selection or zero-width selection: delete char under cursor
       super.handleInput(SEQ.deleteForward);
-      this.selectionAnchor = null;
+      this.selection = null;
       this.mode = "normal";
       this.tui.requestRender();
       return;
     }
+    const { start, end } = range;
     const { newText, cursorOffset } = deleteRange(text, start, end);
     const target = offsetToLineCol(newText, cursorOffset);
     this.setText(newText);
     this.navigateTo(target.line, target.col);
-    this.selectionAnchor = null;
+    this.selection = null;
     this.mode = "normal";
   }
 
@@ -547,21 +581,19 @@ export class HelixEditor extends CustomEditor {
     const lines = this.getLines();
     const cursor = this.getCursor();
 
-    if (this.mode === "select" && this.selectionAnchor) {
+    if (this.mode === "select" && this.selection) {
       // Already in select mode — extend to end of next line
-      const { lastLine } = linesInRange(
-        this.getText(),
-        lineColToOffset(lines, this.selectionAnchor.line, this.selectionAnchor.col),
-        lineColToOffset(lines, cursor.line, cursor.col),
-      );
+      const { lastLine } = selectionLineRange(this.getText(), lines, this.selection);
       const nextLine = Math.min(lastLine + 1, lines.length - 1);
       const nextLineEnd = (lines[nextLine] ?? "").length;
       this.navigateTo(nextLine, nextLineEnd);
     } else {
       // Enter select mode spanning the current full line
-      const lineStart = 0;
       const lineEnd = (lines[cursor.line] ?? "").length;
-      this.selectionAnchor = { line: cursor.line, col: lineStart };
+      this.selection = makeSelection(
+        { line: cursor.line, col: 0 },
+        { line: cursor.line, col: lineEnd },
+      );
       this.mode = "select";
       this.navigateTo(cursor.line, lineEnd);
     }
@@ -580,9 +612,8 @@ export class HelixEditor extends CustomEditor {
     let firstLine = cursor.line;
     let lastLine = cursor.line;
 
-    if (this.selectionAnchor) {
-      const range = selectionRange(lines, this.selectionAnchor, cursor);
-      const lr = linesInRange(text, range.start, range.end);
+    if (this.selection) {
+      const lr = selectionLineRange(text, lines, this.selection);
       firstLine = lr.firstLine;
       lastLine = lr.lastLine;
     }
@@ -610,15 +641,14 @@ export class HelixEditor extends CustomEditor {
     if (!pattern) return;
     const text = this.getText();
     const lines = this.getLines();
-    const cursor = this.getCursor();
 
     // Determine the region to search within
     let searchStart = 0;
     let searchEnd = text.length;
-    if (this.selectionAnchor) {
-      const range = selectionRange(lines, this.selectionAnchor, cursor);
-      searchStart = range.start;
-      searchEnd = range.end + 1;
+    if (this.selection) {
+      const { start, end } = normalizeRange(lines, this.selection);
+      searchStart = start;
+      searchEnd = end + 1;   // exclusive for text.slice
     }
 
     const regionText = text.slice(searchStart, searchEnd);
@@ -634,9 +664,9 @@ export class HelixEditor extends CustomEditor {
     this.search = { pattern, matches, currentIdx: 0 };
     const first = matches[0]!;
     const target = offsetToLineCol(text, first.start);
-    this.selectionAnchor = target;
-    this.mode = "select";
     const endTarget = offsetToLineCol(text, first.end);
+    this.selection = makeSelection(target, endTarget);
+    this.mode = "select";
     this.navigateTo(endTarget.line, endTarget.col);
   }
 
@@ -650,17 +680,14 @@ export class HelixEditor extends CustomEditor {
     const cursor = this.getCursor();
 
     let selectedText: string;
-    if (this.selectionAnchor) {
-      const range = selectionRange(lines, this.selectionAnchor, cursor);
-      selectedText = extractSelection(text, range.start, range.end);
+    if (this.selection) {
+      selectedText = selectionText(text, lines, this.selection);
     } else {
-      // No selection: use word under cursor
+      // No selection: use word under cursor via prevWordStart / nextWordEnd
       const offset = lineColToOffset(lines, cursor.line, cursor.col);
-      let start = offset;
-      let end = offset;
-      while (start > 0 && /\w/.test(text[start - 1]!)) start--;
-      while (end < text.length - 1 && /\w/.test(text[end + 1]!)) end++;
-      selectedText = text.slice(start, end + 1);
+      const wordStart = prevWordStart(text, offset + 1);  // +1 so current char counts
+      const wordEnd   = nextWordEnd(text, offset - 1);    // -1 so current char counts
+      selectedText = text.slice(wordStart, wordEnd + 1);
       if (!selectedText) return;
     }
 
@@ -709,9 +736,9 @@ export class HelixEditor extends CustomEditor {
 
     const match = freshMatches[idx]!;
     const target = offsetToLineCol(text, match.start);
-    this.selectionAnchor = target;
-    this.mode = "select";
     const endTarget = offsetToLineCol(text, match.end);
+    this.selection = makeSelection(target, endTarget);
+    this.mode = "select";
     this.navigateTo(endTarget.line, endTarget.col);
   }
 
@@ -792,8 +819,7 @@ export class HelixEditor extends CustomEditor {
 
   // ══════════════════════════════════════════════════════════════════════════
   // 3l. Select mode — movement already handled above via moveOrExtend.
-  // selectionAnchor is set when entering select mode; cursor moves extend it.
+  // selection.anchor is fixed when entering select mode; selection.head tracks
+  // the cursor via syncSelectionHead() called from moveOrExtend / navigateTo.
   // ══════════════════════════════════════════════════════════════════════════
-  // (No additional code needed — moveOrExtend / navigateTo work for both modes
-  // because we track selectionAnchor separately from the cursor.)
 }

@@ -14,18 +14,6 @@ The original review had 11 findings, but the `/` search binding finding is inten
 
 ---
 
-## 4. Centralize selection semantics before fixing individual commands
-
-- **Priority:** High
-- **Files:** `extensions/helix-mode/editor.ts`, `extensions/helix-mode/buffer.ts`
-- **Problem:** Selection behavior is spread across delete/change/indent/search/mode-entry paths. Commands resolve selection bounds differently, and future Helix features will become harder to add safely.
-- **Context:** Helix is selection-first. The implementation should have one source of truth for anchor/head, normalized inclusive ranges, line ranges, cursor placement before/after selections, and empty-selection behavior.
-- **Acceptance criteria:**
-  - Introduce a small `SelectionState`/helper layer that represents anchor + head and normalized ranges.
-  - All selection-consuming commands use this helper.
-  - `i` and `a` have explicit behavior for active selections, based on normalized bounds rather than whichever end currently holds the cursor.
-  - Unit-testable pure helpers live in `buffer.ts` or another dependency-light module.
-
 ## 5. Preserve selection when leaving Select mode
 
 - **Priority:** High

@@ -42,20 +42,20 @@
       "id": "13",
       "subject": "3. Remove the private tui shadowing hazard",
       "description": "Fix: HelixEditor declares private tui: TUI, while the base Editor already exposes protected tui. Private shadowing causes TypeScript inheritance/type-checking issues.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Remove the duplicate private tui field.\n- Use the inherited this.tui everywhere.\n- The extension type-checks under Pi's expected TypeScript settings.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Removing tui shadow",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778442180617,
-      "updatedAt": 1778444590682,
+      "updatedAt": 1778444763247,
       "owner": "main"
     },
     {
       "id": "14",
       "subject": "4. Centralize selection semantics",
       "description": "Fix: Selection behavior is spread across delete/change/indent/search/mode-entry paths. Commands resolve selection bounds differently.\n\nFiles: extensions/helix-mode/editor.ts, extensions/helix-mode/buffer.ts\n\nAcceptance criteria:\n- Introduce a small SelectionState/helper layer that represents anchor + head and normalized ranges.\n- All selection-consuming commands use this helper.\n- i and a have explicit behavior for active selections, based on normalized bounds rather than whichever end currently holds the cursor.\n- Unit-testable pure helpers live in buffer.ts or another dependency-light module.",
-      "status": "pending",
+      "status": "in_progress",
       "activeForm": "Centralizing selection state",
       "metadata": {},
       "blocks": [
@@ -65,7 +65,8 @@
       ],
       "blockedBy": [],
       "createdAt": 1778442191741,
-      "updatedAt": 1778442225532
+      "updatedAt": 1778444767811,
+      "owner": "main"
     },
     {
       "id": "15",
