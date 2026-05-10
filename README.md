@@ -17,14 +17,29 @@ prompts/            # Auto-discovered .md prompt templates
 pi install git:github.com/dfontana/pi-extensions
 ```
 
-## Extensions
+## Installed Packages
 
-### jj-bookmark
+| Package | Source |
+|---------|--------|
+| @tintinweb/pi-subagents | npm |
+| pi-web-access | npm |
+| @juicesharp/rpiv-ask-user-question | npm |
+| @juicesharp/rpiv-todo | npm |
+| dfontana/pi-extensions | git |
+| pi-notify | npm |
 
-Shows the current jujutsu bookmark (or git branch) in the pi footer.
+## Contents
 
-## Themes
+### Extensions
 
-### rose-pine-dawn
+**jj-bookmark** — Shows the current jujutsu bookmark (or git branch) in the pi footer. Falls back to git if not in a jj repo.
 
-Rosé Pine Dawn theme — a warm, light theme with soft pastels.
+**no-git-for-jj** — Blocks `git` commands when a `.jj/` directory is detected. Suggests the equivalent `jj` command instead.
+
+### Skills
+
+**jujutsu** — Jujutsu version control workflow. Pre-work checklist, commit discipline rules, subagent restrictions, and a git→jj command reference.
+
+### Themes
+
+**rose-pine-dawn** — Rosé Pine Dawn theme — a warm, light theme with soft pastels.
