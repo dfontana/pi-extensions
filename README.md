@@ -25,7 +25,7 @@ pi install git:github.com/dfontana/pi-extensions
 - npm:@tintinweb/pi-tasks
 - npm:pi-notify
 - npm:@plannotator/pi-extension
-- git:dfontana/pi-extensions
+- git:github.com/dfontana/pi-extensions
 
 ## Contents
 
