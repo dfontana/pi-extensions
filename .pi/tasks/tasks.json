@@ -29,26 +29,27 @@
       "id": "12",
       "subject": "2. Let app-level and extension shortcuts still work",
       "description": "Fix: Normal/Select mode swallows printable characters that are not recognized modal bindings, preventing app-level actions or extension-registered shortcuts from firing.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Modal bindings still prevent accidental text insertion in Normal/Select mode.\n- Extension shortcuts and app-level actions continue to be checked before unhandled keys are swallowed.\n- There is a documented policy for conflicts between Helix modal keys and global shortcuts.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Planning shortcut passthrough",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778442173553,
-      "updatedAt": 1778443563803,
+      "updatedAt": 1778444586633,
       "owner": "main"
     },
     {
       "id": "13",
       "subject": "3. Remove the private tui shadowing hazard",
       "description": "Fix: HelixEditor declares private tui: TUI, while the base Editor already exposes protected tui. Private shadowing causes TypeScript inheritance/type-checking issues.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Remove the duplicate private tui field.\n- Use the inherited this.tui everywhere.\n- The extension type-checks under Pi's expected TypeScript settings.",
-      "status": "pending",
+      "status": "in_progress",
       "activeForm": "Removing tui shadow",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778442180617,
-      "updatedAt": 1778442180617
+      "updatedAt": 1778444590682,
+      "owner": "main"
     },
     {
       "id": "14",

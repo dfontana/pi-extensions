@@ -14,16 +14,6 @@ The original review had 11 findings, but the `/` search binding finding is inten
 
 ---
 
-## 3. Remove the `private tui` shadowing hazard
-
-- **Priority:** High
-- **Files:** `extensions/helix-mode/editor.ts`
-- **Problem:** `HelixEditor` declares `private tui: TUI`, while the base `Editor` already exposes `protected tui`. Private shadowing can cause TypeScript inheritance/type-checking issues.
-- **Acceptance criteria:**
-  - Remove the duplicate `private tui` field.
-  - Use the inherited `this.tui` everywhere.
-  - The extension type-checks under Pi's expected TypeScript settings.
-
 ## 4. Centralize selection semantics before fixing individual commands
 
 - **Priority:** High

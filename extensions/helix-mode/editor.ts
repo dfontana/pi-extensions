@@ -97,12 +97,8 @@ export class HelixEditor extends CustomEditor {
   private labelMap: LabelMap = new Map();
   private lastRenderWidth = 80;
 
-  // ── TUI reference (for requestRender) ────────────────────────────────────
-  private tui: TUI;
-
   constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
     super(tui, theme, keybindings);
-    this.tui = tui;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
