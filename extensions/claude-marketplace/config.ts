@@ -37,7 +37,7 @@
  * Local paths skip all git operations and are never "updated".
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -57,6 +57,12 @@ export interface MarketplaceEntry {
   branch?: string;
   /** Plugin names to install.  Must match keys in marketplace.json. */
   plugins: string[];
+  /**
+   * Plugin names to disable.  Must be a subset of `plugins`.
+   * Disabled plugins are excluded from `resources_discover` but still
+   * pulled during background sync.
+   */
+  disabledPlugins?: string[];
 }
 
 export interface MarketplaceConfig {
@@ -104,7 +110,7 @@ function validateEntry(raw: unknown, index: number): MarketplaceEntry {
     throw new Error(`marketplaces[${index}] must be an object`);
   }
 
-  const { name, source, branch, plugins } = raw as Record<string, unknown>;
+  const { name, source, branch, plugins, disabledPlugins } = raw as Record<string, unknown>;
 
   if (typeof name !== "string" || name.trim() === "") {
     throw new Error(`marketplaces[${index}].name must be a non-empty string`);
@@ -124,11 +130,32 @@ function validateEntry(raw: unknown, index: number): MarketplaceEntry {
     }
   }
 
+  const pluginSet = new Set((plugins as string[]).map((p) => p.trim()));
+  let validatedDisabledPlugins: string[] | undefined;
+  if (disabledPlugins !== undefined) {
+    if (!Array.isArray(disabledPlugins)) {
+      throw new Error(`marketplaces[${index}].disabledPlugins must be an array if provided`);
+    }
+    for (let i = 0; i < disabledPlugins.length; i++) {
+      if (typeof disabledPlugins[i] !== "string" || (disabledPlugins[i] as string).trim() === "") {
+        throw new Error(`marketplaces[${index}].disabledPlugins[${i}] must be a non-empty string`);
+      }
+      const dp = (disabledPlugins[i] as string).trim();
+      if (!pluginSet.has(dp)) {
+        throw new Error(
+          `marketplaces[${index}].disabledPlugins[${i}]: "${dp}" is not in plugins`,
+        );
+      }
+    }
+    validatedDisabledPlugins = (disabledPlugins as string[]).map((p) => p.trim());
+  }
+
   return {
     name: name.trim(),
     source: source.trim(),
     branch: typeof branch === "string" ? branch.trim() : undefined,
     plugins: (plugins as string[]).map((p) => p.trim()),
+    ...(validatedDisabledPlugins !== undefined ? { disabledPlugins: validatedDisabledPlugins } : {}),
   };
 }
 
@@ -242,6 +269,84 @@ export function loadConfig(cwd: string): LoadConfigResult {
   }
 
   return { config, globalPath: foundGlobal, projectPath: foundProject };
+}
+
+/**
+ * Update the `disabledPlugins` list for a marketplace entry in the appropriate
+ * config file.  The project config is preferred over the global config when
+ * the entry is found in both.
+ *
+ * @param marketplaceName  Name of the marketplace entry to update.
+ * @param pluginName       Plugin to enable or disable.
+ * @param action           `'disable'` adds the plugin; `'enable'` removes it.
+ * @param configPaths      Paths returned by `loadConfig`.
+ */
+export function updateDisabledPlugins(
+  marketplaceName: string,
+  pluginName: string,
+  action: "disable" | "enable",
+  configPaths: { projectPath: string | null; globalPath: string | null },
+): void {
+  // Prefer the project config if the entry lives there, otherwise fall back to global.
+  const targetPath = (() => {
+    for (const p of [configPaths.projectPath, configPaths.globalPath]) {
+      if (!p || !existsSync(p)) continue;
+      try {
+        const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+        const marketplaces = raw["marketplaces"];
+        if (
+          Array.isArray(marketplaces) &&
+          (marketplaces as Array<Record<string, unknown>>).some(
+            (m) => m["name"] === marketplaceName,
+          )
+        ) {
+          return p;
+        }
+      } catch {
+        // Unparseable file — skip
+      }
+    }
+    return null;
+  })();
+
+  if (!targetPath) {
+    throw new Error(
+      `Cannot find a config file containing marketplace "${marketplaceName}".`,
+    );
+  }
+
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(readFileSync(targetPath, "utf8")) as Record<string, unknown>;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to read/parse ${targetPath}: ${msg}`);
+  }
+
+  const marketplaces = raw["marketplaces"] as Array<Record<string, unknown>>;
+  const entry = marketplaces.find((m) => m["name"] === marketplaceName);
+  if (!entry) {
+    throw new Error(`Marketplace "${marketplaceName}" not found in ${targetPath}.`);
+  }
+
+  const existing = Array.isArray(entry["disabledPlugins"])
+    ? (entry["disabledPlugins"] as string[])
+    : [];
+
+  let updated: string[];
+  if (action === "disable") {
+    updated = existing.includes(pluginName) ? existing : [...existing, pluginName];
+  } else {
+    updated = existing.filter((p) => p !== pluginName);
+  }
+
+  if (updated.length === 0) {
+    delete entry["disabledPlugins"];
+  } else {
+    entry["disabledPlugins"] = updated;
+  }
+
+  writeFileSync(targetPath, JSON.stringify(raw, null, 2) + "\n", "utf8");
 }
 
 /** Returns true if `source` is a local filesystem path (not a URL or shorthand). */

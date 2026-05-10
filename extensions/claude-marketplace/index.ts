@@ -11,23 +11,32 @@
  *
  * On startup:
  *   1. Merge global + project configs.
- *   2. Clone any marketplace repos that haven't been fetched yet (blocking).
- *   3. Register a `resources_discover` handler that injects skill directories
- *      from every configured plugin.
- *   4. Register a `session_start` handler that pulls stale repos and shows a
- *      brief status line while running.
+ *   2. Start async clones for any marketplace repos not yet cached.
+ *   3. Register a `resources_discover` handler that waits for clones then
+ *      injects skill directories from every enabled plugin.
+ *   4. Register a `session_start` handler that surfaces clone errors and
+ *      triggers background stale pulls.
  *
- * Commands (always registered, even with no config):
- *   /marketplace update          Force-pull all marketplaces now.
- *   /marketplace status          Show last-updated time and loaded plugins.
- *   /marketplace list <name>     List all available plugin names in a marketplace.
+ * Command:
+ *   /marketplace   Open the marketplace manager TUI.
+ *                  ↑↓ navigate · Enter: toggle plugin on/off
+ *                  U: pull selected marketplace · Esc: close
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { type MarketplaceConfig, type MarketplaceEntry, isLocalSource, loadConfig, piAgentDir } from "./config.ts";
-import { ensureCloned, forcePull, marketplaceCacheDir, pullIfStale, resolvePluginPaths } from "./fetcher.ts";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import {
+  type LoadConfigResult,
+  type MarketplaceConfig,
+  type MarketplaceEntry,
+  isLocalSource,
+  loadConfig,
+  piAgentDir,
+  updateDisabledPlugins,
+} from "./config.ts";
+import { ensureCloned, forcePull, pullIfStale, resolvePluginPaths } from "./fetcher.ts";
 import { lastUpdated } from "./state.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -43,31 +52,16 @@ function resolveAllPaths(config: MarketplaceConfig): { skillPaths: string[]; war
   return { skillPaths, warnings };
 }
 
-/** Human-readable relative time, e.g. "3 hours ago". */
+/** Human-readable relative time, e.g. "3h ago". */
 function relativeTime(date: Date): string {
   const diffMs = Date.now() - date.getTime();
   const mins = Math.floor(diffMs / 60_000);
   if (mins < 1) return "just now";
-  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs} hour${hrs === 1 ? "" : "s"} ago`;
+  if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
-}
-
-/** Read available plugin names from a marketplace's marketplace.json. */
-function listAvailablePlugins(entry: MarketplaceEntry): string[] {
-  const marketplaceRoot = isLocalSource(entry.source)
-    ? resolve(entry.source)
-    : marketplaceCacheDir(entry.name);
-
-  const jsonPath = join(marketplaceRoot, ".claude-plugin", "marketplace.json");
-  if (!existsSync(jsonPath)) {
-    throw new Error(`marketplace.json not found at ${jsonPath}`);
-  }
-
-  const raw = JSON.parse(readFileSync(jsonPath, "utf8")) as { plugins: Array<{ name: string }> };
-  return (raw.plugins ?? []).map((p) => p.name).sort();
+  return `${days}d ago`;
 }
 
 function noConfigMessage(): string {
@@ -94,30 +88,33 @@ export default async function (pi: ExtensionAPI) {
 
   // ── Load config ──────────────────────────────────────────────────────────
   // A config error is non-fatal: we still register the command so the user
-  // can see the error via /marketplace status rather than a silent failure.
+  // can see the error via /marketplace rather than a silent failure.
 
   let config: MarketplaceConfig | null = null;
   let configError: string | null = null;
+  let configPaths: Pick<LoadConfigResult, "projectPath" | "globalPath"> = {
+    projectPath: null,
+    globalPath: null,
+  };
 
   try {
     const result = loadConfig(cwd);
     config = result.config;
+    configPaths = { projectPath: result.projectPath, globalPath: result.globalPath };
   } catch (err: unknown) {
     configError = err instanceof Error ? err.message : String(err);
   }
 
-  // ── Clone missing marketplace repos (blocking, runs before events fire) ──
+  // ── Start async clones (non-blocking) ────────────────────────────────────
+  // Each remote marketplace gets a single shared Promise that both
+  // resources_discover and session_start can await without re-running work.
 
-  const cloneErrors: string[] = [];
+  const clonePromises = new Map<string, Promise<void>>();
 
   if (config && config.marketplaces.length > 0) {
     for (const entry of config.marketplaces) {
       if (isLocalSource(entry.source)) continue;
-      try {
-        ensureCloned(entry);
-      } catch (err: unknown) {
-        cloneErrors.push(err instanceof Error ? err.message : String(err));
-      }
+      clonePromises.set(entry.name, ensureCloned(entry));
     }
   }
 
@@ -125,6 +122,13 @@ export default async function (pi: ExtensionAPI) {
 
   pi.on("resources_discover", async (_event, _ctx) => {
     if (!config || config.marketplaces.length === 0) return { skillPaths: [] };
+
+    // Wait for all in-flight clones before resolving paths.  allSettled so
+    // that a single failed clone doesn't prevent other repos from loading.
+    if (clonePromises.size > 0) {
+      await Promise.allSettled(clonePromises.values());
+    }
+
     const { skillPaths, warnings } = resolveAllPaths(config);
     for (const w of warnings) {
       console.warn(`[claude-marketplace] ${w}`);
@@ -138,25 +142,45 @@ export default async function (pi: ExtensionAPI) {
     if (configError) {
       ctx.ui.notify(`claude-marketplace: config error — ${configError}`, "error");
     }
-    for (const err of cloneErrors) {
-      ctx.ui.notify(`claude-marketplace: ${err}`, "error");
+
+    // ── Await any in-progress initial clones and surface errors ──────────
+    if (clonePromises.size > 0) {
+      (async () => {
+        ctx.ui.setStatus("claude-marketplace", "↓ cloning marketplaces…");
+        const results = await Promise.allSettled(clonePromises.values());
+        ctx.ui.setStatus("claude-marketplace", "");
+
+        for (const result of results) {
+          if (result.status === "rejected") {
+            const msg = result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason);
+            ctx.ui.notify(`claude-marketplace: ${msg}`, "error");
+          }
+        }
+      })();
     }
 
+    // ── Background stale-pull check ──────────────────────────────────────
     if (!config || config.marketplaces.length === 0 || config.updateIntervalHours === 0) return;
 
     const remoteEntries = config.marketplaces.filter((e) => !isLocalSource(e.source));
     if (remoteEntries.length === 0) return;
 
     (async () => {
+      // Let the clone phase finish first so we don't race against a fresh checkout.
+      if (clonePromises.size > 0) {
+        await Promise.allSettled(clonePromises.values());
+      }
+
       ctx.ui.setStatus("claude-marketplace", "↻ checking for marketplace updates…");
-      await new Promise((r) => setTimeout(r, 0));
 
       const updated: string[] = [];
       const errors: string[] = [];
 
       for (const entry of remoteEntries) {
         try {
-          const pulled = pullIfStale(entry, config!.updateIntervalHours);
+          const pulled = await pullIfStale(entry, config!.updateIntervalHours);
           if (pulled) updated.push(entry.name);
         } catch (err: unknown) {
           errors.push(err instanceof Error ? err.message : String(err));
@@ -177,147 +201,235 @@ export default async function (pi: ExtensionAPI) {
     })();
   });
 
-  // ── /marketplace command (always registered) ──────────────────────────────
+  // ── /marketplace command ──────────────────────────────────────────────────
 
   pi.registerCommand("marketplace", {
-    description: "Manage Claude marketplace plugins: update | status | list <marketplace>",
-    handler: async (args, ctx) => {
-      const [subcommand, ...rest] = (args ?? "").trim().split(/\s+/);
+    description: "Open the marketplace manager (toggle plugins, pull updates)",
+    handler: async (_args, ctx) => {
+      if (configError) {
+        ctx.ui.notify(`Config error: ${configError}`, "error");
+        return;
+      }
+      if (!config || config.marketplaces.length === 0) {
+        ctx.ui.notify(noConfigMessage(), "info");
+        return;
+      }
 
-      // ── update ────────────────────────────────────────────────────────────
-      if (!subcommand || subcommand === "update") {
-        if (!config || config.marketplaces.length === 0) {
-          ctx.ui.notify(noConfigMessage(), "info");
-          return;
+      // ── Build the row model ────────────────────────────────────────────
+      type UpdateStatus = "idle" | "running" | "ok" | "fail";
+      interface MarketplaceRow {
+        kind: "marketplace";
+        entry: MarketplaceEntry;
+        updateStatus: UpdateStatus;
+      }
+      interface PluginRow {
+        kind: "plugin";
+        entry: MarketplaceEntry;
+        name: string;
+        enabled: boolean;
+      }
+      type Row = MarketplaceRow | PluginRow;
+
+      const rows: Row[] = [];
+      for (const entry of config.marketplaces) {
+        rows.push({ kind: "marketplace", entry, updateStatus: "idle" });
+        const disabledSet = new Set(entry.disabledPlugins ?? []);
+        for (const name of entry.plugins) {
+          rows.push({ kind: "plugin", entry, name, enabled: !disabledSet.has(name) });
+        }
+      }
+
+      // ── Open the TUI ──────────────────────────────────────────────────
+      const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+      const changed = await ctx.ui.custom<boolean>((tui, theme, _keybindings, done) => {
+        let cursor = 0;
+        let dirty = false;
+        let spinnerFrame = 0;
+        let spinnerTimer: ReturnType<typeof setInterval> | null = null;
+        const errors: string[] = [];
+
+        function startSpinner() {
+          if (spinnerTimer !== null) return;
+          spinnerTimer = setInterval(() => {
+            spinnerFrame = (spinnerFrame + 1) % SPINNER.length;
+            tui.requestRender();
+          }, 80);
         }
 
-        ctx.ui.setStatus("claude-marketplace", "↻ pulling all marketplaces…");
-        const results: string[] = [];
-
-        for (const entry of config.marketplaces) {
-          if (isLocalSource(entry.source)) {
-            results.push(`  ${entry.name}: local path, skipped`);
-            continue;
-          }
-          try {
-            ensureCloned(entry);
-            forcePull(entry);
-            results.push(`  ${entry.name}: ✓ updated`);
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            results.push(`  ${entry.name}: ✗ ${msg}`);
+        function stopSpinnerIfIdle() {
+          if (rows.some((r) => r.kind === "marketplace" && r.updateStatus === "running")) return;
+          if (spinnerTimer !== null) {
+            clearInterval(spinnerTimer);
+            spinnerTimer = null;
           }
         }
 
-        ctx.ui.setStatus("claude-marketplace", "");
+        return {
+          invalidate() {},
+
+          dispose() {
+            if (spinnerTimer !== null) {
+              clearInterval(spinnerTimer);
+              spinnerTimer = null;
+            }
+          },
+
+          render(width: number): string[] {
+            const lines: string[] = [];
+
+            // ── Hint ──────────────────────────────────────────────────
+            const currentRow = rows[cursor];
+            const hint = currentRow?.kind === "marketplace"
+              ? "↑↓ navigate  ·  U: pull this marketplace  ·  Esc: close"
+              : "↑↓ navigate  ·  Enter: toggle plugin on/off  ·  U: pull marketplace  ·  Esc: close";
+            lines.push(theme.fg("dim", hint));
+            lines.push(theme.fg("borderMuted", "─".repeat(width)));
+
+            // ── Errors ────────────────────────────────────────────────
+            for (const err of errors) {
+              // Word-wrap long errors to width
+              const prefix = "  ✗ ";
+              const maxLen = width - prefix.length;
+              const chunks: string[] = [];
+              for (let i = 0; i < err.length; i += maxLen) {
+                chunks.push(err.slice(i, i + maxLen));
+              }
+              for (const chunk of chunks) {
+                lines.push(theme.fg("error", prefix + chunk));
+              }
+            }
+
+            // ── Rows ──────────────────────────────────────────────────
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              const selected = i === cursor;
+              const cursorGlyph = selected ? theme.fg("accent", "›") : " ";
+
+              if (row.kind === "marketplace") {
+                // Status badge on the right
+                let badge = "";
+                if (row.updateStatus === "running") {
+                  badge = " " + theme.fg("accent", SPINNER[spinnerFrame]);
+                } else if (row.updateStatus === "ok") {
+                  badge = " " + theme.fg("success", "✓");
+                } else if (row.updateStatus === "fail") {
+                  badge = " " + theme.fg("error", "✗");
+                }
+
+                const lu = lastUpdated(row.entry.name);
+                const age = lu && !isLocalSource(row.entry.source)
+                  ? theme.fg("dim", ` (${relativeTime(lu)})`)
+                  : "";
+
+                const label = selected
+                  ? theme.fg("accent", row.entry.name)
+                  : theme.bold(row.entry.name);
+
+                // Compose: "› label (age)   badge"
+                const rawLabel = row.entry.name;
+                const rawAge = lu && !isLocalSource(row.entry.source) ? ` (${relativeTime(lu)})` : "";
+                const badgeW = badge ? 2 : 0; // space + glyph
+                const pad = Math.max(1, width - 2 - rawLabel.length - rawAge.length - badgeW);
+                lines.push(`${cursorGlyph} ${label}${age}${" ".repeat(pad)}${badge}`);
+              } else {
+                // Plugin row
+                const valueRaw = row.enabled ? "enabled" : "disabled";
+                const valueStr = row.enabled
+                  ? theme.fg("success", valueRaw)
+                  : theme.fg("dim", valueRaw);
+
+                const rawLabel = `    ${row.name}`;
+                const label = selected
+                  ? theme.fg("accent", rawLabel)
+                  : theme.fg(row.enabled ? "text" : "dim", rawLabel);
+
+                const pad = Math.max(1, width - 2 - rawLabel.length - valueRaw.length);
+                lines.push(`${cursorGlyph} ${label}${" ".repeat(pad)}${valueStr}`);
+              }
+            }
+
+            return lines;
+          },
+
+          handleInput(data: string) {
+            // ── Navigation ──────────────────────────────────────────
+            if (matchesKey(data, Key.up)) {
+              cursor = Math.max(0, cursor - 1);
+              tui.requestRender();
+              return;
+            }
+            if (matchesKey(data, Key.down)) {
+              cursor = Math.min(rows.length - 1, cursor + 1);
+              tui.requestRender();
+              return;
+            }
+
+            // ── Esc: close ──────────────────────────────────────────
+            if (matchesKey(data, Key.escape)) {
+              done(dirty);
+              return;
+            }
+
+            // ── Enter: toggle plugin ─────────────────────────────────
+            if (matchesKey(data, Key.enter)) {
+              const row = rows[cursor];
+              if (row?.kind !== "plugin") return;
+
+              const next = !row.enabled;
+              row.enabled = next;
+              try {
+                updateDisabledPlugins(
+                  row.entry.name,
+                  row.name,
+                  next ? "enable" : "disable",
+                  configPaths,
+                );
+                dirty = true;
+              } catch (err: unknown) {
+                // Revert the in-memory toggle on write failure
+                row.enabled = !next;
+                errors.push(err instanceof Error ? err.message : String(err));
+              }
+              tui.requestRender();
+              return;
+            }
+
+            // ── U: pull marketplace ──────────────────────────────────
+            if (data === "u" || data === "U") {
+              const row = rows[cursor];
+              if (row?.kind !== "marketplace") return;
+              if (row.updateStatus === "running") return;
+              if (isLocalSource(row.entry.source)) return;
+
+              row.updateStatus = "running";
+              startSpinner();
+              tui.requestRender();
+
+              forcePull(row.entry)
+                .then(() => {
+                  row.updateStatus = "ok";
+                  stopSpinnerIfIdle();
+                  tui.requestRender();
+                })
+                .catch((err: unknown) => {
+                  row.updateStatus = "fail";
+                  errors.push(err instanceof Error ? err.message : String(err));
+                  stopSpinnerIfIdle();
+                  tui.requestRender();
+                });
+              return;
+            }
+          },
+        };
+      });
+
+      if (changed) {
         ctx.ui.notify(
-          `claude-marketplace update\n${results.join("\n")}\n\nRun /reload to apply changes.`,
+          "Plugin visibility updated. Run /reload to apply changes.",
           "info",
         );
-        return;
       }
-
-      // ── status ────────────────────────────────────────────────────────────
-      if (subcommand === "status") {
-        if (configError) {
-          ctx.ui.notify(`Config error: ${configError}`, "error");
-          return;
-        }
-        if (!config || config.marketplaces.length === 0) {
-          ctx.ui.notify(noConfigMessage(), "info");
-          return;
-        }
-
-        const lines: string[] = ["Claude Marketplace Status", "─".repeat(40)];
-        lines.push(`Update interval: ${config.updateIntervalHours === 0 ? "disabled" : `every ${config.updateIntervalHours}h`}`);
-        lines.push("");
-
-        for (const entry of config.marketplaces) {
-          const lu = lastUpdated(entry.name);
-          const when = isLocalSource(entry.source)
-            ? "(local path)"
-            : lu ? relativeTime(lu) : "never";
-
-          lines.push(entry.name);
-          lines.push(`  source:   ${entry.source}`);
-          lines.push(`  plugins:  ${entry.plugins.join(", ")}`);
-          lines.push(`  updated:  ${when}`);
-
-          const { skillPaths, warnings } = resolvePluginPaths(entry);
-          let totalSkills = 0;
-          for (const sp of skillPaths) {
-            if (existsSync(sp)) {
-              totalSkills += readdirSync(sp, { withFileTypes: true })
-                .filter((d) => d.isDirectory()).length;
-            }
-          }
-          lines.push(`  skills:   ${totalSkills} loaded`);
-          for (const w of warnings) lines.push(`  ⚠ ${w}`);
-          lines.push("");
-        }
-
-        ctx.ui.notify(lines.join("\n"), "info");
-        return;
-      }
-
-      // ── list ──────────────────────────────────────────────────────────────
-      if (subcommand === "list") {
-        if (!config || config.marketplaces.length === 0) {
-          ctx.ui.notify(noConfigMessage(), "info");
-          return;
-        }
-
-        const target = rest.join(" ").trim();
-        if (!target) {
-          ctx.ui.notify(
-            "Usage: /marketplace list <marketplace-name>\n\nConfigured: " +
-            config.marketplaces.map((m) => m.name).join(", "),
-            "info",
-          );
-          return;
-        }
-
-        const entry = config.marketplaces.find((m) => m.name === target);
-        if (!entry) {
-          ctx.ui.notify(
-            `Unknown marketplace "${target}". Configured: ${config.marketplaces.map((m) => m.name).join(", ")}`,
-            "error",
-          );
-          return;
-        }
-
-        if (!isLocalSource(entry.source)) {
-          try {
-            ensureCloned(entry);
-          } catch (err: unknown) {
-            ctx.ui.notify(`Failed to access "${target}": ${err instanceof Error ? err.message : String(err)}`, "error");
-            return;
-          }
-        }
-
-        try {
-          const plugins = listAvailablePlugins(entry);
-          const installed = new Set(entry.plugins);
-          ctx.ui.notify([
-            `Available plugins in "${target}" (${plugins.length} total):`,
-            `Configured: ${entry.plugins.join(", ")}`,
-            "─".repeat(40),
-            ...plugins.map((p) => `  ${installed.has(p) ? "✓" : " "} ${p}`),
-          ].join("\n"), "info");
-        } catch (err: unknown) {
-          ctx.ui.notify(`Failed to list plugins for "${target}": ${err instanceof Error ? err.message : String(err)}`, "error");
-        }
-        return;
-      }
-
-      // ── unknown subcommand ────────────────────────────────────────────────
-      ctx.ui.notify(
-        `Unknown subcommand "${subcommand}". Usage:\n` +
-        "  /marketplace update          Pull all marketplaces now\n" +
-        "  /marketplace status          Show status and loaded skills\n" +
-        "  /marketplace list <name>     List available plugins in a marketplace",
-        "error",
-      );
     },
   });
 }

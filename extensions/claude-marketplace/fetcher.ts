@@ -19,9 +19,10 @@
  * }
  */
 
-import { execSync } from "node:child_process";
+import { exec as execCallback } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { type MarketplaceEntry, isLocalSource, piAgentDir, toCloneUrl } from "./config.ts";
 import { isStale, markUpdated } from "./state.ts";
 
@@ -42,6 +43,8 @@ export interface ResolvedPaths {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+const execAsync = promisify(execCallback);
+
 function cacheDir(): string {
   return join(piAgentDir(), "marketplace-cache");
 }
@@ -51,12 +54,8 @@ export function marketplaceCacheDir(name: string): string {
   return join(cacheDir(), name);
 }
 
-function exec(command: string, cwd: string): void {
-  execSync(command, {
-    cwd,
-    stdio: "pipe", // capture output; callers handle errors
-    timeout: 120_000,
-  });
+async function exec(command: string, cwd: string): Promise<void> {
+  await execAsync(command, { cwd, timeout: 120_000 });
 }
 
 /** Returns true if the source looks like a GitHub URL (shorthand or HTTPS). */
@@ -77,7 +76,7 @@ function isGithubSource(source: string): boolean {
  *
  * @throws if the clone command fails.
  */
-export function ensureCloned(entry: MarketplaceEntry): void {
+export async function ensureCloned(entry: MarketplaceEntry): Promise<void> {
   if (isLocalSource(entry.source)) return; // Local path — nothing to clone
 
   const dest = marketplaceCacheDir(entry.name);
@@ -94,12 +93,12 @@ export function ensureCloned(entry: MarketplaceEntry): void {
     if (isGithubSource(entry.source)) {
       // gh repo clone accepts "org/repo" or a full URL
       const ghTarget = cloneUrl.replace("https://github.com/", "");
-      exec(
+      await exec(
         `gh repo clone ${ghTarget} "${dest}" -- --depth=1 --branch=${branch}`,
         cacheDir(),
       );
     } else {
-      exec(
+      await exec(
         `git clone --depth=1 --branch=${branch} ${cloneUrl} "${dest}"`,
         cacheDir(),
       );
@@ -129,22 +128,22 @@ export function ensureCloned(entry: MarketplaceEntry): void {
  * @returns              true if a pull was performed, false if skipped.
  * @throws               if the pull command fails.
  */
-export function pullIfStale(entry: MarketplaceEntry, intervalHours: number): boolean {
+export async function pullIfStale(entry: MarketplaceEntry, intervalHours: number): Promise<boolean> {
   if (isLocalSource(entry.source)) return false;
   if (!isStale(entry.name, intervalHours)) return false;
 
   const dest = marketplaceCacheDir(entry.name);
   if (!existsSync(dest)) {
     // Cache dir disappeared — re-clone instead
-    ensureCloned(entry);
+    await ensureCloned(entry);
     return true;
   }
 
   try {
     if (isGithubSource(entry.source)) {
-      exec("gh repo sync --force", dest);
+      await exec("gh repo sync --force", dest);
     } else {
-      exec("git pull --ff-only", dest);
+      await exec("git pull --ff-only", dest);
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -167,20 +166,20 @@ export function pullIfStale(entry: MarketplaceEntry, intervalHours: number): boo
  *
  * @throws if the pull command fails.
  */
-export function forcePull(entry: MarketplaceEntry): void {
+export async function forcePull(entry: MarketplaceEntry): Promise<void> {
   if (isLocalSource(entry.source)) return;
 
   const dest = marketplaceCacheDir(entry.name);
   if (!existsSync(dest)) {
-    ensureCloned(entry);
+    await ensureCloned(entry);
     return;
   }
 
   try {
     if (isGithubSource(entry.source)) {
-      exec("gh repo sync --force", dest);
+      await exec("gh repo sync --force", dest);
     } else {
-      exec("git pull --ff-only", dest);
+      await exec("git pull --ff-only", dest);
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -278,8 +277,16 @@ export function resolvePluginPaths(entry: MarketplaceEntry): ResolvedPaths {
 
   const skillPaths: string[] = [];
   const warnings: string[] = [];
+  const disabledSet = new Set(entry.disabledPlugins ?? []);
 
   for (const pluginName of entry.plugins) {
+    if (disabledSet.has(pluginName)) {
+      console.info(
+        `[claude-marketplace] [${entry.name}] Plugin "${pluginName}" is disabled — skipping.`,
+      );
+      continue;
+    }
+
     const pluginDir = pluginMap.get(pluginName);
     if (!pluginDir) {
       warnings.push(
