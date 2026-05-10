@@ -1,27 +1,139 @@
 {
-  "nextId": 11,
+  "nextId": 20,
   "tasks": [
-    {
-      "id": "8",
-      "subject": "Helix Mode",
-      "description": "Implement a subset of helix's modal editing features (https://docs.helix-editor.com/keymap.html) in the main entry box of the TUI. We mostly need the Normal mode, select_mode (minor mode) and Insert mode. Most of the bindings can be skipped -- the important parts are the multi-selection editing, selection modifications, and the find-replace via the '*' buffer",
-      "status": "in_progress",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778433883157,
-      "updatedAt": 1778434248046
-    },
     {
       "id": "9",
       "subject": "Custom Output Style",
       "description": "Create custom output styles for the agent which change the tone and verbiage it choses its responses with. These could be playful (noir, cowboy) or practical (caveman, researcher)",
-      "status": "pending",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778434155072,
-      "updatedAt": 1778434155072
+      "updatedAt": 1778442175549
+    },
+    {
+      "id": "11",
+      "subject": "1. Preserve and compose with existing custom editors",
+      "description": "Fix: The extension unconditionally calls ctx.ui.setEditorComponent(...) and /helix off calls ctx.ui.setEditorComponent(undefined), clobbering any editor installed by another plugin.\n\nFiles: extensions/helix-mode/index.ts, extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- On session start, capture the previous editor factory before installing Helix mode.\n- /helix off restores the previous factory, not always the built-in default.\n- /helix on does not double-wrap an already-installed Helix editor.\n- session_shutdown only cleans up this extension's own editor installation and does not erase unrelated plugin state.",
+      "status": "in_progress",
+      "activeForm": "Planning editor composition",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1778442165537,
+      "updatedAt": 1778442231919,
+      "owner": "main"
+    },
+    {
+      "id": "12",
+      "subject": "2. Let app-level and extension shortcuts still work",
+      "description": "Fix: Normal/Select mode swallows printable characters that are not recognized modal bindings, preventing app-level actions or extension-registered shortcuts from firing.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Modal bindings still prevent accidental text insertion in Normal/Select mode.\n- Extension shortcuts and app-level actions continue to be checked before unhandled keys are swallowed.\n- There is a documented policy for conflicts between Helix modal keys and global shortcuts.",
+      "status": "pending",
+      "activeForm": "Planning shortcut passthrough",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1778442173553,
+      "updatedAt": 1778442173553
+    },
+    {
+      "id": "13",
+      "subject": "3. Remove the private tui shadowing hazard",
+      "description": "Fix: HelixEditor declares private tui: TUI, while the base Editor already exposes protected tui. Private shadowing causes TypeScript inheritance/type-checking issues.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Remove the duplicate private tui field.\n- Use the inherited this.tui everywhere.\n- The extension type-checks under Pi's expected TypeScript settings.",
+      "status": "pending",
+      "activeForm": "Removing tui shadow",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1778442180617,
+      "updatedAt": 1778442180617
+    },
+    {
+      "id": "14",
+      "subject": "4. Centralize selection semantics",
+      "description": "Fix: Selection behavior is spread across delete/change/indent/search/mode-entry paths. Commands resolve selection bounds differently.\n\nFiles: extensions/helix-mode/editor.ts, extensions/helix-mode/buffer.ts\n\nAcceptance criteria:\n- Introduce a small SelectionState/helper layer that represents anchor + head and normalized ranges.\n- All selection-consuming commands use this helper.\n- i and a have explicit behavior for active selections, based on normalized bounds rather than whichever end currently holds the cursor.\n- Unit-testable pure helpers live in buffer.ts or another dependency-light module.",
+      "status": "pending",
+      "activeForm": "Centralizing selection state",
+      "metadata": {},
+      "blocks": [
+        "15",
+        "16",
+        "17"
+      ],
+      "blockedBy": [],
+      "createdAt": 1778442191741,
+      "updatedAt": 1778442225532
+    },
+    {
+      "id": "15",
+      "subject": "5. Preserve selection when leaving Select mode",
+      "description": "Fix: Select-mode Escape currently switches to Normal and clears selectionAnchor, contradicting the selection-first behavior described in the plan.\n\nFiles: extensions/helix-mode/editor.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- Escape from Select mode returns to Normal without losing the active selection.\n- The mode label and selection highlight/char count behave predictably after leaving Select mode.\n- Delete/change/search/indent can still operate on the retained selection from Normal mode.",
+      "status": "pending",
+      "activeForm": "Preserving Select mode selection",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [
+        "14"
+      ],
+      "createdAt": 1778442196485,
+      "updatedAt": 1778442225531
+    },
+    {
+      "id": "16",
+      "subject": "6. Add scoped search state for s selection search",
+      "description": "Fix: actionSelectRegex() initially finds matches inside the current selection, but later n/N calls navigateMatch(), which recomputes matches globally from only the pattern, allowing navigation outside the original selection.\n\nFiles: extensions/helix-mode/editor.ts, extensions/helix-mode/buffer.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- SearchState records whether the search is global or scoped.\n- Scoped searches store and honor the selection range used to start the search.\n- n/N after s remain inside the scoped range.\n- Regular * searches continue to operate globally unless explicitly scoped by design.",
+      "status": "pending",
+      "activeForm": "Adding scoped search state",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [
+        "14"
+      ],
+      "createdAt": 1778442201893,
+      "updatedAt": 1778442225532
+    },
+    {
+      "id": "17",
+      "subject": "7. Replace fragile synthetic-key cursor navigation",
+      "description": "Fix: navigateTo() emits repeated Up/Down, line-start, and Right key sequences. Pi's editor movement is visual-line/history-aware, so wrapped lines, prompt history, and scrolling can make this land in the wrong logical position.\n\nFiles: extensions/helix-mode/editor.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- Provide a single navigation abstraction that has documented logical-line/column semantics.\n- Avoid using Up/Down visual movement for logical line targeting where possible.\n- If direct cursor-setting APIs do not exist, isolate the synthetic-key fallback behind one adapter with tests/known limitations.\n- Wrapped-line and multi-line prompt cases are manually verified.",
+      "status": "pending",
+      "activeForm": "Replacing synthetic-key navigation",
+      "metadata": {},
+      "blocks": [
+        "18"
+      ],
+      "blockedBy": [
+        "14"
+      ],
+      "createdAt": 1778442208455,
+      "updatedAt": 1778442225532
+    },
+    {
+      "id": "18",
+      "subject": "8. Rework label and selection overlay layout",
+      "description": "Fix: Overlay layout reimplements word wrapping locally and uses an incorrect content width calculation. It does not account for Pi editor scroll offset, wide graphemes, paste markers, or the editor's exact layout width.\n\nFiles: extensions/helix-mode/label-overlay.ts, extensions/helix-mode/buffer.ts, extensions/helix-mode/editor.ts\nDepends on: Task 7 (Replace synthetic-key cursor navigation)\n\nAcceptance criteria:\n- Use Pi's exported wrapping/layout utilities where possible instead of the local clone.\n- Match Pi's content/layout width calculation exactly.\n- Account for visible scroll offset or avoid drawing labels/highlights for non-visible rows.\n- gw labels and selection highlights align on wrapped lines and wide-character input.",
+      "status": "pending",
+      "activeForm": "Reworking overlay layout",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [
+        "17"
+      ],
+      "createdAt": 1778442215212,
+      "updatedAt": 1778442225532
+    },
+    {
+      "id": "19",
+      "subject": "9. Use theme colors instead of raw ANSI for mode labels",
+      "description": "Fix: getModeLabelAnsi() hardcodes raw cyan/yellow/dim ANSI sequences, bypassing the active theme.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Store/use the provided theme or ctx.ui.theme-compatible styling for labels.\n- Normal/Insert/Select labels respect active theme colors.\n- Raw ANSI is only used where no theme abstraction exists and is documented.",
+      "status": "pending",
+      "activeForm": "Applying theme colors to labels",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1778442219945,
+      "updatedAt": 1778442219945
     }
   ]
 }

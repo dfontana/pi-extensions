@@ -15,51 +15,55 @@
  *   - Selection:   s (regex within selection)
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { HelixEditor } from "./editor.js";
 
 export default function (pi: ExtensionAPI): void {
   let helixEnabled = true;
 
+  // Saved factory from before we installed our own.
+  let previousFactory: ReturnType<ExtensionUIContext["getEditorComponent"]>;
+  let helixInstalled = false;
+
+  function installHelix(ctx: ExtensionContext | ExtensionCommandContext): void {
+    if (helixInstalled) return;
+    previousFactory = ctx.ui.getEditorComponent();
+    ctx.ui.setEditorComponent(
+      (tui, theme, keybindings) => new HelixEditor(tui, theme, keybindings),
+    );
+    helixInstalled = true;
+  }
+
+  function uninstallHelix(ctx: ExtensionContext | ExtensionCommandContext): void {
+    if (!helixInstalled) return;
+    ctx.ui.setEditorComponent(previousFactory);
+    helixInstalled = false;
+    previousFactory = undefined;
+  }
+
   // ── session_start: install the helix editor ──────────────────────────────
   pi.on("session_start", (_event, ctx) => {
     if (!helixEnabled) return;
-    ctx.ui.setEditorComponent((tui, theme, keybindings) => new HelixEditor(tui, theme, keybindings));
+    installHelix(ctx);
   });
 
   // ── session_shutdown: restore default editor ─────────────────────────────
   pi.on("session_shutdown", (_event, ctx) => {
-    ctx.ui.setEditorComponent(undefined);
+    uninstallHelix(ctx);
   });
 
   // ── /helix command ────────────────────────────────────────────────────────
   pi.registerCommand("helix", {
-    description: "Toggle Helix modal editing on/off. Usage: /helix [on|off]",
-    handler: (args, ctx) => {
-      const arg = args.trim().toLowerCase();
-
-      if (arg === "on") {
-        helixEnabled = true;
-        ctx.ui.setEditorComponent((tui, theme, keybindings) => new HelixEditor(tui, theme, keybindings));
-        ctx.ui.notify("Helix mode on", "info");
-        return;
-      }
-
-      if (arg === "off") {
-        helixEnabled = false;
-        ctx.ui.setEditorComponent(undefined);
-        ctx.ui.notify("Helix mode off", "info");
-        return;
-      }
-
-      // No argument — toggle
+    description: "Toggle Helix modal editing on/off.",
+    handler: (_args, ctx) => {
+      // Always toggle — no on/off argument paths
       if (helixEnabled) {
         helixEnabled = false;
-        ctx.ui.setEditorComponent(undefined);
+        uninstallHelix(ctx);
         ctx.ui.notify("Helix mode off", "info");
       } else {
         helixEnabled = true;
-        ctx.ui.setEditorComponent((tui, theme, keybindings) => new HelixEditor(tui, theme, keybindings));
+        installHelix(ctx);
         ctx.ui.notify("Helix mode on", "info");
       }
     },
