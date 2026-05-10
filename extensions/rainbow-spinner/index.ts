@@ -10,16 +10,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_COLORS = [
-  "pine",
-  "foam",
-  "iris",
-  "rose",
-  "gold",
-  "love",
-  "pine",
-  "foam",
-  "iris",
-  "rose",
+  "accent",
+  "success",
+  "mdCode",
+  "warning",
+  "syntaxString",
+  "thinkingHigh",
+  "error",
+  "syntaxFunction",
+  "mdHeading",
+  "syntaxNumber",
 ] as const;
 
 const PHRASES = [
@@ -66,9 +66,10 @@ export default function (pi: ExtensionAPI) {
 
     const frames = SPINNER_FRAMES.map((frame, i) => {
       const color = SPINNER_COLORS[i]!;
-      return `${theme.fg(color, frame)} ${theme.fg("dim", phrase)}`;
+      return `${theme.fg(color, frame)}  ${theme.fg("dim", phrase)}`;
     });
 
     ctx.ui.setWorkingIndicator({ frames, intervalMs: 80 });
+    ctx.ui.setWorkingMessage("");
   });
 }

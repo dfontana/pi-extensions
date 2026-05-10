@@ -38,6 +38,8 @@ pi install git:github.com/dfontana/pi-extensions
 
 **no-git-for-jj** — Blocks `git` commands when a `.jj/` directory is detected. Suggests the equivalent `jj` command instead.
 
+**rainbow-spinner** — Custom working indicator: theme-colored braille spinner with a random whimsical phrase ("Pondering...", "Reticulating splines...", etc.) that changes each turn.
+
 ### Skills
 
 **jujutsu** — Jujutsu version control workflow. Pre-work checklist, commit discipline rules, subagent restrictions, and a git→jj command reference.
