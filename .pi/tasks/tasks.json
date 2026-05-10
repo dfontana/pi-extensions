@@ -1,4 +1,27 @@
 {
-  "nextId": 7,
-  "tasks": []
+  "nextId": 10,
+  "tasks": [
+    {
+      "id": "8",
+      "subject": "Helix Mode",
+      "description": "Implement a subset of helix's modal editing features (https://docs.helix-editor.com/keymap.html) in the main entry box of the TUI. We mostly need the Normal mode, select_mode (minor mode) and Insert mode. Most of the bindings can be skipped -- the important parts are the multi-selection editing, selection modifications, and the find-replace via the '*' buffer",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1778433883157,
+      "updatedAt": 1778433883157
+    },
+    {
+      "id": "9",
+      "subject": "Custom Output Style",
+      "description": "Create custom output styles for the agent which change the tone and verbiage it choses its responses with. These could be playful (noir, cowboy) or practical (caveman, researcher)",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1778434155072,
+      "updatedAt": 1778434155072
+    }
+  ]
 }

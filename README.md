@@ -134,8 +134,3 @@ Claude Code plugins can contain several types of content. Only **skills** are su
 - **Private non-GitHub repos**: Plain `git clone`/`git pull` is used. Ensure credentials are configured in your git credential helper.
 - **Shallow clones**: Repos are cloned with `--depth=1` to minimise download size. If you need full history, clone manually and use a local `source` path.
 
----
-
-## Future Ideas
-- Custom output styles -- like "caveman", "cowboy", "noir", or other themes (playful or practical)
-- modal/Helix-style input box extension
