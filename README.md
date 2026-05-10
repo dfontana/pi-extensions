@@ -31,6 +31,8 @@ pi install git:github.com/dfontana/pi-extensions
 
 ### Extensions
 
+**helix-mode** — Helix-style modal editing for the pi input box. Normal / Insert / Select modes with word-level navigation, `gw` jump-to-word labels, selection-based search (`*`, `/`, `n`/`N`), and indent/unindent. On by default; toggle with `/helix [on|off]`. See [helix-mode cheatsheet](#helix-mode-extension) below.
+
 **improved-footer** — Replaces pi's default footer with:
 - **jj bookmark support**: shows `jj:bookmark` instead of git branch, with git fallback and "(no vcs)" when neither is present
 - **Accurate OpenRouter cost**: queries OpenRouter's `/api/v1/generation` API for actual response cost instead of pi's client-side estimation (which uses static pricing and doesn't account for OpenRouter's dynamic provider pricing)
@@ -133,4 +135,87 @@ Claude Code plugins can contain several types of content. Only **skills** are su
 - **SSH auth**: The extension relies on `gh` CLI and git's ambient credential configuration. SSH key auth works as long as your `~/.gitconfig` and SSH agent are set up; no extra config needed.
 - **Private non-GitHub repos**: Plain `git clone`/`git pull` is used. Ensure credentials are configured in your git credential helper.
 - **Shallow clones**: Repos are cloned with `--depth=1` to minimise download size. If you need full history, clone manually and use a local `source` path.
+
+---
+
+## helix-mode Extension
+
+Modal editing for pi's input box, inspired by [Helix](https://helix-editor.com/).
+
+### Modes
+
+| Mode | Indicator | How to enter |
+|---|---|---|
+| Insert | `INSERT` (dim) | Start here; or `i`/`a`/`o`/`O` from Normal |
+| Normal | `NORMAL` (cyan) | `Escape` from Insert |
+| Select | `SELECT (N)` (yellow) | `v` from Normal; N = selected char count |
+
+### Normal Mode — Movement
+
+| Key | Action |
+|---|---|
+| `h` / `←` | Character left |
+| `l` / `→` | Character right |
+| `j` / `↓` | Line down |
+| `k` / `↑` | Line up |
+| `w` | Next word start |
+| `b` | Previous word start |
+| `e` | Next word end |
+| `0` / `Home` | Line start |
+| `$` / `End` | Line end |
+| `gg` | Buffer start |
+| `ge` | Buffer end |
+| `gw` | **Jump-to-word**: bold-red labels appear on word starts — type a label to jump |
+
+### Normal Mode — Mode Entry
+
+| Key | Action |
+|---|---|
+| `i` | Insert before cursor |
+| `a` | Insert after cursor |
+| `o` | Open new line below, enter Insert |
+| `O` | Open new line above, enter Insert |
+| `v` | Enter Select mode (anchor = current cursor) |
+| `Escape` | In Normal: abort agent (pi default). In Select: return to Normal. |
+
+### Normal Mode — Changes
+
+| Key | Action |
+|---|---|
+| `d` | Delete selection (or char under cursor if no selection) |
+| `c` | Change: delete selection then enter Insert |
+| `r` + char | Replace character under cursor with `char` |
+| `x` | Select current line (extend to next line if already line-selected) |
+| `>` | Indent selected lines by 2 spaces |
+| `<` | Unindent selected lines by 2 spaces |
+
+### Search & Selection
+
+| Key | Action |
+|---|---|
+| `*` | Use word under cursor (or selection) as search pattern (word-boundary wrapped) |
+| `n` | Next match (wraps) |
+| `N` | Previous match (wraps) |
+| `s` | Open regex prompt — select first match within current selection; use `n`/`N` to navigate |
+
+All search results are highlighted as Select-mode selections (anchor + cursor span the match).
+
+### Select Mode
+
+All Normal mode movement keys (`h`/`j`/`k`/`l`, arrows, `w`/`b`/`e`, `0`/`$`, `gg`/`ge`) extend the selection rather than replacing it. The char-count in the mode indicator updates live. `d`, `c`, `>`, `<`, and `s` operate on the full selection.
+
+### Command
+
+```
+/helix        # toggle on/off
+/helix on     # enable
+/helix off    # restore default editor
+```
+
+### Known limitations
+
+- No true multi-cursor (use `*` + `n`/`N` to navigate matches one at a time)
+- Selection not visually highlighted in text (only the char-count in the border label)
+- No clipboard yank (`y`); use your terminal’s copy
+- No count prefixes (`3w`, `5j` etc.)
 

@@ -1,0 +1,772 @@
+/**
+ * editor.ts — HelixEditor: a CustomEditor subclass that implements a focused
+ * subset of Helix's modal editing keymap for pi's TUI input box.
+ *
+ * Modes: INSERT (default) · NORMAL · SELECT
+ *
+ * Key bindings implemented:
+ *   Movement    h/l/j/k (+ arrow aliases), w/b/e, 0/$ (+ Home/End)
+ *   g-prefix    gg (buffer start), ge (buffer end), gw (jump-to-word labels)
+ *   Mode entry  i, a, o, O, v  (Escape → Normal)
+ *   Changes     d, c, r+char, x
+ *   Indent      > / <
+ *   Selection   s (select regex in selection)
+ *   Search      * (selection → pattern), n/N (next/prev)
+ *   Select mode All Normal movements extend the selection
+ */
+
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+
+import {
+  lineColToOffset,
+  offsetToLineCol,
+  findMatches,
+  wrapWordBoundary,
+  selectionRange,
+  extractSelection,
+  deleteRange,
+  linesInRange,
+  indentLines,
+  unindentLines,
+  nextWordStart,
+  prevWordStart,
+  nextWordEnd,
+} from "./buffer.js";
+import {
+  buildLabelMap,
+  applyLabels,
+  computeSelectionSpans,
+  applySelectionHighlight,
+} from "./label-overlay.js";
+import type { LabelMap } from "./label-overlay.js";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type Mode = "insert" | "normal" | "select";
+
+interface SearchState {
+  pattern: string;
+  matches: Array<{ start: number; end: number }>;
+  currentIdx: number;
+}
+
+interface PendingInput {
+  type: "search" | "select_regex";
+  buffer: string;
+}
+
+// ─── Escape sequences ─────────────────────────────────────────────────────────
+
+const SEQ = {
+  left: "\x1b[D",
+  right: "\x1b[C",
+  up: "\x1b[A",
+  down: "\x1b[B",
+  lineStart: "\x01",       // Ctrl+A
+  lineEnd: "\x05",         // Ctrl+E
+  deleteForward: "\x1b[3~",
+} as const;
+
+// ─── HelixEditor ──────────────────────────────────────────────────────────────
+
+export class HelixEditor extends CustomEditor {
+  // ── Mode ──────────────────────────────────────────────────────────────────
+  private mode: Mode = "insert";
+
+  // ── Selection anchor (only meaningful in normal/select when non-null) ─────
+  private selectionAnchor: { line: number; col: number } | null = null;
+
+  // ── Two-key sequence state ────────────────────────────────────────────────
+  /** Set to "g" when the user presses `g` in normal mode, waiting for second key. */
+  private pendingPrefix: string | null = null;
+
+  /** Set to true when `r` is pressed; next character replaces the char under cursor. */
+  private pendingReplace = false;
+
+  // ── Search state ─────────────────────────────────────────────────────────
+  private search: SearchState = { pattern: "", matches: [], currentIdx: -1 };
+
+  // ── Mini-prompt (for / and s) ────────────────────────────────────────────
+  private pendingInput: PendingInput | null = null;
+
+  // ── gw label mode ────────────────────────────────────────────────────────
+  private labelMode = false;
+  private labelMap: LabelMap = new Map();
+  private lastRenderWidth = 80;
+
+  // ── TUI reference (for requestRender) ────────────────────────────────────
+  private tui: TUI;
+
+  constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
+    super(tui, theme, keybindings);
+    this.tui = tui;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3a. Mode transitions + label
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private enterInsert(): void {
+    this.mode = "insert";
+    this.selectionAnchor = null;
+    this.pendingPrefix = null;
+    this.pendingReplace = false;
+    this.labelMode = false;
+    this.labelMap = new Map();
+  }
+
+  private enterNormal(): void {
+    this.mode = "normal";
+    this.selectionAnchor = null;
+    this.pendingPrefix = null;
+    this.pendingReplace = false;
+    this.labelMode = false;
+    this.labelMap = new Map();
+    this.pendingInput = null;
+  }
+
+  private enterSelect(): void {
+    this.mode = "select";
+    this.selectionAnchor = this.getCursor();
+    this.pendingPrefix = null;
+    this.pendingReplace = false;
+  }
+
+  private getModeLabel(): string {
+    if (this.mode === "insert") return " INSERT ";
+    if (this.mode === "select") {
+      const charCount = this.getSelectionCharCount();
+      return ` SELECT (${charCount}) `;
+    }
+    return " NORMAL ";
+  }
+
+  private getSelectionCharCount(): number {
+    if (!this.selectionAnchor) return 0;
+    const lines = this.getLines();
+    const { start, end } = selectionRange(lines, this.selectionAnchor, this.getCursor());
+    return end - start + 1;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // render — border label + mini-prompt + gw labels
+  // ══════════════════════════════════════════════════════════════════════════
+
+  override render(width: number): string[] {
+    this.lastRenderWidth = width;
+
+    let lines = super.render(width);
+    if (lines.length === 0) return lines;
+
+    // Selection highlight — applied before the mode label, preserves CURSOR_MARKER
+    if (this.mode === "select" && this.selectionAnchor && !this.labelMode) {
+      const logicalLines = this.getLines();
+      const { start, end } = selectionRange(logicalLines, this.selectionAnchor, this.getCursor());
+      const spans = computeSelectionSpans(
+        logicalLines, start, end, width, 1, this.getPaddingX(),
+      );
+      lines = applySelectionHighlight(lines, spans);
+    }
+
+    // In label mode, overlay the gw labels (strips ANSI — brief interaction)
+    if (this.labelMode && this.labelMap.size > 0) {
+      lines = applyLabels(lines, this.labelMap);
+    }
+
+    const last = lines.length - 1;
+
+    // Mini-prompt replaces the bottom border content
+    if (this.pendingInput !== null) {
+      const prefix = this.pendingInput.type === "search" ? "/ " : "s/ ";
+      const content = `${prefix}${this.pendingInput.buffer}█`;
+      lines[last] = truncateToWidth(content, width, "");
+      return lines;
+    }
+
+    // Mode label injected into the bottom border
+    const label = this.getModeLabel();
+    const labelWidth = visibleWidth(label);
+    const baseLine = lines[last] ?? "";
+    const truncated = truncateToWidth(baseLine, width - labelWidth, "");
+    const colored = this.getModeLabelAnsi(label);
+    lines[last] = truncated + colored;
+
+    return lines;
+  }
+
+  private getModeLabelAnsi(label: string): string {
+    // Use raw ANSI since we don't have direct theme access here.
+    // NORMAL → cyan bold, INSERT → dim, SELECT → yellow bold
+    if (this.mode === "normal") return `\x1b[1;36m${label}\x1b[0m`;
+    if (this.mode === "select") return `\x1b[1;33m${label}\x1b[0m`;
+    return `\x1b[2m${label}\x1b[0m`;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3b. handleInput dispatch
+  // ══════════════════════════════════════════════════════════════════════════
+
+  override handleInput(data: string): void {
+    // ── Label mode: consume next char as label choice ─────────────────────
+    if (this.labelMode) {
+      this.handleLabelInput(data);
+      return;
+    }
+
+    // ── Mini-prompt mode ──────────────────────────────────────────────────
+    if (this.pendingInput !== null) {
+      this.handlePromptInput(data);
+      return;
+    }
+
+    // ── Pending `r` — replace char ────────────────────────────────────────
+    if (this.pendingReplace) {
+      this.pendingReplace = false;
+      if (data.length === 1 && data.charCodeAt(0) >= 32) {
+        // Delete char under cursor then insert replacement
+        super.handleInput(SEQ.deleteForward);
+        super.handleInput(data);
+      }
+      this.tui.requestRender();
+      return;
+    }
+
+    // ── INSERT mode ───────────────────────────────────────────────────────
+    if (this.mode === "insert") {
+      if (matchesKey(data, "escape")) {
+        this.enterNormal();
+        this.tui.requestRender();
+        return;
+      }
+      super.handleInput(data);
+      return;
+    }
+
+    // ── NORMAL / SELECT mode ──────────────────────────────────────────────
+    this.handleNormalInput(data);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3c. Normal mode movement
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private handleNormalInput(data: string): void {
+    // Escape in normal mode: pass to super (aborts agent, etc.)
+    // Escape in select mode: return to normal without clearing selection position
+    if (matchesKey(data, "escape")) {
+      if (this.mode === "select") {
+        this.mode = "normal";
+        this.selectionAnchor = null;
+        this.tui.requestRender();
+        return;
+      }
+      super.handleInput(data);
+      return;
+    }
+
+    // ── g-prefix ──────────────────────────────────────────────────────────
+    if (this.pendingPrefix === "g") {
+      this.pendingPrefix = null;
+      this.handleGPrefix(data);
+      this.tui.requestRender();
+      return;
+    }
+
+    // ── Movement ──────────────────────────────────────────────────────────
+
+    // h / Left
+    if (data === "h" || matchesKey(data, "left")) {
+      this.moveOrExtend(SEQ.left);
+      return;
+    }
+    // l / Right
+    if (data === "l" || matchesKey(data, "right")) {
+      this.moveOrExtend(SEQ.right);
+      return;
+    }
+    // j / Down
+    if (data === "j" || matchesKey(data, "down")) {
+      this.moveOrExtend(SEQ.down);
+      return;
+    }
+    // k / Up
+    if (data === "k" || matchesKey(data, "up")) {
+      this.moveOrExtend(SEQ.up);
+      return;
+    }
+    // w — next word start
+    if (data === "w") {
+      this.moveWordNext();
+      return;
+    }
+    // b — prev word start
+    if (data === "b") {
+      this.moveWordPrev();
+      return;
+    }
+    // e — next word end
+    if (data === "e") {
+      this.moveWordEnd();
+      return;
+    }
+    // 0 / Home — line start
+    if (data === "0" || matchesKey(data, "home")) {
+      this.moveOrExtend(SEQ.lineStart);
+      return;
+    }
+    // $ / End — line end
+    if (data === "$" || matchesKey(data, "end")) {
+      this.moveOrExtend(SEQ.lineEnd);
+      return;
+    }
+
+    // ── g prefix ─────────────────────────────────────────────────────────
+    if (data === "g") {
+      this.pendingPrefix = "g";
+      this.tui.requestRender();
+      return;
+    }
+
+    // ── Mode entry ────────────────────────────────────────────────────────
+    if (data === "i") { this.enterInsert(); this.tui.requestRender(); return; }
+    if (data === "a") {
+      this.enterInsert();
+      super.handleInput(SEQ.right);
+      this.tui.requestRender();
+      return;
+    }
+    if (data === "o") {
+      // Open line below: insert \n at end of current line, land on the new line.
+      const { line } = this.getCursor();
+      super.handleInput(SEQ.lineEnd);
+      this.insertTextAtCursor("\n");
+      this.navigateTo(line + 1, 0);
+      this.enterInsert();
+      return;
+    }
+    if (data === "O") {
+      // Open line above: insert \n at start of current line.
+      // The new empty line takes the current line number; original content shifts down.
+      const { line } = this.getCursor();
+      super.handleInput(SEQ.lineStart);
+      this.insertTextAtCursor("\n");
+      this.navigateTo(line, 0);
+      this.enterInsert();
+      return;
+    }
+    if (data === "v") {
+      this.enterSelect();
+      this.tui.requestRender();
+      return;
+    }
+
+    // ── Changes ───────────────────────────────────────────────────────────
+    if (data === "d") { this.actionDelete(); return; }
+    if (data === "c") { this.actionChange(); return; }
+    if (data === "r") { this.pendingReplace = true; this.tui.requestRender(); return; }
+    if (data === "x") { this.actionSelectLine(); return; }
+
+    // ── Indent / unindent ─────────────────────────────────────────────────
+    if (data === ">") { this.actionIndent(true); return; }
+    if (data === "<") { this.actionIndent(false); return; }
+
+    // ── Selection manipulation ────────────────────────────────────────────
+    if (data === "s") { this.startPrompt("select_regex"); return; }
+
+    // ── Search ────────────────────────────────────────────────────────────
+    if (data === "*") { this.actionSearchSelection(true); return; }
+    if (data === "n") { this.navigateMatch(1); return; }
+    if (data === "N") { this.navigateMatch(-1); return; }
+
+    // ── Pass control sequences through; swallow printable chars in normal ─
+    if (data.length === 1 && data.charCodeAt(0) >= 32) return;
+    super.handleInput(data);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3c helpers — movement
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Emit a movement sequence and request a re-render.
+   * In select mode the anchor stays put; the cursor moves, widening the selection.
+   * In normal mode this just repositions the cursor.
+   */
+  private moveOrExtend(seq: string): void {
+    super.handleInput(seq);
+    this.tui.requestRender();
+  }
+
+  private moveWordNext(): void {
+    const text = this.getText();
+    const { line, col } = this.getCursor();
+    const offset = lineColToOffset(this.getLines(), line, col);
+    const next = nextWordStart(text, offset);
+    const target = offsetToLineCol(text, next);
+    this.navigateTo(target.line, target.col);
+  }
+
+  private moveWordPrev(): void {
+    const text = this.getText();
+    const { line, col } = this.getCursor();
+    const offset = lineColToOffset(this.getLines(), line, col);
+    const prev = prevWordStart(text, offset);
+    const target = offsetToLineCol(text, prev);
+    this.navigateTo(target.line, target.col);
+  }
+
+  private moveWordEnd(): void {
+    const text = this.getText();
+    const { line, col } = this.getCursor();
+    const offset = lineColToOffset(this.getLines(), line, col);
+    const end = nextWordEnd(text, offset);
+    const target = offsetToLineCol(text, end);
+    this.navigateTo(target.line, target.col);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3d. navigateTo — move cursor to {line, col} via key sequences
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private navigateTo(targetLine: number, targetCol: number): void {
+    const { line, col } = this.getCursor();
+    const lineDelta = targetLine - line;
+
+    if (lineDelta > 0) {
+      for (let i = 0; i < lineDelta; i++) super.handleInput(SEQ.down);
+    } else if (lineDelta < 0) {
+      for (let i = 0; i < -lineDelta; i++) super.handleInput(SEQ.up);
+    }
+
+    // Go to line start, then advance to target column
+    super.handleInput(SEQ.lineStart);
+    for (let i = 0; i < targetCol; i++) super.handleInput(SEQ.right);
+
+    this.tui.requestRender();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // g-prefix handler
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private handleGPrefix(data: string): void {
+    if (data === "g") {
+      // Buffer start
+      this.navigateTo(0, 0);
+      return;
+    }
+    if (data === "e") {
+      // Buffer end
+      const lines = this.getLines();
+      const lastLine = Math.max(0, lines.length - 1);
+      const lastCol = (lines[lastLine] ?? "").length;
+      this.navigateTo(lastLine, lastCol);
+      return;
+    }
+    if (data === "w") {
+      // Jump-to-word label mode
+      this.enterLabelMode();
+      return;
+    }
+    // Unknown second key — ignore
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3f. Changes: d, c, r, x
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Resolve the effective selection offsets, falling back to a single char. */
+  private getEffectiveRange(): { start: number; end: number } {
+    const lines = this.getLines();
+    const cursor = this.getCursor();
+
+    if (this.selectionAnchor) {
+      return selectionRange(lines, this.selectionAnchor, cursor);
+    }
+    // No selection: treat cursor position as a 0-length "selection" at point
+    const offset = lineColToOffset(lines, cursor.line, cursor.col);
+    return { start: offset, end: offset };
+  }
+
+  private actionDelete(): void {
+    const text = this.getText();
+    const { start, end } = this.getEffectiveRange();
+    if (start === end) {
+      // No real selection — delete char under cursor
+      super.handleInput(SEQ.deleteForward);
+      this.selectionAnchor = null;
+      this.mode = "normal";
+      this.tui.requestRender();
+      return;
+    }
+    const { newText, cursorOffset } = deleteRange(text, start, end);
+    const target = offsetToLineCol(newText, cursorOffset);
+    this.setText(newText);
+    this.navigateTo(target.line, target.col);
+    this.selectionAnchor = null;
+    this.mode = "normal";
+  }
+
+  private actionChange(): void {
+    this.actionDelete();
+    this.enterInsert();
+    this.tui.requestRender();
+  }
+
+  private actionSelectLine(): void {
+    const lines = this.getLines();
+    const cursor = this.getCursor();
+
+    if (this.mode === "select" && this.selectionAnchor) {
+      // Already in select mode — extend to end of next line
+      const { lastLine } = linesInRange(
+        this.getText(),
+        lineColToOffset(lines, this.selectionAnchor.line, this.selectionAnchor.col),
+        lineColToOffset(lines, cursor.line, cursor.col),
+      );
+      const nextLine = Math.min(lastLine + 1, lines.length - 1);
+      const nextLineEnd = (lines[nextLine] ?? "").length;
+      this.navigateTo(nextLine, nextLineEnd);
+    } else {
+      // Enter select mode spanning the current full line
+      const lineStart = 0;
+      const lineEnd = (lines[cursor.line] ?? "").length;
+      this.selectionAnchor = { line: cursor.line, col: lineStart };
+      this.mode = "select";
+      this.navigateTo(cursor.line, lineEnd);
+    }
+    this.tui.requestRender();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3g. Indent / Unindent
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private actionIndent(indent: boolean): void {
+    const text = this.getText();
+    const lines = this.getLines();
+    const cursor = this.getCursor();
+
+    let firstLine = cursor.line;
+    let lastLine = cursor.line;
+
+    if (this.selectionAnchor) {
+      const range = selectionRange(lines, this.selectionAnchor, cursor);
+      const lr = linesInRange(text, range.start, range.end);
+      firstLine = lr.firstLine;
+      lastLine = lr.lastLine;
+    }
+
+    const newLines = indent
+      ? indentLines(lines, firstLine, lastLine, 2)
+      : unindentLines(lines, firstLine, lastLine, 2);
+
+    const newText = newLines.join("\n");
+    this.setText(newText);
+    // Restore cursor to same logical position (adjusted for indent delta)
+    const newCursorLine = cursor.line;
+    const indentDelta = indent ? 2 : -Math.min(2, lines[cursor.line]?.match(/^ */)?.[0].length ?? 0);
+    const newCursorCol = Math.max(0, cursor.col + indentDelta);
+    this.navigateTo(newCursorLine, newCursorCol);
+    this.tui.requestRender();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3h. Selection manipulation: s (select regex in selection)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** Called when `s` mini-prompt is confirmed. Finds pattern within selection and jumps to first match. */
+  private actionSelectRegex(pattern: string): void {
+    if (!pattern) return;
+    const text = this.getText();
+    const lines = this.getLines();
+    const cursor = this.getCursor();
+
+    // Determine the region to search within
+    let searchStart = 0;
+    let searchEnd = text.length;
+    if (this.selectionAnchor) {
+      const range = selectionRange(lines, this.selectionAnchor, cursor);
+      searchStart = range.start;
+      searchEnd = range.end + 1;
+    }
+
+    const regionText = text.slice(searchStart, searchEnd);
+    const rawMatches = findMatches(regionText, pattern);
+    if (rawMatches.length === 0) return;
+
+    // Re-offset matches to absolute positions in text
+    const matches = rawMatches.map(m => ({
+      start: m.start + searchStart,
+      end: m.end - 1 + searchStart, // convert exclusive → inclusive
+    }));
+
+    this.search = { pattern, matches, currentIdx: 0 };
+    const first = matches[0]!;
+    const target = offsetToLineCol(text, first.start);
+    this.selectionAnchor = target;
+    this.mode = "select";
+    const endTarget = offsetToLineCol(text, first.end);
+    this.navigateTo(endTarget.line, endTarget.col);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3i. Search: *, /, n, N
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private actionSearchSelection(wordBoundary: boolean): void {
+    const text = this.getText();
+    const lines = this.getLines();
+    const cursor = this.getCursor();
+
+    let selectedText: string;
+    if (this.selectionAnchor) {
+      const range = selectionRange(lines, this.selectionAnchor, cursor);
+      selectedText = extractSelection(text, range.start, range.end);
+    } else {
+      // No selection: use word under cursor
+      const offset = lineColToOffset(lines, cursor.line, cursor.col);
+      let start = offset;
+      let end = offset;
+      while (start > 0 && /\w/.test(text[start - 1]!)) start--;
+      while (end < text.length - 1 && /\w/.test(text[end + 1]!)) end++;
+      selectedText = text.slice(start, end + 1);
+      if (!selectedText) return;
+    }
+
+    const pattern = wordBoundary ? wrapWordBoundary(selectedText) : selectedText;
+    this.buildSearchState(pattern);
+    // Navigate to first match after current cursor
+    this.navigateMatch(1);
+  }
+
+  private buildSearchState(pattern: string): void {
+    // Store only the pattern; navigateMatch recomputes matches from the live
+    // text each time so stale offsets are never used after edits.
+    this.search = { pattern, matches: [], currentIdx: -1 };
+  }
+
+  private navigateMatch(direction: 1 | -1): void {
+    if (!this.search.pattern) return;
+
+    // Always recompute matches from the current text so that edits (deletions,
+    // insertions) are reflected and stale offsets are never used.
+    const text = this.getText();
+    const freshMatches = findMatches(text, this.search.pattern).map(m => ({
+      start: m.start,
+      end: m.end - 1, // inclusive
+    }));
+    if (freshMatches.length === 0) return;
+
+    const { line, col } = this.getCursor();
+    const currentOffset = lineColToOffset(this.getLines(), line, col);
+
+    let idx: number;
+    if (direction === 1) {
+      // First match whose start is strictly after the cursor
+      const found = freshMatches.findIndex(m => m.start > currentOffset);
+      idx = found >= 0 ? found : 0; // wrap around
+    } else {
+      // Last match whose start is strictly before the cursor
+      let found = -1;
+      for (let i = freshMatches.length - 1; i >= 0; i--) {
+        if (freshMatches[i]!.start < currentOffset) { found = i; break; }
+      }
+      idx = found >= 0 ? found : freshMatches.length - 1; // wrap around
+    }
+
+    this.search = { pattern: this.search.pattern, matches: freshMatches, currentIdx: idx };
+
+    const match = freshMatches[idx]!;
+    const target = offsetToLineCol(text, match.start);
+    this.selectionAnchor = target;
+    this.mode = "select";
+    const endTarget = offsetToLineCol(text, match.end);
+    this.navigateTo(endTarget.line, endTarget.col);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3j. Mini prompt for / and s
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private startPrompt(type: "search" | "select_regex"): void {
+    this.pendingInput = { type, buffer: "" };
+    this.tui.requestRender();
+  }
+
+  private handlePromptInput(data: string): void {
+    if (!this.pendingInput) return;
+
+    if (matchesKey(data, "escape")) {
+      this.pendingInput = null;
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "enter")) {
+      const { type, buffer } = this.pendingInput;
+      this.pendingInput = null;
+      if (type === "search") {
+        this.buildSearchState(buffer);
+        this.navigateMatch(1);
+      } else {
+        this.actionSelectRegex(buffer);
+      }
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "backspace")) {
+      this.pendingInput.buffer = this.pendingInput.buffer.slice(0, -1);
+      this.tui.requestRender();
+      return;
+    }
+    // Append printable characters
+    if (data.length === 1 && data.charCodeAt(0) >= 32) {
+      this.pendingInput.buffer += data;
+      this.tui.requestRender();
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3k. gw — label jump mode
+  // ══════════════════════════════════════════════════════════════════════════
+
+  private enterLabelMode(): void {
+    const lines = this.getLines();
+    if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) return;
+
+    this.labelMap = buildLabelMap(lines, this.lastRenderWidth, 1, this.getPaddingX());
+    if (this.labelMap.size === 0) return;
+
+    this.labelMode = true;
+    this.tui.requestRender();
+  }
+
+  private handleLabelInput(data: string): void {
+    this.labelMode = false;
+
+    if (matchesKey(data, "escape") || data.length !== 1) {
+      this.labelMap = new Map();
+      this.tui.requestRender();
+      return;
+    }
+
+    const entry = this.labelMap.get(data);
+    this.labelMap = new Map();
+
+    if (entry) {
+      this.navigateTo(entry.logicalLine, entry.logicalCol);
+    } else {
+      this.tui.requestRender();
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 3l. Select mode — movement already handled above via moveOrExtend.
+  // selectionAnchor is set when entering select mode; cursor moves extend it.
+  // ══════════════════════════════════════════════════════════════════════════
+  // (No additional code needed — moveOrExtend / navigateTo work for both modes
+  // because we track selectionAnchor separately from the cursor.)
+}

@@ -1,16 +1,16 @@
 {
-  "nextId": 10,
+  "nextId": 11,
   "tasks": [
     {
       "id": "8",
       "subject": "Helix Mode",
       "description": "Implement a subset of helix's modal editing features (https://docs.helix-editor.com/keymap.html) in the main entry box of the TUI. We mostly need the Normal mode, select_mode (minor mode) and Insert mode. Most of the bindings can be skipped -- the important parts are the multi-selection editing, selection modifications, and the find-replace via the '*' buffer",
-      "status": "pending",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778433883157,
-      "updatedAt": 1778433883157
+      "updatedAt": 1778434248046
     },
     {
       "id": "9",
