@@ -14,17 +14,6 @@ The original review had 11 findings, but the `/` search binding finding is inten
 
 ---
 
-## 2. Let app-level and extension shortcuts still work
-
-- **Priority:** Critical
-- **Files:** `extensions/helix-mode/editor.ts`
-- **Problem:** Normal/Select mode swallows printable characters that are not recognized modal bindings. This can prevent app-level actions or extension-registered shortcuts from firing.
-- **Context:** `CustomEditor.handleInput()` checks extension shortcuts and app keybindings before falling through to text editing. Helix mode should not bypass those hooks for keys it does not own.
-- **Acceptance criteria:**
-  - Modal bindings still prevent accidental text insertion in Normal/Select mode.
-  - Extension shortcuts and app-level actions continue to be checked before unhandled keys are swallowed.
-  - There is a documented policy for conflicts between Helix modal keys and global shortcuts.
-
 ## 3. Remove the `private tui` shadowing hazard
 
 - **Priority:** High

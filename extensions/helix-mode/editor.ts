@@ -246,6 +246,37 @@ export class HelixEditor extends CustomEditor {
     }
 
     // ── NORMAL / SELECT mode ──────────────────────────────────────────────
+    // Conflict policy:
+    //   1. Helix modal bindings take absolute precedence — any key that matches
+    //      a branch in handleNormalInput fires the Helix action and returns
+    //      before this pre-check is ever reached.
+    //   2. Printable chars (charCode ≥ 32, length 1) that are NOT claimed by
+    //      Helix are offered to the global shortcut layer first:
+    //        a. Extension shortcuts registered via pi.registerShortcut() fire
+    //           if matched (onExtensionShortcut returns true).
+    //        b. App-level keybinding actions registered via onAction() fire if
+    //           matched via keybindings.matches().
+    //        c. If neither matched, the key is silently swallowed — no text
+    //           insertion in Normal/Select mode.
+    //   3. Control sequences (charCode < 32 or multi-byte) bypass the
+    //      pre-check and go straight to handleNormalInput, which already
+    //      forwards unrecognized ones to super.handleInput(data). They carry
+    //      no text-insertion risk and already reach the app keybinding layer.
+    //   4. Insert mode is unaffected — super.handleInput(data) is called for
+    //      every key there, so all shortcuts always fire.
+    if (data.length === 1 && data.charCodeAt(0) >= 32) {
+      // Step 1: extension-registered shortcuts.  The callback fires the
+      // shortcut as a side-effect and returns true if it matched.
+      if (this.onExtensionShortcut?.(data)) return;
+
+      // Step 2: app-level keybinding actions registered via onAction().
+      for (const [action, handler] of this.actionHandlers) {
+        if (this.keybindings.matches(data, action)) {
+          handler();
+          return;
+        }
+      }
+    }
     this.handleNormalInput(data);
   }
 

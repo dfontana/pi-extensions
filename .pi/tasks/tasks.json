@@ -16,26 +16,27 @@
       "id": "11",
       "subject": "1. Preserve and compose with existing custom editors",
       "description": "Fix: The extension unconditionally calls ctx.ui.setEditorComponent(...) and /helix off calls ctx.ui.setEditorComponent(undefined), clobbering any editor installed by another plugin.\n\nFiles: extensions/helix-mode/index.ts, extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- On session start, capture the previous editor factory before installing Helix mode.\n- /helix off restores the previous factory, not always the built-in default.\n- /helix on does not double-wrap an already-installed Helix editor.\n- session_shutdown only cleans up this extension's own editor installation and does not erase unrelated plugin state.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Planning editor composition",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778442165537,
-      "updatedAt": 1778442231919,
+      "updatedAt": 1778443559498,
       "owner": "main"
     },
     {
       "id": "12",
       "subject": "2. Let app-level and extension shortcuts still work",
       "description": "Fix: Normal/Select mode swallows printable characters that are not recognized modal bindings, preventing app-level actions or extension-registered shortcuts from firing.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Modal bindings still prevent accidental text insertion in Normal/Select mode.\n- Extension shortcuts and app-level actions continue to be checked before unhandled keys are swallowed.\n- There is a documented policy for conflicts between Helix modal keys and global shortcuts.",
-      "status": "pending",
+      "status": "in_progress",
       "activeForm": "Planning shortcut passthrough",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778442173553,
-      "updatedAt": 1778442173553
+      "updatedAt": 1778443563803,
+      "owner": "main"
     },
     {
       "id": "13",
