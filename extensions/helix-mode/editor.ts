@@ -508,20 +508,59 @@ export class HelixEditor extends CustomEditor {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // 3d. navigateTo — move cursor to {line, col} via key sequences
+  // 3d. navigateTo — move cursor to {line, col} (logical line/col semantics)
+  //
+  // Semantics:
+  //   - `line`  is a 0-based index into getLines() (logical lines separated by \n).
+  //   - `col`   is a 0-based character offset within that logical line.
+  //   - Both values must be within the bounds of the current text; callers are
+  //     responsible for clamping (offsetToLineCol already does this).
+  //
+  // Why Up/Down is avoided:
+  //   Up/Down arrows navigate VISUAL lines in pi's editor, not logical lines.
+  //   A logical line longer than the terminal width spans multiple visual lines,
+  //   causing off-by-N errors equal to the wrap count. Additionally, pressing Up
+  //   on the first visual line of the editor calls moveToLineStart() (no logical
+  //   line change) or navigates into shell history — corrupting editor state.
+  //
+  // Implementation — logical-line traversal:
+  //   Ctrl+E (lineEnd) and Ctrl+A (lineStart) operate on state.cursorLine, the
+  //   logical line index, and are therefore visual-wrap agnostic. Right/Left at
+  //   logical line boundaries cross \n correctly with no history side effects.
+  //
+  //   Forward (lineDelta > 0): Ctrl+E to end of current logical line, then
+  //     Right to cross \n and land at col 0 of the next logical line.
+  //   Backward (lineDelta < 0): Ctrl+A to start of current logical line, then
+  //     Left to cross \n and land at end of the previous logical line.
+  //   Final placement: Ctrl+A to col 0 of target line, then N×Right to targetCol.
+  //
+  // Known limitation — no direct setCursor() API:
+  //   CustomEditor / Editor does not expose a setCursor(line, col) method.
+  //   This implementation still uses synthetic key sequences via handleInput,
+  //   which is O(|lineDelta| + targetCol) in key events. For typical prompt
+  //   sizes this is imperceptible. A future Pi API addition of setCursor() would
+  //   allow replacing the entire body with a single atomic call.
   // ══════════════════════════════════════════════════════════════════════════
 
   private navigateTo(targetLine: number, targetCol: number): void {
-    const { line, col } = this.getCursor();
+    const { line } = this.getCursor();
     const lineDelta = targetLine - line;
 
     if (lineDelta > 0) {
-      for (let i = 0; i < lineDelta; i++) super.handleInput(SEQ.down);
+      // Advance by lineDelta logical lines using lineEnd+Right per boundary.
+      for (let i = 0; i < lineDelta; i++) {
+        super.handleInput(SEQ.lineEnd);   // Ctrl+E: jump to end of current logical line
+        super.handleInput(SEQ.right);     // Right: cross \n → land at col 0 of next logical line
+      }
     } else if (lineDelta < 0) {
-      for (let i = 0; i < -lineDelta; i++) super.handleInput(SEQ.up);
+      // Retreat by |lineDelta| logical lines using lineStart+Left per boundary.
+      for (let i = 0; i < -lineDelta; i++) {
+        super.handleInput(SEQ.lineStart); // Ctrl+A: jump to start of current logical line
+        super.handleInput(SEQ.left);      // Left: cross \n → land at end of previous logical line
+      }
     }
 
-    // Go to line start, then advance to target column
+    // Land at targetCol: go to start of target logical line, then advance right.
     super.handleInput(SEQ.lineStart);
     for (let i = 0; i < targetCol; i++) super.handleInput(SEQ.right);
 

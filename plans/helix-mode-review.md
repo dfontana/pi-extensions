@@ -14,19 +14,6 @@ The original review had 11 findings, but the `/` search binding finding is inten
 
 ---
 
-## 7. Replace fragile synthetic-key cursor navigation with a safer abstraction
-
-- **Priority:** High
-- **Depends on:** Item 4
-- **Files:** `extensions/helix-mode/editor.ts`; possibly requires Pi API changes or a local navigation adapter
-- **Problem:** `navigateTo()` emits repeated Up/Down, line-start, and Right key sequences. Pi's editor movement is visual-line/history-aware, so wrapped lines, prompt history, and scrolling can make this land in the wrong logical position.
-- **Context:** Many features depend on `navigateTo()`: search, `gg`/`ge`, `gw`, delete/change cursor restoration, line operations. Bugs in this helper will multiply as features are added.
-- **Acceptance criteria:**
-  - Provide a single navigation abstraction that has documented logical-line/column semantics.
-  - Avoid using Up/Down visual movement for logical line targeting where possible.
-  - If direct cursor-setting APIs do not exist, isolate the synthetic-key fallback behind one adapter with tests/known limitations.
-  - Wrapped-line and multi-line prompt cases are manually verified.
-
 ## 8. Rework label and selection overlay layout to match Pi's editor
 
 - **Priority:** Medium-High

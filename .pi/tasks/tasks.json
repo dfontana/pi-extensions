@@ -1,5 +1,5 @@
 {
-  "nextId": 20,
+  "nextId": 21,
   "tasks": [
     {
       "id": "9",
@@ -86,7 +86,7 @@
       "id": "17",
       "subject": "7. Replace fragile synthetic-key cursor navigation",
       "description": "Fix: navigateTo() emits repeated Up/Down, line-start, and Right key sequences. Pi's editor movement is visual-line/history-aware, so wrapped lines, prompt history, and scrolling can make this land in the wrong logical position.\n\nFiles: extensions/helix-mode/editor.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- Provide a single navigation abstraction that has documented logical-line/column semantics.\n- Avoid using Up/Down visual movement for logical line targeting where possible.\n- If direct cursor-setting APIs do not exist, isolate the synthetic-key fallback behind one adapter with tests/known limitations.\n- Wrapped-line and multi-line prompt cases are manually verified.",
-      "status": "pending",
+      "status": "in_progress",
       "activeForm": "Replacing synthetic-key navigation",
       "metadata": {},
       "blocks": [
@@ -96,7 +96,8 @@
         "14"
       ],
       "createdAt": 1778442208455,
-      "updatedAt": 1778442225532
+      "updatedAt": 1778462392854,
+      "owner": "main"
     },
     {
       "id": "18",
@@ -123,6 +124,17 @@
       "blockedBy": [],
       "createdAt": 1778442219945,
       "updatedAt": 1778442219945
+    },
+    {
+      "id": "20",
+      "subject": "Remove selection preservation from task 15",
+      "description": "Revert/remove the selection preservation behavior added in task 15 (\"Preserve selection when leaving Select mode\"). The feature feels unnatural and wrong — when leaving Select mode, the selection should be cleared rather than preserved. Find and remove the code that preserves selection state on mode exit.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1778463156401,
+      "updatedAt": 1778463156401
     }
   ]
 }
