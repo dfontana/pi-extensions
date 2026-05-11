@@ -103,7 +103,7 @@
       "id": "18",
       "subject": "8. Rework label and selection overlay layout",
       "description": "Fix: Overlay layout reimplements word wrapping locally and uses an incorrect content width calculation. It does not account for Pi editor scroll offset, wide graphemes, paste markers, or the editor's exact layout width.\n\nFiles: extensions/helix-mode/label-overlay.ts, extensions/helix-mode/buffer.ts, extensions/helix-mode/editor.ts\nDepends on: Task 7 (Replace synthetic-key cursor navigation)\n\nAcceptance criteria:\n- Use Pi's exported wrapping/layout utilities where possible instead of the local clone.\n- Match Pi's content/layout width calculation exactly.\n- Account for visible scroll offset or avoid drawing labels/highlights for non-visible rows.\n- gw labels and selection highlights align on wrapped lines and wide-character input.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Reworking overlay layout",
       "metadata": {},
       "blocks": [],
@@ -111,20 +111,21 @@
         "17"
       ],
       "createdAt": 1778442215212,
-      "updatedAt": 1778463179470,
+      "updatedAt": 1778463914675,
       "owner": "main"
     },
     {
       "id": "19",
       "subject": "9. Use theme colors instead of raw ANSI for mode labels",
       "description": "Fix: getModeLabelAnsi() hardcodes raw cyan/yellow/dim ANSI sequences, bypassing the active theme.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Store/use the provided theme or ctx.ui.theme-compatible styling for labels.\n- Normal/Insert/Select labels respect active theme colors.\n- Raw ANSI is only used where no theme abstraction exists and is documented.",
-      "status": "pending",
+      "status": "in_progress",
       "activeForm": "Applying theme colors to labels",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778442219945,
-      "updatedAt": 1778442219945
+      "updatedAt": 1778463917643,
+      "owner": "main"
     },
     {
       "id": "20",

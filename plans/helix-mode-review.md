@@ -14,13 +14,4 @@ The original review had 11 findings, but the `/` search binding finding is inten
 
 ---
 
-## 9. Use theme colors instead of raw ANSI for mode labels
 
-- **Priority:** Medium
-- **Files:** `extensions/helix-mode/editor.ts`
-- **Problem:** `getModeLabelAnsi()` hardcodes raw cyan/yellow/dim ANSI sequences, bypassing the active theme.
-- **Context:** The plan calls for theme-aware colors (`accent`, `dim`, `warning`). Hardcoded colors can clash with themes and other UI plugins.
-- **Acceptance criteria:**
-  - Store/use the provided theme or `ctx.ui.theme`-compatible styling for labels.
-  - Normal/Insert/Select labels respect active theme colors.
-  - Raw ANSI is only used where no theme abstraction exists and is documented.

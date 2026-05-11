@@ -29,7 +29,7 @@ export default function (pi: ExtensionAPI): void {
     if (helixInstalled) return;
     previousFactory = ctx.ui.getEditorComponent();
     ctx.ui.setEditorComponent(
-      (tui, theme, keybindings) => new HelixEditor(tui, theme, keybindings),
+      (tui, theme, keybindings) => new HelixEditor(tui, theme, () => ctx.ui.theme, keybindings),
     );
     helixInstalled = true;
   }

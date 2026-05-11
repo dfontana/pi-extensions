@@ -16,7 +16,7 @@
  */
 
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -106,8 +106,12 @@ export class HelixEditor extends CustomEditor {
   private labelMap: LabelMap = new Map();
   private lastRenderWidth = 80;
 
-  constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
+  // ── Theme getter ─────────────────────────────────────────────────────────
+  private readonly getTheme: () => Theme;
+
+  constructor(tui: TUI, theme: EditorTheme, getTheme: () => Theme, keybindings: KeybindingsManager) {
     super(tui, theme, keybindings);
+    this.getTheme = getTheme;
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -207,11 +211,10 @@ export class HelixEditor extends CustomEditor {
   }
 
   private getModeLabelAnsi(label: string): string {
-    // Use raw ANSI since we don't have direct theme access here.
-    // NORMAL → cyan bold, INSERT → dim, SELECT → yellow bold
-    if (this.mode === "normal") return `\x1b[1;36m${label}\x1b[0m`;
-    if (this.mode === "select") return `\x1b[1;33m${label}\x1b[0m`;
-    return `\x1b[2m${label}\x1b[0m`;
+    const t = this.getTheme();
+    if (this.mode === "normal") return t.bold(t.fg("accent", label));
+    if (this.mode === "select") return t.bold(t.fg("warning", label));
+    return t.fg("muted", label);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
