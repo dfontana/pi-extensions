@@ -150,10 +150,6 @@ export class HelixEditor extends CustomEditor {
       const charCount = this.getSelectionCharCount();
       return ` SELECT (${charCount}) `;
     }
-    if (this.selection !== null) {
-      const charCount = this.getSelectionCharCount();
-      return ` NORMAL (${charCount}) `;
-    }
     return " NORMAL ";
   }
 
@@ -174,7 +170,7 @@ export class HelixEditor extends CustomEditor {
     if (lines.length === 0) return lines;
 
     // Selection highlight — applied before the mode label, preserves CURSOR_MARKER
-    if ((this.mode === "select" || this.mode === "normal") && this.selection && !this.labelMode) {
+    if (this.mode === "select" && this.selection && !this.labelMode) {
       const logicalLines = this.getLines();
       const { start, end } = normalizeRange(logicalLines, this.selection);
       const spans = computeSelectionSpans(
@@ -297,26 +293,16 @@ export class HelixEditor extends CustomEditor {
   // ══════════════════════════════════════════════════════════════════════════
 
   private handleNormalInput(data: string): void {
-    // Escape in normal mode: pass to super (aborts agent, etc.)
-    // Escape in select mode: return to normal without clearing selection position
+    // Escape in select mode: return to clean Normal (clears selection).
+    // Escape in normal mode: pass to super (aborts agent, etc.).
     if (matchesKey(data, "escape")) {
       if (this.mode === "select") {
-        // Return to Normal but keep this.selection so the next operation
-        // (d, c, >, <, s, *) can still consume it.  A second Escape from
-        // Normal will clear it (see branch below).
-        this.mode = "normal";
-        this.pendingPrefix = null;
+        this.enterNormal();
         this.tui.requestRender();
         return;
       }
-      if (this.mode === "normal" && this.selection !== null) {
-        // Second Escape: discard the retained selection and stay in Normal.
-        this.selection = null;
-        this.tui.requestRender();
-        return;
-      }
-      // Clean Normal (no retained selection): forward to super so the app can
-      // handle Escape (e.g. abort agent run).
+      // Normal mode: forward to super so the app can handle Escape
+      // (e.g. abort agent run).
       super.handleInput(data);
       return;
     }

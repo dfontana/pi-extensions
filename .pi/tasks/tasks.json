@@ -118,25 +118,26 @@
       "id": "19",
       "subject": "9. Use theme colors instead of raw ANSI for mode labels",
       "description": "Fix: getModeLabelAnsi() hardcodes raw cyan/yellow/dim ANSI sequences, bypassing the active theme.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Store/use the provided theme or ctx.ui.theme-compatible styling for labels.\n- Normal/Insert/Select labels respect active theme colors.\n- Raw ANSI is only used where no theme abstraction exists and is documented.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Applying theme colors to labels",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778442219945,
-      "updatedAt": 1778463917643,
+      "updatedAt": 1778464390346,
       "owner": "main"
     },
     {
       "id": "20",
       "subject": "Remove selection preservation from task 15",
       "description": "Revert/remove the selection preservation behavior added in task 15 (\"Preserve selection when leaving Select mode\"). The feature feels unnatural and wrong — when leaving Select mode, the selection should be cleared rather than preserved. Find and remove the code that preserves selection state on mode exit.",
-      "status": "pending",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778463156401,
-      "updatedAt": 1778463156401
+      "updatedAt": 1778464460408,
+      "owner": "main"
     }
   ]
 }
