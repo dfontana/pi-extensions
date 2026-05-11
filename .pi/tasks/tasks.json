@@ -55,7 +55,7 @@
       "id": "14",
       "subject": "4. Centralize selection semantics",
       "description": "Fix: Selection behavior is spread across delete/change/indent/search/mode-entry paths. Commands resolve selection bounds differently.\n\nFiles: extensions/helix-mode/editor.ts, extensions/helix-mode/buffer.ts\n\nAcceptance criteria:\n- Introduce a small SelectionState/helper layer that represents anchor + head and normalized ranges.\n- All selection-consuming commands use this helper.\n- i and a have explicit behavior for active selections, based on normalized bounds rather than whichever end currently holds the cursor.\n- Unit-testable pure helpers live in buffer.ts or another dependency-light module.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Centralizing selection state",
       "metadata": {},
       "blocks": [
@@ -65,14 +65,14 @@
       ],
       "blockedBy": [],
       "createdAt": 1778442191741,
-      "updatedAt": 1778444767811,
+      "updatedAt": 1778460554087,
       "owner": "main"
     },
     {
       "id": "15",
       "subject": "5. Preserve selection when leaving Select mode",
       "description": "Fix: Select-mode Escape currently switches to Normal and clears selectionAnchor, contradicting the selection-first behavior described in the plan.\n\nFiles: extensions/helix-mode/editor.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- Escape from Select mode returns to Normal without losing the active selection.\n- The mode label and selection highlight/char count behave predictably after leaving Select mode.\n- Delete/change/search/indent can still operate on the retained selection from Normal mode.",
-      "status": "pending",
+      "status": "in_progress",
       "activeForm": "Preserving Select mode selection",
       "metadata": {},
       "blocks": [],
@@ -80,7 +80,8 @@
         "14"
       ],
       "createdAt": 1778442196485,
-      "updatedAt": 1778442225531
+      "updatedAt": 1778460556731,
+      "owner": "main"
     },
     {
       "id": "16",

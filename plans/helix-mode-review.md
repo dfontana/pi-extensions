@@ -14,18 +14,6 @@ The original review had 11 findings, but the `/` search binding finding is inten
 
 ---
 
-## 5. Preserve selection when leaving Select mode
-
-- **Priority:** High
-- **Depends on:** Item 4
-- **Files:** `extensions/helix-mode/editor.ts`
-- **Problem:** Select-mode `Escape` currently switches to Normal and clears `selectionAnchor`, contradicting the selection-first behavior described in the plan.
-- **Context:** The plan says Select `Escape` returns to Normal and keeps the selection so that later operations can still consume it.
-- **Acceptance criteria:**
-  - `Escape` from Select mode returns to Normal without losing the active selection.
-  - The mode label and selection highlight/char count behave predictably after leaving Select mode.
-  - Delete/change/search/indent can still operate on the retained selection from Normal mode.
-
 ## 6. Add scoped search state for `s` selection search
 
 - **Priority:** High
