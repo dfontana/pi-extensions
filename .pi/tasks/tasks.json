@@ -1,10 +1,10 @@
 {
-  "nextId": 21,
+  "nextId": 22,
   "tasks": [
     {
       "id": "9",
       "subject": "Custom Output Style",
-      "description": "Create custom output styles for the agent which change the tone and verbiage it choses its responses with. These could be playful (noir, cowboy) or practical (caveman, researcher)",
+      "description": "Create custom output styles for the agent which change the tone and verbiage it choses its responses with. These could be playful (noir, cowboy) or practical (caveman, researcher).",
       "status": "in_progress",
       "metadata": {},
       "blocks": [],
@@ -138,6 +138,18 @@
       "createdAt": 1778463156401,
       "updatedAt": 1778464661081,
       "owner": "main"
+    },
+    {
+      "id": "21",
+      "subject": "Fix jj footer to report ?? on error",
+      "description": "The getVcsInfo() function in extensions/improved-footer/index.ts can surface errors or crash when jj fails (e.g. stale workspace, corrupt .jj dir, jj not on PATH). The exec() helper swallows its own errors but the surrounding code is not fully guarded.\n\nFiles: extensions/improved-footer/index.ts\n\nAcceptance criteria:\n- Any failure in getVcsInfo() (exec error, thrown exception, bad output) returns \"jj:??\" rather than crashing or showing garbage\n- A stale workspace (jj fails with a workspace error) shows \"jj:???\" in the footer\n- The fix wraps the entire getVcsInfo call site (or the function body) in a broad try/catch so no exception can bubble up into the footer render path",
+      "status": "pending",
+      "activeForm": "Planning jj footer error handling",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1778509344570,
+      "updatedAt": 1778509344570
     }
   ]
 }
