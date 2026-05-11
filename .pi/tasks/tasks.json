@@ -60,7 +60,6 @@
       "metadata": {},
       "blocks": [
         "15",
-        "16",
         "17"
       ],
       "blockedBy": [],
@@ -72,7 +71,7 @@
       "id": "15",
       "subject": "5. Preserve selection when leaving Select mode",
       "description": "Fix: Select-mode Escape currently switches to Normal and clears selectionAnchor, contradicting the selection-first behavior described in the plan.\n\nFiles: extensions/helix-mode/editor.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- Escape from Select mode returns to Normal without losing the active selection.\n- The mode label and selection highlight/char count behave predictably after leaving Select mode.\n- Delete/change/search/indent can still operate on the retained selection from Normal mode.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Preserving Select mode selection",
       "metadata": {},
       "blocks": [],
@@ -80,22 +79,8 @@
         "14"
       ],
       "createdAt": 1778442196485,
-      "updatedAt": 1778460556731,
+      "updatedAt": 1778461845979,
       "owner": "main"
-    },
-    {
-      "id": "16",
-      "subject": "6. Add scoped search state for s selection search",
-      "description": "Fix: actionSelectRegex() initially finds matches inside the current selection, but later n/N calls navigateMatch(), which recomputes matches globally from only the pattern, allowing navigation outside the original selection.\n\nFiles: extensions/helix-mode/editor.ts, extensions/helix-mode/buffer.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- SearchState records whether the search is global or scoped.\n- Scoped searches store and honor the selection range used to start the search.\n- n/N after s remain inside the scoped range.\n- Regular * searches continue to operate globally unless explicitly scoped by design.",
-      "status": "pending",
-      "activeForm": "Adding scoped search state",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [
-        "14"
-      ],
-      "createdAt": 1778442201893,
-      "updatedAt": 1778442225532
     },
     {
       "id": "17",

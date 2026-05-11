@@ -14,19 +14,6 @@ The original review had 11 findings, but the `/` search binding finding is inten
 
 ---
 
-## 6. Add scoped search state for `s` selection search
-
-- **Priority:** High
-- **Depends on:** Item 4
-- **Files:** `extensions/helix-mode/editor.ts`, `extensions/helix-mode/buffer.ts`
-- **Problem:** `actionSelectRegex()` initially finds matches inside the current selection, but later `n`/`N` calls `navigateMatch()`, which recomputes matches globally from only the pattern. This allows navigation outside the original selection.
-- **Context:** Search state needs more than `pattern`; it needs scope/range metadata and probably a mode/type so global search and selection-scoped search do not share incorrect behavior.
-- **Acceptance criteria:**
-  - `SearchState` records whether the search is global or scoped.
-  - Scoped searches store and honor the selection range used to start the search.
-  - `n`/`N` after `s` remain inside the scoped range.
-  - Regular `*` searches continue to operate globally unless explicitly scoped by design.
-
 ## 7. Replace fragile synthetic-key cursor navigation with a safer abstraction
 
 - **Priority:** High
