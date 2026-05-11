@@ -8,46 +8,39 @@
  *
  * Footer layout mirrors pi's default exactly:
  *   Line 1: ~/cwd (jj:bookmark) • session-name
- *   Line 2: ↑tokens ↓tokens Rcache Wcache $cost ctx%/window (auto)  (provider) model • thinking
+ *   Line 2: ↑tokens ↓tokens Rcache Wcache $cost ctx%/window  model • thinking
  *   Line 3: extension statuses
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { execSync } from "child_process";
+import { execFile } from "child_process";
 import { existsSync } from "fs";
 import { join } from "path";
 import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 
-// ─── VCS Detection ────────────────────────────────────────────────────────
+// ─── Jujutsu Bookmark Detection (async, activity-triggered) ───────────────
 
-function exec(cmd: string, cwd: string): string | null {
-  try {
-    return execSync(cmd, { cwd, encoding: "utf8", timeout: 5000, stdio: "pipe" }).trim();
-  } catch {
-    return null;
-  }
+function execAsync(cmd: string, args: string[], cwd: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { cwd, encoding: "utf8", timeout: 5000 }, (err, stdout) => {
+      if (err) resolve(null);
+      else resolve(stdout.trim());
+    });
+  });
 }
 
-function getVcsInfo(cwd: string): string | null {
-  const jjDir = join(cwd, ".jj");
-  if (existsSync(jjDir)) {
-    const result = exec(
-      "jj log -r 'ancestors(@) & bookmarks()' -T 'local_bookmarks.map(|c| c.name())' -n 1 --no-graph",
-      cwd,
-    );
-    if (result) {
-      const bookmark = result.trim().split("\n")[0];
-      if (bookmark) return `jj:${bookmark}`;
-    }
-    return "jj:??";
+async function resolveJjBookmark(cwd: string): Promise<string | null> {
+  if (!existsSync(join(cwd, ".jj"))) return null;
+  const result = await execAsync(
+    "jj",
+    ["log", "-r", "ancestors(@) & bookmarks()", "-T", "local_bookmarks.map(|c| c.name())", "-n", "1", "--no-graph"],
+    cwd,
+  );
+  if (result) {
+    const bookmark = result.trim().split("\n")[0];
+    if (bookmark) return `jj:${bookmark}`;
   }
-
-  if (existsSync(join(cwd, ".git"))) {
-    const branch = exec("git rev-parse --abbrev-ref HEAD", cwd);
-    if (branch && branch !== "HEAD") return branch;
-  }
-
-  return null;
+  return "jj:??";
 }
 
 // ─── Token Formatting (mirrors pi's formatTokens) ──────────────────────────
@@ -128,10 +121,30 @@ export default function (pi: ExtensionAPI) {
   let footerTui: { requestRender: () => void } | null = null;
   let modelId = "";
   let thinkingLevel = "off";
-  let autoCompact = true;
+
+  // ─── Cached token totals (updated incrementally on message_end) ─────────
+  let cachedTotalInput = 0;
+  let cachedTotalOutput = 0;
+  let cachedTotalCacheRead = 0;
+  let cachedTotalCacheWrite = 0;
+
+  // ─── VCS state: jj bookmark (activity-triggered), git from FooterDataProvider ──
+  let jjBookmark: string | null = null;
+  let isJjRepo = false;
+  let vcsCwd: string | null = null;
 
   function requestRender() {
     footerTui?.requestRender();
+  }
+
+  function refreshJjBookmark() {
+    if (!isJjRepo || !vcsCwd) return;
+    void resolveJjBookmark(vcsCwd).then((value) => {
+      if (value !== jjBookmark) {
+        jjBookmark = value;
+        requestRender();
+      }
+    });
   }
 
   // ─── Event: model changes ───────────────────────────────────────────────
@@ -151,6 +164,15 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
     const provider = event.message.provider;
+
+    // Incrementally accumulate token totals (avoids re-iterating all entries in render)
+    cachedTotalInput += event.message.usage.input;
+    cachedTotalOutput += event.message.usage.output;
+    cachedTotalCacheRead += event.message.usage.cacheRead;
+    cachedTotalCacheWrite += event.message.usage.cacheWrite;
+
+    // Refresh jj bookmark on activity (cheap: only fires when user is interacting)
+    refreshJjBookmark();
 
     if (provider === "openrouter") {
       // OpenRouter: use generation API for accurate provider-agnostic cost
@@ -184,35 +206,47 @@ export default function (pi: ExtensionAPI) {
   // ─── Session start: install custom footer ───────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
-    // Pre-populate cost from existing session entries on restore
+    // Reset state
     costState = { orCost: 0, piCost: 0, totalCacheDiscount: 0, lastProvider: "", lastModel: "", seenIds: new Set() };
+    cachedTotalInput = 0;
+    cachedTotalOutput = 0;
+    cachedTotalCacheRead = 0;
+    cachedTotalCacheWrite = 0;
     modelId = ctx.model?.id ?? "";
+    vcsCwd = ctx.cwd;
+    isJjRepo = existsSync(join(ctx.cwd, ".jj"));
 
-    ctx.ui.setFooter((tui, theme, _footerData) => {
+    // Backfill token totals from existing session entries (session restore)
+    try {
+      for (const entry of ctx.sessionManager.getEntries()) {
+        if (entry.type === "message" && entry.message.role === "assistant") {
+          cachedTotalInput += entry.message.usage.input;
+          cachedTotalOutput += entry.message.usage.output;
+          cachedTotalCacheRead += entry.message.usage.cacheRead;
+          cachedTotalCacheWrite += entry.message.usage.cacheWrite;
+        }
+      }
+    } catch { /* session may not be loaded yet */ }
+
+    // Fire initial jj bookmark lookup
+    refreshJjBookmark();
+
+    let unsubBranchChange: (() => void) | null = null;
+
+    ctx.ui.setFooter((tui, theme, footerData) => {
       footerTui = tui;
+
+      // Subscribe to git branch changes from FooterDataProvider (file-watcher based)
+      unsubBranchChange = footerData.onBranchChange(() => requestRender());
 
       return {
         invalidate() {},
         dispose() {
           footerTui = null;
+          unsubBranchChange?.();
+          unsubBranchChange = null;
         },
         render(width: number): string[] {
-          // ── Compute token totals from session ──
-          let totalInput = 0;
-          let totalOutput = 0;
-          let totalCacheRead = 0;
-          let totalCacheWrite = 0;
-          try {
-            for (const entry of ctx.sessionManager.getEntries()) {
-              if (entry.type === "message" && entry.message.role === "assistant") {
-                totalInput += entry.message.usage.input;
-                totalOutput += entry.message.usage.output;
-                totalCacheRead += entry.message.usage.cacheRead;
-                totalCacheWrite += entry.message.usage.cacheWrite;
-              }
-            }
-          } catch { /* session may not be loaded yet */ }
-
           // ── Context usage ──
           const contextUsage = ctx.getContextUsage();
           const contextWindow = contextUsage?.contextWindow ?? 0;
@@ -227,7 +261,8 @@ export default function (pi: ExtensionAPI) {
           if (home && pwd.startsWith(home)) {
             pwd = `~${pwd.slice(home.length)}`;
           }
-          const vcsInfo = getVcsInfo(ctx.cwd);
+          // jj repos: use our async bookmark; git repos: use FooterDataProvider's watcher
+          const vcsInfo = isJjRepo ? jjBookmark : footerData.getGitBranch();
           if (vcsInfo) {
             pwd = `${pwd} (${vcsInfo})`;
           }
@@ -237,51 +272,32 @@ export default function (pi: ExtensionAPI) {
           }
           const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 
-          // ── Line 2: Token stats + cost + context % + right-aligned model ──
+          // ── Line 2: Token stats + cost + context % | right-aligned model ──
           const statsParts: string[] = [];
-          if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-          if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-          if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-          if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
+          if (cachedTotalInput) statsParts.push(`↑${formatTokens(cachedTotalInput)}`);
+          if (cachedTotalOutput) statsParts.push(`↓${formatTokens(cachedTotalOutput)}`);
+          if (cachedTotalCacheRead) statsParts.push(`R${formatTokens(cachedTotalCacheRead)}`);
+          if (cachedTotalCacheWrite) statsParts.push(`W${formatTokens(cachedTotalCacheWrite)}`);
 
-          // Cost: combines OpenRouter API cost (more accurate) + pi's built-in cost
-          const hasTrackedCosts = costState.orCost > 0 || costState.piCost > 0;
-          if (hasTrackedCosts) {
-            const combinedCost = costState.orCost + costState.piCost;
+          const combinedCost = costState.orCost + costState.piCost;
+          if (combinedCost > 0) {
             statsParts.push(`$${combinedCost.toFixed(3)}`);
-          } else {
-            // Fallback on first render before any message_end events fire
-            // (e.g. session restore). Uses pi's cost for all messages.
-            let piCost = 0;
-            try {
-              for (const entry of ctx.sessionManager.getEntries()) {
-                if (entry.type === "message" && entry.message.role === "assistant") {
-                  piCost += entry.message.usage.cost.total;
-                }
-              }
-            } catch { /* */ }
-            if (piCost > 0) {
-              statsParts.push(`$${piCost.toFixed(3)}`);
-            }
           }
 
           // Context percentage with color
-          const autoIndicator = autoCompact ? " (auto)" : "";
           const contextPercentDisplay = contextPercent === "?"
-            ? `?/${formatTokens(contextWindow)}${autoIndicator}`
-            : `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+            ? `?/${formatTokens(contextWindow)}`
+            : `${contextPercent}%/${formatTokens(contextWindow)}`;
 
-          let contextPercentStr: string;
           if (contextPercentValue > 90) {
-            contextPercentStr = theme.fg("error", contextPercentDisplay);
+            statsParts.push(theme.fg("error", contextPercentDisplay));
           } else if (contextPercentValue > 70) {
-            contextPercentStr = theme.fg("warning", contextPercentDisplay);
+            statsParts.push(theme.fg("warning", contextPercentDisplay));
           } else {
-            contextPercentStr = contextPercentDisplay;
+            statsParts.push(contextPercentDisplay);
           }
-          statsParts.push(contextPercentStr);
 
-          let statsLeft = statsParts.join(" ");
+          const statsLeft = statsParts.join(" ");
 
           // Model + thinking on the right
           const mId = modelId || ctx.model?.id || "no-model";
@@ -291,41 +307,12 @@ export default function (pi: ExtensionAPI) {
             rightSide = tl === "off" ? `${mId} • thinking off` : `${mId} • ${tl}`;
           }
 
-          let statsLeftWidth = visibleWidth(statsLeft);
-          if (statsLeftWidth > width) {
-            statsLeft = truncateToWidth(statsLeft, width, "...");
-            statsLeftWidth = visibleWidth(statsLeft);
-          }
-
-          const minPadding = 2;
-          const rightSideWidth = visibleWidth(rightSide);
-          const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
-
-          let statsLine: string;
-          if (totalNeeded <= width) {
-            const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-            statsLine = statsLeft + padding + rightSide;
-          } else {
-            const availableForRight = width - statsLeftWidth - minPadding;
-            if (availableForRight > 0) {
-              const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
-              const truncatedRightWidth = visibleWidth(truncatedRight);
-              const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
-              statsLine = statsLeft + padding + truncatedRight;
-            } else {
-              statsLine = statsLeft;
-            }
-          }
-
-          const dimStatsLeft = theme.fg("dim", statsLeft);
-          const remainder = statsLine.slice(statsLeft.length);
-          const dimRemainder = theme.fg("dim", remainder);
-          const statsLine2 = dimStatsLeft + dimRemainder;
+          const statsLine2 = theme.fg("dim", padBetween(statsLeft, rightSide, width));
 
           const lines = [pwdLine, statsLine2];
 
           // ── Line 3: Extension statuses ──
-          const extensionStatuses = _footerData.getExtensionStatuses();
+          const extensionStatuses = footerData.getExtensionStatuses();
           if (extensionStatuses.size > 0) {
             const sortedStatuses = Array.from(extensionStatuses.entries())
               .sort(([a], [b]) => a.localeCompare(b))
@@ -343,6 +330,28 @@ export default function (pi: ExtensionAPI) {
   // ─── Cleanup ────────────────────────────────────────────────────────────
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    vcsCwd = null;
+    isJjRepo = false;
+    jjBookmark = null;
     ctx.ui.setFooter(undefined);
   });
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+/** Lay out left-aligned and right-aligned text, truncating the right side if needed. */
+function padBetween(left: string, right: string, width: number): string {
+  const lw = visibleWidth(left);
+  const rw = visibleWidth(right);
+  if (lw + 2 + rw <= width) {
+    return left + " ".repeat(width - lw - rw) + right;
+  }
+  // Not enough room for both — show left, truncate right
+  const available = width - lw - 2;
+  if (available > 0) {
+    const truncRight = truncateToWidth(right, available, "");
+    const trw = visibleWidth(truncRight);
+    return left + " ".repeat(width - lw - trw) + truncRight;
+  }
+  return truncateToWidth(left, width, "...");
 }
