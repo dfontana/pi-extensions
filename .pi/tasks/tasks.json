@@ -13,143 +13,16 @@
       "updatedAt": 1778442175549
     },
     {
-      "id": "11",
-      "subject": "1. Preserve and compose with existing custom editors",
-      "description": "Fix: The extension unconditionally calls ctx.ui.setEditorComponent(...) and /helix off calls ctx.ui.setEditorComponent(undefined), clobbering any editor installed by another plugin.\n\nFiles: extensions/helix-mode/index.ts, extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- On session start, capture the previous editor factory before installing Helix mode.\n- /helix off restores the previous factory, not always the built-in default.\n- /helix on does not double-wrap an already-installed Helix editor.\n- session_shutdown only cleans up this extension's own editor installation and does not erase unrelated plugin state.",
-      "status": "completed",
-      "activeForm": "Planning editor composition",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778442165537,
-      "updatedAt": 1778443559498,
-      "owner": "main"
-    },
-    {
-      "id": "12",
-      "subject": "2. Let app-level and extension shortcuts still work",
-      "description": "Fix: Normal/Select mode swallows printable characters that are not recognized modal bindings, preventing app-level actions or extension-registered shortcuts from firing.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Modal bindings still prevent accidental text insertion in Normal/Select mode.\n- Extension shortcuts and app-level actions continue to be checked before unhandled keys are swallowed.\n- There is a documented policy for conflicts between Helix modal keys and global shortcuts.",
-      "status": "completed",
-      "activeForm": "Planning shortcut passthrough",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778442173553,
-      "updatedAt": 1778444586633,
-      "owner": "main"
-    },
-    {
-      "id": "13",
-      "subject": "3. Remove the private tui shadowing hazard",
-      "description": "Fix: HelixEditor declares private tui: TUI, while the base Editor already exposes protected tui. Private shadowing causes TypeScript inheritance/type-checking issues.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Remove the duplicate private tui field.\n- Use the inherited this.tui everywhere.\n- The extension type-checks under Pi's expected TypeScript settings.",
-      "status": "completed",
-      "activeForm": "Removing tui shadow",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778442180617,
-      "updatedAt": 1778444763247,
-      "owner": "main"
-    },
-    {
-      "id": "14",
-      "subject": "4. Centralize selection semantics",
-      "description": "Fix: Selection behavior is spread across delete/change/indent/search/mode-entry paths. Commands resolve selection bounds differently.\n\nFiles: extensions/helix-mode/editor.ts, extensions/helix-mode/buffer.ts\n\nAcceptance criteria:\n- Introduce a small SelectionState/helper layer that represents anchor + head and normalized ranges.\n- All selection-consuming commands use this helper.\n- i and a have explicit behavior for active selections, based on normalized bounds rather than whichever end currently holds the cursor.\n- Unit-testable pure helpers live in buffer.ts or another dependency-light module.",
-      "status": "completed",
-      "activeForm": "Centralizing selection state",
-      "metadata": {},
-      "blocks": [
-        "15",
-        "17"
-      ],
-      "blockedBy": [],
-      "createdAt": 1778442191741,
-      "updatedAt": 1778460554087,
-      "owner": "main"
-    },
-    {
-      "id": "15",
-      "subject": "5. Preserve selection when leaving Select mode",
-      "description": "Fix: Select-mode Escape currently switches to Normal and clears selectionAnchor, contradicting the selection-first behavior described in the plan.\n\nFiles: extensions/helix-mode/editor.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- Escape from Select mode returns to Normal without losing the active selection.\n- The mode label and selection highlight/char count behave predictably after leaving Select mode.\n- Delete/change/search/indent can still operate on the retained selection from Normal mode.",
-      "status": "completed",
-      "activeForm": "Preserving Select mode selection",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [
-        "14"
-      ],
-      "createdAt": 1778442196485,
-      "updatedAt": 1778461845979,
-      "owner": "main"
-    },
-    {
-      "id": "17",
-      "subject": "7. Replace fragile synthetic-key cursor navigation",
-      "description": "Fix: navigateTo() emits repeated Up/Down, line-start, and Right key sequences. Pi's editor movement is visual-line/history-aware, so wrapped lines, prompt history, and scrolling can make this land in the wrong logical position.\n\nFiles: extensions/helix-mode/editor.ts\nDepends on: Task 4 (Centralize selection semantics)\n\nAcceptance criteria:\n- Provide a single navigation abstraction that has documented logical-line/column semantics.\n- Avoid using Up/Down visual movement for logical line targeting where possible.\n- If direct cursor-setting APIs do not exist, isolate the synthetic-key fallback behind one adapter with tests/known limitations.\n- Wrapped-line and multi-line prompt cases are manually verified.",
-      "status": "completed",
-      "activeForm": "Replacing synthetic-key navigation",
-      "metadata": {},
-      "blocks": [
-        "18"
-      ],
-      "blockedBy": [
-        "14"
-      ],
-      "createdAt": 1778442208455,
-      "updatedAt": 1778463174693,
-      "owner": "main"
-    },
-    {
-      "id": "18",
-      "subject": "8. Rework label and selection overlay layout",
-      "description": "Fix: Overlay layout reimplements word wrapping locally and uses an incorrect content width calculation. It does not account for Pi editor scroll offset, wide graphemes, paste markers, or the editor's exact layout width.\n\nFiles: extensions/helix-mode/label-overlay.ts, extensions/helix-mode/buffer.ts, extensions/helix-mode/editor.ts\nDepends on: Task 7 (Replace synthetic-key cursor navigation)\n\nAcceptance criteria:\n- Use Pi's exported wrapping/layout utilities where possible instead of the local clone.\n- Match Pi's content/layout width calculation exactly.\n- Account for visible scroll offset or avoid drawing labels/highlights for non-visible rows.\n- gw labels and selection highlights align on wrapped lines and wide-character input.",
-      "status": "completed",
-      "activeForm": "Reworking overlay layout",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [
-        "17"
-      ],
-      "createdAt": 1778442215212,
-      "updatedAt": 1778463914675,
-      "owner": "main"
-    },
-    {
-      "id": "19",
-      "subject": "9. Use theme colors instead of raw ANSI for mode labels",
-      "description": "Fix: getModeLabelAnsi() hardcodes raw cyan/yellow/dim ANSI sequences, bypassing the active theme.\n\nFiles: extensions/helix-mode/editor.ts\n\nAcceptance criteria:\n- Store/use the provided theme or ctx.ui.theme-compatible styling for labels.\n- Normal/Insert/Select labels respect active theme colors.\n- Raw ANSI is only used where no theme abstraction exists and is documented.",
-      "status": "completed",
-      "activeForm": "Applying theme colors to labels",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778442219945,
-      "updatedAt": 1778464390346,
-      "owner": "main"
-    },
-    {
-      "id": "20",
-      "subject": "Remove selection preservation from task 15",
-      "description": "Revert/remove the selection preservation behavior added in task 15 (\"Preserve selection when leaving Select mode\"). The feature feels unnatural and wrong — when leaving Select mode, the selection should be cleared rather than preserved. Find and remove the code that preserves selection state on mode exit.",
-      "status": "completed",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778463156401,
-      "updatedAt": 1778464661081,
-      "owner": "main"
-    },
-    {
       "id": "21",
       "subject": "Fix jj footer to report ?? on error",
       "description": "The getVcsInfo() function in extensions/improved-footer/index.ts can surface errors or crash when jj fails (e.g. stale workspace, corrupt .jj dir, jj not on PATH). The exec() helper swallows its own errors but the surrounding code is not fully guarded.\n\nFiles: extensions/improved-footer/index.ts\n\nAcceptance criteria:\n- Any failure in getVcsInfo() (exec error, thrown exception, bad output) returns \"jj:??\" rather than crashing or showing garbage\n- A stale workspace (jj fails with a workspace error) shows \"jj:???\" in the footer\n- The fix wraps the entire getVcsInfo call site (or the function body) in a broad try/catch so no exception can bubble up into the footer render path",
-      "status": "pending",
+      "status": "completed",
       "activeForm": "Planning jj footer error handling",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778509344570,
-      "updatedAt": 1778509344570
+      "updatedAt": 1778510721596
     }
   ]
 }

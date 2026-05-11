@@ -22,7 +22,7 @@ import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 
 function exec(cmd: string, cwd: string): string | null {
   try {
-    return execSync(cmd, { cwd, encoding: "utf8", timeout: 5000 }).trim();
+    return execSync(cmd, { cwd, encoding: "utf8", timeout: 5000, stdio: "pipe" }).trim();
   } catch {
     return null;
   }
@@ -31,7 +31,10 @@ function exec(cmd: string, cwd: string): string | null {
 function getVcsInfo(cwd: string): string | null {
   const jjDir = join(cwd, ".jj");
   if (existsSync(jjDir)) {
-    const result = exec("jj branch", cwd);
+    const result = exec(
+      "jj log -r 'ancestors(@) & bookmarks()' -T 'local_bookmarks.map(|c| c.name())' -n 1 --no-graph",
+      cwd,
+    );
     if (result) {
       const bookmark = result.trim().split("\n")[0];
       if (bookmark) return `jj:${bookmark}`;
