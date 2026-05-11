@@ -1,8 +1,11 @@
 /**
  * buffer.ts — Pure text-buffer utilities for helix-mode.
  *
- * No Pi dependencies. All functions are purely functional and unit-testable.
+ * Imports `visibleWidth` from @earendil-works/pi-tui for grapheme-aware
+ * column counting in wordWrapLine. All other functions remain purely functional.
  */
+
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 // ─── Offset ↔ Line/Col ───────────────────────────────────────────────────────
 
@@ -206,49 +209,64 @@ export interface VisualChunk {
 
 /**
  * Split a logical line into visual chunks that each fit within `maxWidth`
- * visible characters. Mirrors the word-wrap behaviour of pi's Editor:
- * break at word boundaries where possible, fall back to char-level wrapping
- * for words longer than `maxWidth`.
+ * visible columns. Uses Intl.Segmenter for grapheme cluster boundaries and
+ * visibleWidth() for correct column counts with wide (CJK, emoji) characters.
+ * Mirrors the word-wrap behaviour of pi's Editor: break at word boundaries
+ * where possible, fall back to hard breaks for overlong words.
  *
  * An empty line produces exactly one chunk with empty text.
  */
 export function wordWrapLine(line: string, maxWidth: number): VisualChunk[] {
   if (maxWidth <= 0) maxWidth = 1;
   if (line.length === 0) return [{ text: "", startIndex: 0, endIndex: 0 }];
-
-  const chunks: VisualChunk[] = [];
-  let pos = 0;
-
-  while (pos < line.length) {
-    const remaining = line.slice(pos);
-
-    if (remaining.length <= maxWidth) {
-      // Entire remainder fits
-      chunks.push({ text: remaining, startIndex: pos, endIndex: pos + remaining.length });
-      break;
-    }
-
-    // Find the last word-break opportunity within maxWidth
-    let breakAt = -1;
-    for (let i = maxWidth - 1; i > 0; i--) {
-      const ch = remaining[i]!;
-      const prev = remaining[i - 1]!;
-      // Break after whitespace or at a word boundary
-      if (/\s/.test(ch) || (/\w/.test(prev) && !/\w/.test(ch))) {
-        breakAt = i;
-        break;
-      }
-    }
-
-    if (breakAt <= 0) breakAt = maxWidth; // no word boundary found — hard break
-
-    const chunkText = remaining.slice(0, breakAt);
-    chunks.push({ text: chunkText, startIndex: pos, endIndex: pos + chunkText.length });
-    pos += breakAt;
-    // Skip leading whitespace on the next visual line
-    while (pos < line.length && line[pos] === " ") pos++;
+  if (visibleWidth(line) <= maxWidth) {
+    return [{ text: line, startIndex: 0, endIndex: line.length }];
   }
 
+  const segmenter = new Intl.Segmenter();
+  const segments = [...segmenter.segment(line)];
+  const chunks: VisualChunk[] = [];
+  let chunkStart = 0;     // code-unit offset of current chunk start
+  let currentWidth = 0;
+  let wrapOppIndex = -1;  // code-unit offset of last wrap opportunity (start of next word)
+  let wrapOppWidth = 0;   // cumulative column width up to and including the space(s)
+
+  for (let si = 0; si < segments.length; si++) {
+    const seg = segments[si]!;
+    const glyph = seg.segment;
+    const gWidth = visibleWidth(glyph);
+    const codeIdx = seg.index; // code-unit position in `line`
+
+    if (currentWidth + gWidth > maxWidth) {
+      if (wrapOppIndex >= 0 && currentWidth - wrapOppWidth + gWidth <= maxWidth) {
+        // Backtrack to last recorded wrap opportunity
+        chunks.push({ text: line.slice(chunkStart, wrapOppIndex), startIndex: chunkStart, endIndex: wrapOppIndex });
+        chunkStart = wrapOppIndex;
+        currentWidth -= wrapOppWidth;
+      } else if (chunkStart < codeIdx) {
+        // No suitable wrap opportunity — force a hard break here
+        chunks.push({ text: line.slice(chunkStart, codeIdx), startIndex: chunkStart, endIndex: codeIdx });
+        chunkStart = codeIdx;
+        currentWidth = 0;
+      }
+      wrapOppIndex = -1;
+    }
+
+    currentWidth += gWidth;
+
+    // Record a wrap opportunity: a space grapheme followed by a non-space grapheme
+    const isSpace = /\s/.test(glyph);
+    const nextSeg = segments[si + 1];
+    if (isSpace && nextSeg && !/\s/.test(nextSeg.segment)) {
+      wrapOppIndex = nextSeg.index;
+      wrapOppWidth = currentWidth;
+    }
+  }
+
+  // Emit the final (or only) chunk
+  if (chunkStart < line.length) {
+    chunks.push({ text: line.slice(chunkStart), startIndex: chunkStart, endIndex: line.length });
+  }
   return chunks.length > 0 ? chunks : [{ text: "", startIndex: 0, endIndex: 0 }];
 }
 

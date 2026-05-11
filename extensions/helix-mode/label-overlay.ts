@@ -47,6 +47,19 @@ export function stripAnsi(str: string): string {
 // ─── buildLabelMap ────────────────────────────────────────────────────────────
 
 /**
+ * Compute the layout width Pi's Editor uses for word-wrap, given the render
+ * width and the editor's paddingX.  Mirrors Editor.render() exactly:
+ *   contentWidth = width - clampedPad * 2
+ *   layoutWidth  = contentWidth - (clampedPad ? 0 : 1)   // reserve cursor col
+ */
+function computeLayoutWidth(width: number, paddingX: number): number {
+  const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
+  const clamped = Math.min(paddingX, maxPadding);
+  const contentWidth = Math.max(1, width - clamped * 2);
+  return Math.max(1, contentWidth - (clamped ? 0 : 1));
+}
+
+/**
  * Compute label → position mapping for all word-starts in `lines`.
  *
  * Uses `wordWrapLine` to replicate the editor's visual layout so that
@@ -64,19 +77,28 @@ export function buildLabelMap(
   width: number,
   topBorderRows = 1,
   paddingX = 1,
+  scrollOffset = 0,
+  maxVisibleLines = 9999,
 ): LabelMap {
   const map: LabelMap = new Map();
   let labelIdx = 0;
-  // Visual row offset — starts after the top border row(s)
-  let visualRow = topBorderRows;
-  // Content width: editor wraps within this many columns (left-padded by paddingX)
-  const contentWidth = Math.max(1, width - paddingX);
+  // Absolute visual row (0-indexed, independent of border offset and scroll)
+  let visualRow = 0;
+  // Layout width: mirrors Pi's Editor.render() formula exactly
+  const contentWidth = computeLayoutWidth(width, paddingX);
 
-  for (let logicalLine = 0; logicalLine < lines.length; logicalLine++) {
+  outer: for (let logicalLine = 0; logicalLine < lines.length; logicalLine++) {
     const line = lines[logicalLine] ?? "";
     const chunks = wordWrapLine(line, contentWidth);
 
     for (let ci = 0; ci < chunks.length; ci++) {
+      const absVisualRow = visualRow + ci;
+      const renderedRow = topBorderRows + (absVisualRow - scrollOffset);
+      // Skip rows scrolled above the viewport
+      if (renderedRow < topBorderRows) continue;
+      // Stop once we are past the visible area
+      if (renderedRow >= topBorderRows + maxVisibleLines) break outer;
+
       const chunk = chunks[ci]!;
       const chunkText = chunk.text;
       const chunkStart = chunk.startIndex; // char offset within the logical line
@@ -94,7 +116,7 @@ export function buildLabelMap(
           // Add paddingX because the editor renders content starting at column paddingX
           const visualCol = paddingX + ci2;
           map.set(label, {
-            visualRow: visualRow + ci,
+            visualRow: renderedRow,
             visualCol,
             logicalLine,
             logicalCol,
@@ -260,21 +282,30 @@ export function computeSelectionSpans(
   width: number,
   topBorderRows = 1,
   paddingX = 1,
+  scrollOffset = 0,
+  maxVisibleLines = 9999,
 ): VisualSpan[] {
-  const contentWidth = Math.max(1, width - paddingX);
+  const contentWidth = computeLayoutWidth(width, paddingX);
   const spans: VisualSpan[] = [];
-  let visualRow = topBorderRows;
+  let visualRow = 0;  // absolute visual row (0-indexed, independent of border/scroll)
   let lineOffset = 0; // linear offset of the first char of the current logical line
 
-  for (let li = 0; li < lines.length; li++) {
+  outer: for (let li = 0; li < lines.length; li++) {
     const line = lines[li] ?? "";
     const lineEnd = lineOffset + line.length; // exclusive end of this line in the text
+    // Compute chunks once per logical line (used for both overlap and row-count)
+    const chunks = wordWrapLine(line, contentWidth);
 
     // Quick check: does this logical line overlap with the selection at all?
     if (startOffset <= lineEnd && endOffset >= lineOffset) {
-      const chunks = wordWrapLine(line, contentWidth);
-
       for (let ci = 0; ci < chunks.length; ci++) {
+        const absVisualRow = visualRow + ci;
+        const renderedRow = topBorderRows + (absVisualRow - scrollOffset);
+        // Skip rows scrolled above the viewport
+        if (renderedRow < topBorderRows) continue;
+        // Stop once we are past the visible area
+        if (renderedRow >= topBorderRows + maxVisibleLines) break outer;
+
         const chunk = chunks[ci]!;
         // Global offsets of chars in this chunk (endIndex exclusive → subtract 1)
         const chunkGlobalStart = lineOffset + chunk.startIndex;
@@ -285,19 +316,16 @@ export function computeSelectionSpans(
 
         if (overlapStart <= overlapEnd) {
           spans.push({
-            row: visualRow + ci,
+            row: renderedRow,
             colStart: paddingX + (overlapStart - chunkGlobalStart),
             colEnd: paddingX + (overlapEnd - chunkGlobalStart),
           });
         }
       }
-
-      visualRow += Math.max(1, chunks.length);
-    } else {
-      // No overlap — just count the visual rows for this logical line
-      visualRow += Math.max(1, wordWrapLine(line, contentWidth).length);
     }
 
+    // Advance past all visual rows this logical line occupied
+    visualRow += Math.max(1, chunks.length);
     lineOffset += line.length + 1; // +1 for the \n separator
   }
 

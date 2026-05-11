@@ -175,6 +175,7 @@ export class HelixEditor extends CustomEditor {
       const { start, end } = normalizeRange(logicalLines, this.selection);
       const spans = computeSelectionSpans(
         logicalLines, start, end, width, 1, this.getPaddingX(),
+        this.getScrollOffset(), this.getMaxVisibleLines(),
       );
       lines = applySelectionHighlight(lines, spans);
     }
@@ -841,11 +842,29 @@ export class HelixEditor extends CustomEditor {
   // 3k. gw — label jump mode
   // ══════════════════════════════════════════════════════════════════════════
 
+  /** Read the editor's current scroll offset (private field, accessed via cast). */
+  private getScrollOffset(): number {
+    return (this as unknown as { scrollOffset: number }).scrollOffset ?? 0;
+  }
+
+  /**
+   * Estimate the number of content lines visible in the terminal.
+   * Uses 30% of terminal rows as a reasonable bound for an inline editor
+   * embedded in a taller chat/shell UI, with a minimum of 5.
+   */
+  private getMaxVisibleLines(): number {
+    const rows = this.tui.terminal.rows;
+    return Math.max(5, Math.floor(rows * 0.3));
+  }
+
   private enterLabelMode(): void {
     const lines = this.getLines();
     if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) return;
 
-    this.labelMap = buildLabelMap(lines, this.lastRenderWidth, 1, this.getPaddingX());
+    this.labelMap = buildLabelMap(
+      lines, this.lastRenderWidth, 1, this.getPaddingX(),
+      this.getScrollOffset(), this.getMaxVisibleLines(),
+    );
     if (this.labelMap.size === 0) return;
 
     this.labelMode = true;

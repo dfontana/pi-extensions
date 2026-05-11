@@ -14,19 +14,6 @@ The original review had 11 findings, but the `/` search binding finding is inten
 
 ---
 
-## 8. Rework label and selection overlay layout to match Pi's editor
-
-- **Priority:** Medium-High
-- **Depends on:** Item 7
-- **Files:** `extensions/helix-mode/label-overlay.ts`, `extensions/helix-mode/buffer.ts`, `extensions/helix-mode/editor.ts`
-- **Problem:** Overlay layout reimplements word wrapping locally and uses an incorrect content width calculation. It does not account for Pi editor scroll offset, wide graphemes, paste markers, or the editor's exact layout width.
-- **Context:** Pi's editor uses its exported `wordWrapLine` and width logic based on padding and cursor reservation. The local `buffer.ts` `wordWrapLine()` will drift from real rendering.
-- **Acceptance criteria:**
-  - Use Pi's exported wrapping/layout utilities where possible instead of the local clone.
-  - Match Pi's content/layout width calculation exactly.
-  - Account for visible scroll offset or avoid drawing labels/highlights for non-visible rows.
-  - `gw` labels and selection highlights align on wrapped lines and wide-character input.
-
 ## 9. Use theme colors instead of raw ANSI for mode labels
 
 - **Priority:** Medium
