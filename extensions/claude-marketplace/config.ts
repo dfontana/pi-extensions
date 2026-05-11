@@ -30,8 +30,10 @@
  * }
  *
  * `source` accepts:
- *   - GitHub shorthand:   "github.com/org/repo"
+ *   - GitHub shorthand:   "github.com/org/repo"         (converted to HTTPS)
  *   - Full HTTPS URL:     "https://github.com/org/repo"
+ *   - SSH URL:            "git@github.com:org/repo.git" (preferred for private
+ *                          repos and multi-org setups — auth via SSH key)
  *   - Local abs path:     "/home/user/projects/my-marketplace"
  *
  * Local paths skip all git operations and are never "updated".
@@ -48,9 +50,11 @@ export interface MarketplaceEntry {
   name: string;
   /**
    * Where to find the marketplace.
-   * - "github.com/org/repo"  → cloned via gh CLI
-   * - "https://…"            → cloned via gh CLI (HTTPS URL passthrough)
-   * - "/absolute/path"       → used in-place, no git operations
+   * - "github.com/org/repo"          → cloned via `git clone` (HTTPS)
+   * - "https://…"                    → cloned via `git clone` (HTTPS)
+   * - "git@github.com:org/repo.git"  → cloned via `git clone` (SSH); preferred
+   *                                     for private repos and multi-org setups
+   * - "/absolute/path"               → used in-place, no git operations
    */
   source: string;
   /** Branch, tag, or commit.  Defaults to "main". Only used for git sources. */

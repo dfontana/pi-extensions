@@ -2,8 +2,8 @@
  * claude-marketplace Pi Extension
  *
  * Pulls skills from Claude Code plugin marketplaces and surfaces them in Pi
- * via the `resources_discover` event.  Requires the `gh` CLI for cloning and
- * syncing GitHub repositories.
+ * via the `resources_discover` event.  Uses plain git for all clone/fetch
+ * operations — no `gh` CLI dependency.
  *
  * Config files (both optional, project overrides global):
  *   ~/.pi/agent/marketplace-config.json

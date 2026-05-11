@@ -2,10 +2,10 @@
  * Git fetch/clone logic and marketplace.json resolution for the
  * claude-marketplace extension.
  *
- * All network operations use `gh repo clone` / `gh repo sync` when a GitHub
- * URL is detected, falling back to plain `git clone` / `git pull` for other
- * HTTPS URLs.  The `gh` CLI handles authentication transparently, so no
- * credentials need to be stored in the config.
+ * All network operations use plain git commands (`git clone` / `git fetch`).
+ * Authentication is handled by git's own credential stack — SSH keys,
+ * macOS Keychain, `git-credential-*` helpers, `.netrc`, etc. — with no
+ * dependency on the `gh` CLI.
  *
  * For local-path sources, all git operations are skipped.
  *
@@ -58,19 +58,13 @@ async function exec(command: string, cwd: string): Promise<void> {
   await execAsync(command, { cwd, timeout: 120_000 });
 }
 
-/** Returns true if the source looks like a GitHub URL (shorthand or HTTPS). */
-function isGithubSource(source: string): boolean {
-  return source.startsWith("github.com/") || source.includes("github.com/");
-}
-
 // ─── Clone ────────────────────────────────────────────────────────────────────
 
 /**
  * Ensure the marketplace is cloned locally.
  *
  * - Local paths: nothing to do.
- * - GitHub sources: `gh repo clone <repo> <dest> -- --depth=1`
- * - Other HTTPS URLs: `git clone --depth=1 <url> <dest>`
+ * - Remote sources: `git clone --depth=1 <url> <dest>`
  *
  * If the destination already exists the function is a no-op (idempotent).
  *
@@ -90,19 +84,10 @@ export async function ensureCloned(entry: MarketplaceEntry): Promise<void> {
   const branch = entry.branch ?? "main";
 
   try {
-    if (isGithubSource(entry.source)) {
-      // gh repo clone accepts "org/repo" or a full URL
-      const ghTarget = cloneUrl.replace("https://github.com/", "");
-      await exec(
-        `gh repo clone ${ghTarget} "${dest}" -- --depth=1 --branch=${branch}`,
-        cacheDir(),
-      );
-    } else {
-      await exec(
-        `git clone --depth=1 --branch=${branch} ${cloneUrl} "${dest}"`,
-        cacheDir(),
-      );
-    }
+    await exec(
+      `git clone --depth=1 --branch=${branch} ${cloneUrl} "${dest}"`,
+      cacheDir(),
+    );
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -120,13 +105,14 @@ export async function ensureCloned(entry: MarketplaceEntry): Promise<void> {
  * Pull the latest changes for a marketplace if it is stale.
  *
  * - Local paths: always a no-op.
- * - GitHub sources: `gh repo sync` inside the clone dir.
- * - Other HTTPS URLs: `git pull` inside the clone dir.
+ * - Remote sources: `git fetch --depth=1 origin && git reset --hard FETCH_HEAD`
+ *   inside the clone dir.  Using `reset --hard` rather than `pull --ff-only`
+ *   keeps shallow clones working even when the remote history has been rewritten.
  *
  * @param entry          Marketplace config entry.
  * @param intervalHours  Hours between refreshes (0 = never).
  * @returns              true if a pull was performed, false if skipped.
- * @throws               if the pull command fails.
+ * @throws               if the fetch/reset command fails.
  */
 export async function pullIfStale(entry: MarketplaceEntry, intervalHours: number): Promise<boolean> {
   if (isLocalSource(entry.source)) return false;
@@ -140,11 +126,7 @@ export async function pullIfStale(entry: MarketplaceEntry, intervalHours: number
   }
 
   try {
-    if (isGithubSource(entry.source)) {
-      await exec("gh repo sync --force", dest);
-    } else {
-      await exec("git pull --ff-only", dest);
-    }
+    await exec("git fetch --depth=1 origin && git reset --hard FETCH_HEAD", dest);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -161,10 +143,9 @@ export async function pullIfStale(entry: MarketplaceEntry, intervalHours: number
  * staleness.  Used by the `/marketplace update` command.
  *
  * - Local paths: no-op.
- * - GitHub sources: `gh repo sync --force`.
- * - Other HTTPS URLs: `git pull`.
+ * - Remote sources: `git fetch --depth=1 origin && git reset --hard FETCH_HEAD`.
  *
- * @throws if the pull command fails.
+ * @throws if the fetch/reset command fails.
  */
 export async function forcePull(entry: MarketplaceEntry): Promise<void> {
   if (isLocalSource(entry.source)) return;
@@ -176,11 +157,7 @@ export async function forcePull(entry: MarketplaceEntry): Promise<void> {
   }
 
   try {
-    if (isGithubSource(entry.source)) {
-      await exec("gh repo sync --force", dest);
-    } else {
-      await exec("git pull --ff-only", dest);
-    }
+    await exec("git fetch --depth=1 origin && git reset --hard FETCH_HEAD", dest);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
