@@ -23,6 +23,7 @@ import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tu
 import {
   lineColToOffset,
   offsetToLineCol,
+  offsetToLineColFromLines,
   findMatches,
   wrapWordBoundary,
   deleteRange,
@@ -39,10 +40,10 @@ import {
   normalizeRange,
   selectionStart,
   selectionEnd,
-  isNonEmpty,
   selectionCharCount,
   selectionLineRange,
   selectionText,
+  getSelectionInfo,
 } from "./selection.js";
 import {
   buildLabelMap,
@@ -118,30 +119,30 @@ export class HelixEditor extends CustomEditor {
   // 3a. Mode transitions + label
   // ══════════════════════════════════════════════════════════════════════════
 
-  private enterInsert(): void {
-    this.mode = "insert";
-    this.selection = null;
+  private resetPendingState(): void {
     this.pendingPrefix = null;
     this.pendingReplace = false;
     this.labelMode = false;
     this.labelMap = new Map();
   }
 
+  private enterInsert(): void {
+    this.mode = "insert";
+    this.resetPendingState();
+    this.selection = null;
+  }
+
   private enterNormal(): void {
     this.mode = "normal";
+    this.resetPendingState();
     this.selection = null;
-    this.pendingPrefix = null;
-    this.pendingReplace = false;
-    this.labelMode = false;
-    this.labelMap = new Map();
     this.pendingInput = null;
   }
 
   private enterSelect(): void {
     this.mode = "select";
+    this.resetPendingState();
     this.selection = selectionFromCursor(this.getCursor());
-    this.pendingPrefix = null;
-    this.pendingReplace = false;
   }
 
   private getModeLabel(): string {
@@ -373,7 +374,7 @@ export class HelixEditor extends CustomEditor {
     // ── Mode entry ────────────────────────────────────────────────────────
     if (data === "i") {
       if (this.selection) {
-        const start = selectionStart(this.getLines(), this.selection);
+        const start = selectionStart(this.selection);
         this.navigateTo(start.line, start.col);
       }
       this.enterInsert();
@@ -382,10 +383,11 @@ export class HelixEditor extends CustomEditor {
     }
     if (data === "a") {
       if (this.selection) {
-        const end = selectionEnd(this.getLines(), this.selection);
+        const end = selectionEnd(this.selection);
         const text = this.getText();
-        const endOffset = lineColToOffset(this.getLines(), end.line, end.col);
-        const afterEnd = offsetToLineCol(text, Math.min(endOffset + 1, text.length));
+        const lines = this.getLines();
+        const endOffset = lineColToOffset(lines, end.line, end.col);
+        const afterEnd = offsetToLineColFromLines(lines, Math.min(endOffset + 1, text.length));
         this.navigateTo(afterEnd.line, afterEnd.col);
       } else {
         super.handleInput(SEQ.right);
@@ -469,30 +471,33 @@ export class HelixEditor extends CustomEditor {
 
   private moveWordNext(): void {
     const text = this.getText();
+    const lines = this.getLines();
     const { line, col } = this.getCursor();
-    const offset = lineColToOffset(this.getLines(), line, col);
+    const offset = lineColToOffset(lines, line, col);
     const next = nextWordStart(text, offset);
-    const target = offsetToLineCol(text, next);
+    const target = offsetToLineColFromLines(lines, next);
     this.navigateTo(target.line, target.col);
     this.syncSelectionHead();
   }
 
   private moveWordPrev(): void {
     const text = this.getText();
+    const lines = this.getLines();
     const { line, col } = this.getCursor();
-    const offset = lineColToOffset(this.getLines(), line, col);
+    const offset = lineColToOffset(lines, line, col);
     const prev = prevWordStart(text, offset);
-    const target = offsetToLineCol(text, prev);
+    const target = offsetToLineColFromLines(lines, prev);
     this.navigateTo(target.line, target.col);
     this.syncSelectionHead();
   }
 
   private moveWordEnd(): void {
     const text = this.getText();
+    const lines = this.getLines();
     const { line, col } = this.getCursor();
-    const offset = lineColToOffset(this.getLines(), line, col);
+    const offset = lineColToOffset(lines, line, col);
     const end = nextWordEnd(text, offset);
-    const target = offsetToLineCol(text, end);
+    const target = offsetToLineColFromLines(lines, end);
     this.navigateTo(target.line, target.col);
     this.syncSelectionHead();
   }
@@ -588,17 +593,11 @@ export class HelixEditor extends CustomEditor {
   // 3f. Changes: d, c, r, x
   // ══════════════════════════════════════════════════════════════════════════
 
-  /** Resolve the effective selection offsets. Returns null if no selection is active. */
-  private getEffectiveRange(): { start: number; end: number } | null {
-    if (!this.selection) return null;
-    const lines = this.getLines();
-    return normalizeRange(lines, this.selection);
-  }
-
   private actionDelete(): void {
     const text = this.getText();
-    const range = this.getEffectiveRange();
-    if (!range || !isNonEmpty(this.getLines(), this.selection!)) {
+    const lines = this.getLines();
+    const info = this.selection ? getSelectionInfo(lines, this.selection) : null;
+    if (!info?.isNonEmpty) {
       // No selection or zero-width selection: delete char under cursor
       super.handleInput(SEQ.deleteForward);
       this.selection = null;
@@ -606,7 +605,7 @@ export class HelixEditor extends CustomEditor {
       this.tui.requestRender();
       return;
     }
-    const { start, end } = range;
+    const { start, end } = info;
     const { newText, cursorOffset } = deleteRange(text, start, end);
     const target = offsetToLineCol(newText, cursorOffset);
     this.setText(newText);
@@ -699,16 +698,19 @@ export class HelixEditor extends CustomEditor {
     const rawMatches = findMatches(regionText, pattern);
     if (rawMatches.length === 0) return;
 
-    // Re-offset matches to absolute positions in text
-    const matches = rawMatches.map(m => ({
-      start: m.start + searchStart,
-      end: m.end - 1 + searchStart, // convert exclusive → inclusive
-    }));
+    // Re-offset matches to absolute positions in text; drop zero-length matches
+    const matches = rawMatches
+      .filter(m => m.end > m.start)
+      .map(m => ({
+        start: m.start + searchStart,
+        end: m.end - 1 + searchStart, // convert exclusive → inclusive
+      }));
+    if (matches.length === 0) return;
 
     this.search = { pattern, matches, currentIdx: 0 };
     const first = matches[0]!;
-    const target = offsetToLineCol(text, first.start);
-    const endTarget = offsetToLineCol(text, first.end);
+    const target = offsetToLineColFromLines(lines, first.start);
+    const endTarget = offsetToLineColFromLines(lines, first.end);
     this.selection = makeSelection(target, endTarget);
     this.mode = "select";
     this.navigateTo(endTarget.line, endTarget.col);
@@ -753,14 +755,17 @@ export class HelixEditor extends CustomEditor {
     // Always recompute matches from the current text so that edits (deletions,
     // insertions) are reflected and stale offsets are never used.
     const text = this.getText();
-    const freshMatches = findMatches(text, this.search.pattern).map(m => ({
-      start: m.start,
-      end: m.end - 1, // inclusive
-    }));
+    const freshMatches = findMatches(text, this.search.pattern)
+      .filter(m => m.end > m.start)
+      .map(m => ({
+        start: m.start,
+        end: m.end - 1, // inclusive
+      }));
     if (freshMatches.length === 0) return;
 
+    const lines = this.getLines();
     const { line, col } = this.getCursor();
-    const currentOffset = lineColToOffset(this.getLines(), line, col);
+    const currentOffset = lineColToOffset(lines, line, col);
 
     let idx: number;
     if (direction === 1) {
@@ -777,10 +782,9 @@ export class HelixEditor extends CustomEditor {
     }
 
     this.search = { pattern: this.search.pattern, matches: freshMatches, currentIdx: idx };
-
     const match = freshMatches[idx]!;
-    const target = offsetToLineCol(text, match.start);
-    const endTarget = offsetToLineCol(text, match.end);
+    const target = offsetToLineColFromLines(lines, match.start);
+    const endTarget = offsetToLineColFromLines(lines, match.end);
     this.selection = makeSelection(target, endTarget);
     this.mode = "select";
     this.navigateTo(endTarget.line, endTarget.col);

@@ -41,41 +41,28 @@ export function offsetToLineCol(text: string, offset: number): { line: number; c
   return { line, col };
 }
 
+/**
+ * Convert a linear character offset to {line, col} using pre-split lines.
+ * O(lines) with early exit — avoids scanning every character.
+ */
+export function offsetToLineColFromLines(
+  lines: string[],
+  offset: number,
+): { line: number; col: number } {
+  let remaining = Math.max(0, offset);
+  for (let i = 0; i < lines.length; i++) {
+    const lineLen = lines[i]!.length;
+    if (remaining <= lineLen) {
+      return { line: i, col: remaining };
+    }
+    remaining -= lineLen + 1; // +1 for \n
+  }
+  // Past end of text — clamp to end of last line
+  const lastLine = Math.max(0, lines.length - 1);
+  return { line: lastLine, col: lines[lastLine]?.length ?? 0 };
+}
+
 // ─── Word Navigation ─────────────────────────────────────────────────────────
-
-/**
- * Find all word-start offsets in `text`.
- * A word starts at the first character of a sequence of \w characters
- * that is preceded by a non-\w character (or the start of text).
- */
-export function findWordStarts(text: string): number[] {
-  const starts: number[] = [];
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!;
-    const prev = i === 0 ? null : text[i - 1]!;
-    if (/\w/.test(ch) && (prev === null || !/\w/.test(prev))) {
-      starts.push(i);
-    }
-  }
-  return starts;
-}
-
-/**
- * Find all word-end offsets in `text`.
- * A word ends at the last character of a sequence of \w characters
- * that is followed by a non-\w character (or end of text).
- */
-export function findWordEnds(text: string): number[] {
-  const ends: number[] = [];
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]!;
-    const next = i === text.length - 1 ? null : text[i + 1]!;
-    if (/\w/.test(ch) && (next === null || !/\w/.test(next))) {
-      ends.push(i);
-    }
-  }
-  return ends;
-}
 
 /**
  * Find the offset of the next word start strictly after `fromOffset`.

@@ -31,17 +31,21 @@ const LABELS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 // ─── ANSI stripping ───────────────────────────────────────────────────────────
 
 /**
+ * Regex that matches any ANSI/VT escape sequence as a zero-width unit.
+ * Handles (in order):
+ *   - APC sequences  \x1b_ ... \x07  (covers CURSOR_MARKER = "\x1b_pi:c\x07")
+ *   - CSI sequences  \x1b[ ... final  (SGR, cursor movement, etc.)
+ *   - OSC sequences  \x1b] ... \x07  (hyperlinks, etc.)
+ *   - Fe/Fp 2-char   \x1b <char>      (fallback for other 2-char escapes)
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b(?:_[^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07|[@-Z\\-_])/g;
+
+/**
  * Strip all ANSI/VT escape sequences from a string, returning plain visible text.
- *
- * NOTE: defined before ANSI_RE so it uses its own inline pattern here.
- * ANSI_RE (below) is the canonical regex; this must stay in sync with it.
- * Critically, the APC pattern (_[^\x07]*\x07) must come FIRST so that
- * CURSOR_MARKER ("\x1b_pi:c\x07") is stripped in full rather than having
- * only the 2-char introducer removed and "pi:c" left behind as visible text.
  */
 export function stripAnsi(str: string): string {
-  // eslint-disable-next-line no-control-regex
-  return str.replace(/\x1b(?:_[^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07|[@-Z\\-_])/g, "");
+  return str.replace(ANSI_RE, "");
 }
 
 // ─── buildLabelMap ────────────────────────────────────────────────────────────
@@ -133,16 +137,6 @@ export function buildLabelMap(
 }
 
 // ─── ANSI-preserving highlight ───────────────────────────────────────────────
-
-/**
- * Regex that matches any ANSI/VT escape sequence as a zero-width unit.
- * Handles (in order):
- *   - APC sequences  \x1b_ ... \x07  (covers CURSOR_MARKER = "\x1b_pi:c\x07")
- *   - CSI sequences  \x1b[ ... final  (SGR, cursor movement, etc.)
- *   - OSC sequences  \x1b] ... \x07  (hyperlinks, etc.)
- *   - Fe/Fp 2-char   \x1b <char>      (fallback for other 2-char escapes)
- */
-const ANSI_RE = /\x1b(?:_[^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07|[@-Z\\-_])/g;
 
 /**
  * Single-pass highlight that wraps visible characters in the range
@@ -351,8 +345,12 @@ export function applySelectionHighlight(
     // There may be multiple spans per row (e.g. if selection spans multiple
     // words on the same visual line). Merge them into one highlight pass by
     // computing the min colStart and max colEnd.
-    const colStart = Math.min(...rowSpans.map(s => s.colStart));
-    const colEnd = Math.max(...rowSpans.map(s => s.colEnd));
+    let colStart = rowSpans[0]!.colStart;
+    let colEnd = rowSpans[0]!.colEnd;
+    for (let i = 1; i < rowSpans.length; i++) {
+      if (rowSpans[i]!.colStart < colStart) colStart = rowSpans[i]!.colStart;
+      if (rowSpans[i]!.colEnd > colEnd) colEnd = rowSpans[i]!.colEnd;
+    }
 
     return highlightRangeDirect(rawLine, colStart, colEnd, SEL_ON, SEL_OFF);
   });

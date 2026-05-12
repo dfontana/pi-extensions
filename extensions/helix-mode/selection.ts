@@ -13,7 +13,6 @@
  */
 
 import {
-  lineColToOffset,
   selectionRange,
   extractSelection,
   linesInRange,
@@ -67,29 +66,30 @@ export function normalizeRange(
 }
 
 /**
+ * Compare two {line, col} positions.
+ * Returns negative if a < b, 0 if equal, positive if a > b.
+ */
+function comparePos(
+  a: { line: number; col: number },
+  b: { line: number; col: number },
+): number {
+  return a.line !== b.line ? a.line - b.line : a.col - b.col;
+}
+
+/**
  * Return the textually earlier of anchor/head as {line, col}.
  * This is where the cursor lands on `i` (insert before selection).
  */
-export function selectionStart(
-  lines: string[],
-  sel: SelectionState,
-): { line: number; col: number } {
-  const aOffset = lineColToOffset(lines, sel.anchor.line, sel.anchor.col);
-  const hOffset = lineColToOffset(lines, sel.head.line, sel.head.col);
-  return aOffset <= hOffset ? sel.anchor : sel.head;
+export function selectionStart(sel: SelectionState): { line: number; col: number } {
+  return comparePos(sel.anchor, sel.head) <= 0 ? sel.anchor : sel.head;
 }
 
 /**
  * Return the textually later of anchor/head as {line, col}.
  * This is the last selected character for `a` (append after selection).
  */
-export function selectionEnd(
-  lines: string[],
-  sel: SelectionState,
-): { line: number; col: number } {
-  const aOffset = lineColToOffset(lines, sel.anchor.line, sel.anchor.col);
-  const hOffset = lineColToOffset(lines, sel.head.line, sel.head.col);
-  return aOffset <= hOffset ? sel.head : sel.anchor;
+export function selectionEnd(sel: SelectionState): { line: number; col: number } {
+  return comparePos(sel.anchor, sel.head) <= 0 ? sel.head : sel.anchor;
 }
 
 // ─── Query helpers ────────────────────────────────────────────────────────────
@@ -127,8 +127,22 @@ export function selectionLineRange(
   text: string,
   lines: string[],
   sel: SelectionState,
+): { firstLine: number; lastLine: number };
+export function selectionLineRange(
+  text: string,
+  range: { start: number; end: number },
+): { firstLine: number; lastLine: number };
+export function selectionLineRange(
+  text: string,
+  linesOrRange: string[] | { start: number; end: number },
+  sel?: SelectionState,
 ): { firstLine: number; lastLine: number } {
-  const { start, end } = normalizeRange(lines, sel);
+  let start: number, end: number;
+  if (Array.isArray(linesOrRange)) {
+    ({ start, end } = normalizeRange(linesOrRange, sel!));
+  } else {
+    ({ start, end } = linesOrRange);
+  }
   return linesInRange(text, start, end);
 }
 
@@ -140,7 +154,33 @@ export function selectionText(
   text: string,
   lines: string[],
   sel: SelectionState,
+): string;
+export function selectionText(
+  text: string,
+  range: { start: number; end: number },
+): string;
+export function selectionText(
+  text: string,
+  linesOrRange: string[] | { start: number; end: number },
+  sel?: SelectionState,
 ): string {
-  const { start, end } = normalizeRange(lines, sel);
+  let start: number, end: number;
+  if (Array.isArray(linesOrRange)) {
+    ({ start, end } = normalizeRange(linesOrRange, sel!));
+  } else {
+    ({ start, end } = linesOrRange);
+  }
   return extractSelection(text, start, end);
+}
+
+/**
+ * Compute all common selection metadata in one pass.
+ * Avoids redundant normalizeRange calls when multiple properties are needed.
+ */
+export function getSelectionInfo(
+  lines: string[],
+  sel: SelectionState,
+): { start: number; end: number; charCount: number; isNonEmpty: boolean } {
+  const { start, end } = normalizeRange(lines, sel);
+  return { start, end, charCount: end - start + 1, isNonEmpty: start !== end };
 }
