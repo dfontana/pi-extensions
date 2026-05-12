@@ -7,6 +7,8 @@
 
 import { visibleWidth } from "@earendil-works/pi-tui";
 
+const graphemeSegmenter = new Intl.Segmenter();
+
 // ─── Offset ↔ Line/Col ───────────────────────────────────────────────────────
 
 /**
@@ -223,8 +225,7 @@ export function wordWrapLine(line: string, maxWidth: number): VisualChunk[] {
     return [{ text: line, startIndex: 0, endIndex: line.length }];
   }
 
-  const segmenter = new Intl.Segmenter();
-  const segments = [...segmenter.segment(line)];
+  const segments = [...graphemeSegmenter.segment(line)];
   const chunks: VisualChunk[] = [];
   let chunkStart = 0;     // code-unit offset of current chunk start
   let currentWidth = 0;
