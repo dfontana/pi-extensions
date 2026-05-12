@@ -132,7 +132,7 @@ export function buildLabelMap(
   return map;
 }
 
-// ─── ANSI-preserving tokenizer ───────────────────────────────────────────────
+// ─── ANSI-preserving highlight ───────────────────────────────────────────────
 
 /**
  * Regex that matches any ANSI/VT escape sequence as a zero-width unit.
@@ -144,28 +144,56 @@ export function buildLabelMap(
  */
 const ANSI_RE = /\x1b(?:_[^\x07]*\x07|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07|[@-Z\\-_])/g;
 
-type Token = { type: "ansi"; raw: string } | { type: "char"; raw: string };
-
-/** Split a rendered line into ANSI-sequence tokens and single-character tokens. */
-function tokenize(line: string): Token[] {
-  const tokens: Token[] = [];
+/**
+ * Single-pass highlight that wraps visible characters in the range
+ * [colStart, colEnd] (inclusive, 0-based) with ANSI highlight codes,
+ * preserving all existing ANSI sequences — without allocating intermediate
+ * token objects.
+ *
+ * When an ANSI sequence that resets reverse-video passes through while we
+ * are inside a selection highlight, the highlight is immediately re-asserted.
+ */
+function highlightRangeDirect(
+  line: string,
+  colStart: number,
+  colEnd: number,
+  highlightOn: string,
+  highlightOff: string,
+): string {
+  let out = "";
+  let visCol = 0;
+  let inHighlight = false;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
   ANSI_RE.lastIndex = 0;
   while ((match = ANSI_RE.exec(line)) !== null) {
-    // Visible chars between last match and this match
+    // Process visible chars between last ANSI match and this one
     for (let i = lastIndex; i < match.index; i++) {
-      tokens.push({ type: "char", raw: line[i]! });
+      const shouldHL = visCol >= colStart && visCol <= colEnd;
+      if (shouldHL && !inHighlight) { out += highlightOn; inHighlight = true; }
+      else if (!shouldHL && inHighlight) { out += highlightOff; inHighlight = false; }
+      out += line[i];
+      visCol++;
     }
-    tokens.push({ type: "ansi", raw: match[0] });
+    // Emit the ANSI sequence itself
+    out += match[0];
+    // If this sequence could have cleared our reverse-video, re-assert it.
+    if (inHighlight && resetsHighlight(match[0])) {
+      out += highlightOn;
+    }
     lastIndex = match.index + match[0].length;
   }
-  // Remaining visible chars
+  // Remaining visible chars after the last ANSI sequence
   for (let i = lastIndex; i < line.length; i++) {
-    tokens.push({ type: "char", raw: line[i]! });
+    const shouldHL = visCol >= colStart && visCol <= colEnd;
+    if (shouldHL && !inHighlight) { out += highlightOn; inHighlight = true; }
+    else if (!shouldHL && inHighlight) { out += highlightOff; inHighlight = false; }
+    out += line[i];
+    visCol++;
   }
-  return tokens;
+  if (inHighlight) out += highlightOff;
+  return out;
 }
 
 /**
@@ -178,45 +206,7 @@ function resetsHighlight(raw: string): boolean {
   return m[1]!.split(";").some(p => p === "" || p === "0" || p === "27");
 }
 
-/**
- * Wrap visible characters in the range [colStart, colEnd] (inclusive, 0-based)
- * with ANSI highlight codes, preserving all existing ANSI sequences.
- *
- * When an ANSI token that resets reverse-video (e.g. the cursor's \x1b[27m)
- * passes through while we are inside a selection highlight, the highlight is
- * immediately re-asserted so that characters to the right of the cursor still
- * appear highlighted.  This handles the backward-selection case where the
- * cursor sits at the left edge of the selected range.
- */
-function highlightRange(
-  tokens: Token[],
-  colStart: number,
-  colEnd: number,
-  highlightOn: string,
-  highlightOff: string,
-): string {
-  let out = "";
-  let visCol = 0;
-  let inHighlight = false;
 
-  for (const tok of tokens) {
-    if (tok.type === "ansi") {
-      out += tok.raw;
-      // If this sequence could have cleared our reverse-video, re-assert it.
-      if (inHighlight && resetsHighlight(tok.raw)) {
-        out += highlightOn;
-      }
-      continue;
-    }
-    const shouldHL = visCol >= colStart && visCol <= colEnd;
-    if (shouldHL && !inHighlight) { out += highlightOn; inHighlight = true; }
-    else if (!shouldHL && inHighlight) { out += highlightOff; inHighlight = false; }
-    out += tok.raw;
-    visCol++;
-  }
-  if (inHighlight) out += highlightOff;
-  return out;
-}
 
 // ─── applyLabels ─────────────────────────────────────────────────────────────
 
@@ -339,7 +329,7 @@ const SEL_OFF = "\x1b[27m";
 /**
  * Apply a reverse-video selection highlight to rendered lines.
  * Preserves all existing ANSI codes (including CURSOR_MARKER) by using
- * an ANSI-aware tokenizer instead of stripping.
+ * an ANSI-aware single-pass highlighter instead of stripping.
  */
 export function applySelectionHighlight(
   renderedLines: string[],
@@ -364,7 +354,6 @@ export function applySelectionHighlight(
     const colStart = Math.min(...rowSpans.map(s => s.colStart));
     const colEnd = Math.max(...rowSpans.map(s => s.colEnd));
 
-    const tokens = tokenize(rawLine);
-    return highlightRange(tokens, colStart, colEnd, SEL_ON, SEL_OFF);
+    return highlightRangeDirect(rawLine, colStart, colEnd, SEL_ON, SEL_OFF);
   });
 }

@@ -76,13 +76,13 @@
       "id": "26",
       "subject": "Eliminate per-character object allocation in `tokenize()`",
       "description": "**File:** `label-overlay.ts:108-125`\n\nFor an 80-char line, `tokenize()` creates ~80 heap-allocated `{type, raw}` objects. In select mode, this runs for every rendered line with a selection span, on every render frame.\n\n**Fix:** A single-pass highlight that walks the string and emits directly to an output buffer (no intermediate token array) would eliminate this allocation.\n\n**Plan file:** plans/helix-perf-05-tokenize-per-char.md",
-      "status": "pending",
+      "status": "completed",
       "activeForm": "Optimizing tokenizer allocation",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1778547962140,
-      "updatedAt": 1778547962140
+      "updatedAt": 1778549166932
     },
     {
       "id": "27",
