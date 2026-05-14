@@ -11,7 +11,7 @@
  *   Changes     d, c, r+char, x
  *   Indent      > / <
  *   Selection   s (select regex in selection)
- *   Search      * (selection → pattern), n/N (next/prev)
+ *   Search      * (selection → pattern), n/N (next/prev), / (→ Insert + "/")
  *   Select mode All Normal movements extend the selection
  */
 
@@ -438,6 +438,13 @@ export class HelixEditor extends CustomEditor {
     if (data === "*") { this.actionSearchSelection(true); return; }
     if (data === "n") { this.navigateMatch(1); return; }
     if (data === "N") { this.navigateMatch(-1); return; }
+    // / — drop into insert mode and forward the slash so slash commands work
+    if (data === "/") {
+      this.enterInsert();
+      super.handleInput("/");
+      this.tui.requestRender();
+      return;
+    }
 
     // ── Pass control sequences through; swallow printable chars in normal ─
     if (data.length === 1 && data.charCodeAt(0) >= 32) return;

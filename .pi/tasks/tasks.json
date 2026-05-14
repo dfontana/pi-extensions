@@ -13,18 +13,6 @@
       "updatedAt": 1778442175549
     },
     {
-      "id": "21",
-      "subject": "Fix jj footer to report ?? on error",
-      "description": "The getVcsInfo() function in extensions/improved-footer/index.ts can surface errors or crash when jj fails (e.g. stale workspace, corrupt .jj dir, jj not on PATH). The exec() helper swallows its own errors but the surrounding code is not fully guarded.\n\nFiles: extensions/improved-footer/index.ts\n\nAcceptance criteria:\n- Any failure in getVcsInfo() (exec error, thrown exception, bad output) returns \"jj:??\" rather than crashing or showing garbage\n- A stale workspace (jj fails with a workspace error) shows \"jj:???\" in the footer\n- The fix wraps the entire getVcsInfo call site (or the function body) in a broad try/catch so no exception can bubble up into the footer render path",
-      "status": "completed",
-      "activeForm": "Planning jj footer error handling",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778509344570,
-      "updatedAt": 1778510721596
-    },
-    {
       "id": "22",
       "subject": "Fix `navigateTo()` O(distance) synthetic key events",
       "description": "**File:** `editor.ts:278-304`\n\nEvery cursor jump (`w`, `b`, `e`, `gg`, `ge`, `gw` label jumps, `n`/`N` search navigation) emits O(|lineDelta| + targetCol) individual `super.handleInput()` calls. Jumping from line 20, col 60 back to line 0, col 0 emits ~100 synthetic key events.\n\n**Fix:** Lobby for or shim a `setCursor()` API on `CustomEditor` to replace the synthetic-keypress loop.\n\n**Plan file:** plans/helix-perf-01-navigate-to.md",
@@ -35,18 +23,6 @@
       "blockedBy": [],
       "createdAt": 1778547962137,
       "updatedAt": 1778547962137
-    },
-    {
-      "id": "23",
-      "subject": "Hoist `Intl.Segmenter` to module scope in `wordWrapLine()`",
-      "description": "**File:** `buffer.ts:155-156`\n\n`Intl.Segmenter` is instantiated on every `wordWrapLine()` call. For a 15-line buffer, each render in select mode creates 15 instances. It's stateless/reusable — hoist to module scope.\n\n**Fix:** One-line change — move `new Intl.Segmenter()` to module level.\n\n**Plan file:** plans/helix-perf-02-intl-segmenter.md",
-      "status": "completed",
-      "activeForm": "Hoisting Intl.Segmenter",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962138,
-      "updatedAt": 1778548251821
     },
     {
       "id": "24",
@@ -71,102 +47,6 @@
       "blockedBy": [],
       "createdAt": 1778547962140,
       "updatedAt": 1778547962140
-    },
-    {
-      "id": "26",
-      "subject": "Eliminate per-character object allocation in `tokenize()`",
-      "description": "**File:** `label-overlay.ts:108-125`\n\nFor an 80-char line, `tokenize()` creates ~80 heap-allocated `{type, raw}` objects. In select mode, this runs for every rendered line with a selection span, on every render frame.\n\n**Fix:** A single-pass highlight that walks the string and emits directly to an output buffer (no intermediate token array) would eliminate this allocation.\n\n**Plan file:** plans/helix-perf-05-tokenize-per-char.md",
-      "status": "completed",
-      "activeForm": "Optimizing tokenizer allocation",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962140,
-      "updatedAt": 1778549166932
-    },
-    {
-      "id": "27",
-      "subject": "Optimize `offsetToLineCol()` with line-length prefix sum",
-      "description": "**File:** `buffer.ts:27-38`\n\n`offsetToLineCol()` is O(n) linear scan called multiple times per operation. When `getLines()` is already available, a simple prefix-sum over line lengths would be O(1) per lookup.\n\n**Fix:** Add an `offsetToLineColFromLines(lines, offset)` that walks by line lengths instead of character-by-character.\n\n**Plan file:** plans/helix-perf-06-offset-to-linecol.md",
-      "status": "completed",
-      "activeForm": "Optimizing offsetToLineCol",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962141,
-      "updatedAt": 1778552113609
-    },
-    {
-      "id": "28",
-      "subject": "Simplify `selectionStart()`/`selectionEnd()` to avoid offset conversion",
-      "description": "**File:** `selection.ts:70-90`\n\nThese functions call `lineColToOffset` twice to determine which endpoint is \"earlier\", but a simple tuple comparison `(line, col)` suffices — no offset computation needed.\n\n**Plan file:** plans/helix-perf-07-selection-offset-conversion.md",
-      "status": "completed",
-      "activeForm": "Simplifying selection helpers",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962142,
-      "updatedAt": 1778552113610
-    },
-    {
-      "id": "29",
-      "subject": "Unify repeated `normalizeRange` computation in selection helpers",
-      "description": "**File:** `selection.ts`\n\n`isNonEmpty`, `selectionCharCount`, `selectionLineRange`, and `selectionText` all independently call `normalizeRange`. When used together the offset computation is redundantly repeated.\n\n**Fix:** Compute range once and pass it through, or unify into a single `getSelectionInfo()` that returns all needed data.\n\n**Plan file:** plans/helix-perf-08-repeated-normalize-range.md",
-      "status": "completed",
-      "activeForm": "Unifying normalizeRange calls",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962142,
-      "updatedAt": 1778552113611
-    },
-    {
-      "id": "30",
-      "subject": "Remove dead code: `findWordStarts()` and `findWordEnds()`",
-      "description": "**File:** `buffer.ts:51-73`\n\nThese functions scan the entire text and return all positions. They are never called anywhere in the extension — actual navigation uses the incremental `nextWordStart()`, `prevWordStart()`, `nextWordEnd()` variants. Remove entirely.\n\n**Plan file:** plans/helix-perf-09-dead-code.md",
-      "status": "completed",
-      "activeForm": "Removing dead code",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962143,
-      "updatedAt": 1778552113611
-    },
-    {
-      "id": "31",
-      "subject": "DRY duplicated ANSI regex in label-overlay",
-      "description": "**File:** `label-overlay.ts:40` vs `label-overlay.ts:98`\n\n`stripAnsi()` uses an inline regex literal that must \"stay in sync\" with `ANSI_RE` defined 60 lines below. Violates DRY and creates a latent bug vector.\n\n**Fix:** Extract to a shared constant or have `stripAnsi()` reference `ANSI_RE`.\n\n**Plan file:** plans/helix-perf-10-duplicated-ansi-regex.md",
-      "status": "completed",
-      "activeForm": "Deduplicating ANSI regex",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962144,
-      "updatedAt": 1778552113612
-    },
-    {
-      "id": "32",
-      "subject": "Replace spread-into-Math with simple loop in `applySelectionHighlight`",
-      "description": "**File:** `label-overlay.ts:246-247`\n\n`Math.min(...rowSpans.map(...))` creates two intermediate arrays and spreads them into function arguments. Replace with a simple loop.\n\n**Plan file:** plans/helix-perf-11-spread-into-math.md",
-      "status": "completed",
-      "activeForm": "Replacing spread-into-Math",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962145,
-      "updatedAt": 1778552113613
-    },
-    {
-      "id": "33",
-      "subject": "Extract shared `resetPendingState()` for mode transitions",
-      "description": "**File:** `editor.ts:93-118`\n\nAll three mode-transition methods (`enterInsert`, `enterNormal`, `enterSelect`) reset overlapping subsets of state (`pendingPrefix`, `pendingReplace`, `labelMode`, `labelMap`).\n\n**Fix:** Extract a shared `resetPendingState()` helper to eliminate repetition and reduce risk of forgetting to clear a field when adding new pending states.\n\n**Plan file:** plans/helix-perf-12-state-reset-duplication.md",
-      "status": "completed",
-      "activeForm": "Extracting resetPendingState",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1778547962145,
-      "updatedAt": 1778552113614
     },
     {
       "id": "34",
