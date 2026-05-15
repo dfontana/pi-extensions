@@ -17,6 +17,28 @@ prompts/            # Auto-discovered .md prompt templates
 pi install git:github.com/dfontana/pi-extensions
 ```
 
+## Development
+
+Install repo-level development dependencies before running tests:
+
+```bash
+npm install
+```
+
+Run the TypeScript unit tests with Node's built-in test runner:
+
+```bash
+npm test
+```
+
+Run TypeScript type-checking:
+
+```bash
+npm run typecheck
+```
+
+The Helix editor black-box tests live under `extensions/helix-mode/__tests__/` and exercise public editor behavior: simulated input, public buffer/cursor state, and normalized `render(width)` output.
+
 ## Installed Packages
 
 - npm:@tintinweb/pi-subagents
@@ -184,6 +206,7 @@ Modal editing for pi's input box, inspired by [Helix](https://helix-editor.com/)
 |---|---|
 | `d` | Delete selection (or char under cursor if no selection) |
 | `c` | Change: delete selection then enter Insert |
+| `y` | Yank active non-empty selection to the system clipboard, then return to Normal |
 | `r` + char | Replace character under cursor with `char` |
 | `x` | Select current line (extend to next line if already line-selected) |
 | `>` | Indent selected lines by 2 spaces |
@@ -202,7 +225,7 @@ All search results are highlighted as Select-mode selections (anchor + cursor sp
 
 ### Select Mode
 
-All Normal mode movement keys (`h`/`j`/`k`/`l`, arrows, `w`/`b`/`e`, `0`/`$`, `gg`/`ge`) extend the selection rather than replacing it. The char-count in the mode indicator updates live. `d`, `c`, `>`, `<`, and `s` operate on the full selection.
+All Normal mode movement keys (`h`/`j`/`k`/`l`, arrows, `w`/`b`/`e`, `0`/`$`, `gg`/`ge`) extend the selection rather than replacing it. The char-count in the mode indicator updates live. `d`, `c`, `y`, `>`, `<`, and `s` operate on the full selection. `y` is a no-op unless a non-empty selection is active.
 
 ### Command
 
@@ -216,6 +239,5 @@ All Normal mode movement keys (`h`/`j`/`k`/`l`, arrows, `w`/`b`/`e`, `0`/`$`, `g
 
 - No true multi-cursor (use `*` + `n`/`N` to navigate matches one at a time)
 - Selection not visually highlighted in text (only the char-count in the border label)
-- No clipboard yank (`y`); use your terminal’s copy
 - No count prefixes (`3w`, `5j` etc.)
 

@@ -8,7 +8,7 @@
  *   Movement    h/l/j/k (+ arrow aliases), w/b/e, 0/$ (+ Home/End)
  *   g-prefix    gg (buffer start), ge (buffer end), gw (jump-to-word labels)
  *   Mode entry  i, a, o, O, v  (Escape → Normal)
- *   Changes     d, c, r+char, x
+ *   Changes     d, c, y, r+char, x
  *   Indent      > / <
  *   Selection   s (select regex in selection)
  *   Search      * (selection → pattern), n/N (next/prev), / (→ Insert + "/")
@@ -52,6 +52,7 @@ import {
   applySelectionHighlight,
 } from "./label-overlay.js";
 import type { LabelMap } from "./label-overlay.js";
+import { writeSystemClipboard } from "./clipboard.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -279,8 +280,11 @@ export class HelixEditor extends CustomEditor {
       if (this.onExtensionShortcut?.(data)) return;
 
       // Step 2: app-level keybinding actions registered via onAction().
+      const keybindings = (this as unknown as {
+        keybindings: { matches(data: string, keybinding: string): boolean };
+      }).keybindings;
       for (const [action, handler] of this.actionHandlers) {
-        if (this.keybindings.matches(data, action)) {
+        if (keybindings.matches(data, action)) {
           handler();
           return;
         }
@@ -424,6 +428,7 @@ export class HelixEditor extends CustomEditor {
     // ── Changes ───────────────────────────────────────────────────────────
     if (data === "d") { this.actionDelete(); return; }
     if (data === "c") { this.actionChange(); return; }
+    if (data === "y") { void this.actionYank(); return; }
     if (data === "r") { this.pendingReplace = true; this.tui.requestRender(); return; }
     if (data === "x") { this.actionSelectLine(); return; }
 
@@ -597,7 +602,7 @@ export class HelixEditor extends CustomEditor {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // 3f. Changes: d, c, r, x
+  // 3f. Changes: d, c, y, r, x
   // ══════════════════════════════════════════════════════════════════════════
 
   private actionDelete(): void {
@@ -625,6 +630,25 @@ export class HelixEditor extends CustomEditor {
     this.actionDelete();
     this.enterInsert();
     this.tui.requestRender();
+  }
+
+  private async actionYank(): Promise<void> {
+    const text = this.getText();
+    const lines = this.getLines();
+    const info = this.selection ? getSelectionInfo(lines, this.selection) : null;
+
+    if (!info?.isNonEmpty) return;
+
+    const selectedText = selectionText(text, { start: info.start, end: info.end });
+
+    try {
+      await writeSystemClipboard(selectedText);
+      this.enterNormal();
+      this.tui.requestRender();
+    } catch (error) {
+      console.warn("helix-mode: failed to yank selection to clipboard", error);
+      this.tui.requestRender();
+    }
   }
 
   private actionSelectLine(): void {

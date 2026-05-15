@@ -8,7 +8,7 @@
  *   - Normal mode: hjkl + arrow aliases, w/b/e, 0/$ word / line navigation
  *   - g-prefix:    gg (buffer start), ge (buffer end), gw (jump-to-word labels)
  *   - Mode entry:  i, a, o, O → Insert;  v → Select;  Escape → Normal
- *   - Changes:     d (delete), c (change), r+char (replace), x (select line)
+ *   - Changes:     d (delete), c (change), y (yank), r+char (replace), x (select line)
  *   - Indent:      > / <
  *   - Select mode: all movements extend the selection anchor
  *   - Search:      * (word under cursor → pattern), n/N (next/prev)
@@ -55,7 +55,7 @@ export default function (pi: ExtensionAPI): void {
   // ── /helix command ────────────────────────────────────────────────────────
   pi.registerCommand("helix", {
     description: "Toggle Helix modal editing on/off.",
-    handler: (_args, ctx) => {
+    handler: async (_args, ctx) => {
       // Always toggle — no on/off argument paths
       if (helixEnabled) {
         helixEnabled = false;
