@@ -65,11 +65,12 @@ function findJjRoot(startDir: string): string | null {
 }
 
 function isGitCommand(command: string): string | null {
-  const trimmed = command.trimStart();
   for (const gitCmd of GIT_COMMANDS) {
-    if (trimmed === gitCmd || trimmed.startsWith(gitCmd + " ")) {
-      return gitCmd;
-    }
+    const idx = command.indexOf(gitCmd);
+    if (idx === -1) continue;
+    // Ensure 'git' is a standalone word: the preceding character must not be alphanumeric.
+    if (idx > 0 && /[a-zA-Z0-9_]/.test(command[idx - 1])) continue;
+    return gitCmd;
   }
   return null;
 }
