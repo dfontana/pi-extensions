@@ -213,6 +213,7 @@ export default function (pi: ExtensionAPI) {
     cachedTotalCacheRead = 0;
     cachedTotalCacheWrite = 0;
     modelId = ctx.model?.id ?? "";
+    thinkingLevel = pi.getThinkingLevel();
     vcsCwd = ctx.cwd;
     isJjRepo = existsSync(join(ctx.cwd, ".jj"));
 
