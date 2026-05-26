@@ -89,6 +89,17 @@ async function setTabDot(add: boolean): Promise<void> {
 export default function (pi: ExtensionAPI) {
     const inZellij = process.env.ZELLIJ !== undefined;
 
+    pi.registerCommand("ack", {
+        description: "Clear the Zellij tab dot (no-op outside Zellij)",
+        handler: async (_args, _ctx) => {
+            if (inZellij) await setTabDot(false);
+        },
+    });
+
+    pi.on("session_shutdown", async (event) => {
+        if (inZellij && event.reason === "quit") await setTabDot(false);
+    });
+
     pi.on("agent_end", async () => {
         notify("Pi", "Ready for input");
         if (inZellij) await setTabDot(true);
