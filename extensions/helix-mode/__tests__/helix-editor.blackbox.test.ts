@@ -264,6 +264,39 @@ describe("HelixEditor black-box navigation assumptions", () => {
   });
 });
 
+describe("HelixEditor black-box gw labels", () => {
+  it("shows two-character labels inline and jumps after typing both characters", () => {
+    const { editor } = createEditor({ rows: 20 });
+    editor.setText("the dog goes");
+    enterNormal(editor);
+    press(editor, "g", "g");
+
+    press(editor, "g", "w");
+    assert.deepEqual(renderBody(editor, WRAP_WIDTH), ["aae abg aces"]);
+
+    press(editor, "a");
+    assert.deepEqual(renderBody(editor, WRAP_WIDTH), ["aae abg aces"]);
+
+    press(editor, "c");
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 8 });
+    assert.deepEqual(renderBody(editor, WRAP_WIDTH), ["the dog goes"]);
+  });
+
+  it("does not offer labels for one-character words", () => {
+    const { editor } = createEditor({ rows: 20 });
+    editor.setText("a dog");
+    enterNormal(editor);
+    press(editor, "g", "g");
+
+    press(editor, "g", "w");
+    assert.deepEqual(renderBody(editor, WRAP_WIDTH), ["a aag"]);
+
+    press(editor, "a", "a");
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 2 });
+    assert.deepEqual(renderBody(editor, WRAP_WIDTH), ["a dog"]);
+  });
+});
+
 describe("HelixEditor black-box Unicode deletion", () => {
   it("single delete removes one emoji grapheme and rewraps", () => {
     const { editor } = createEditor({ rows: 20 });

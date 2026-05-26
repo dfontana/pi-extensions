@@ -1,8 +1,8 @@
 /**
  * label-overlay.ts — gw jump-to-word label machinery.
  *
- * buildLabelMap: given logical lines + render width, assigns single-char
- * labels (a-z, A-Z) to each word-start and returns their visual (row, col).
+ * buildLabelMap: given logical lines + render width, assigns two-character
+ * labels (aa-zz) to each word-start and returns their visual (row, col).
  *
  * applyLabels: given already-rendered lines (with ANSI) and the label map,
  * strips ANSI, replaces the first character of each labeled word with a
@@ -21,12 +21,21 @@ export interface LabelEntry {
   logicalCol: number;
 }
 
-/** Maps single-char label (e.g. 'a', 'B') → visual + logical position. */
+/** Maps two-char label (e.g. 'aa', 'bc') → visual + logical position. */
 export type LabelMap = Map<string, LabelEntry>;
 
 // ─── Label alphabet ───────────────────────────────────────────────────────────
 
-const LABELS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const TWO_CHAR_CHARS = "abcdefghijklmnopqrstuvwxyz"; // 26 lowercase letters
+
+/** Yields all 676 two-character lowercase labels: aa, ab, … az, ba, … zz. */
+function* buildTwoCharLabels(): Generator<string> {
+  for (const a of TWO_CHAR_CHARS) {
+    for (const b of TWO_CHAR_CHARS) {
+      yield a + b;
+    }
+  }
+}
 
 // ─── ANSI stripping ───────────────────────────────────────────────────────────
 
@@ -71,10 +80,15 @@ function computeLayoutWidth(width: number, paddingX: number): number {
  * rendered character positions (accounting for word wrap, the top border
  * row the editor prepends, and the editor's left padding).
  *
- * @param lines       Logical lines from `getLines()`
- * @param width       Render width passed to `render()`
- * @param topBorderRows  Number of top border rows the editor renders (default 1)
- * @param paddingX    Editor left padding in columns (default 1, from `getPaddingX()`)
+ * @param lines            Logical lines from `getLines()`
+ * @param width            Render width passed to `render()`
+ * @param topBorderRows    Number of top border rows the editor renders (default 1)
+ * @param paddingX         Editor left padding in columns (default 1, from `getPaddingX()`)
+ * @param scrollOffset     Current scroll offset (default 0)
+ * @param maxVisibleLines  Max visible content lines (default 9999)
+ * @param cursorTextOffset Linear text offset of the cursor; when provided, word
+ *                         starts are sorted by proximity so the closest words
+ *                         get the earliest labels.
  */
 export function buildLabelMap(
   lines: string[],
@@ -83,13 +97,22 @@ export function buildLabelMap(
   paddingX = 1,
   scrollOffset = 0,
   maxVisibleLines = 9999,
+  cursorTextOffset?: number,
 ): LabelMap {
   const map: LabelMap = new Map();
-  let labelIdx = 0;
-  // Absolute visual row (0-indexed, independent of border offset and scroll)
-  let visualRow = 0;
   // Layout width: mirrors Pi's Editor.render() formula exactly
   const contentWidth = computeLayoutWidth(width, paddingX);
+
+  // ── Phase 1: collect all visible word-start candidates ──
+  interface Candidate extends LabelEntry {
+    textOffset: number;
+  }
+  const candidates: Candidate[] = [];
+
+  // Absolute visual row (0-indexed, independent of border offset and scroll)
+  let visualRow = 0;
+  // Linear text offset of the first character of the current logical line
+  let lineOffset = 0;
 
   outer: for (let logicalLine = 0; logicalLine < lines.length; logicalLine++) {
     const line = lines[logicalLine] ?? "";
@@ -112,18 +135,27 @@ export function buildLabelMap(
         const logicalCol = chunkStart + ci2;
         const ch = chunkText[ci2]!;
         const prev = logicalCol === 0 ? null : line[logicalCol - 1]!;
+        const next = logicalCol >= line.length - 1 ? null : line[logicalCol + 1]!;
 
-        if (/\w/.test(ch) && (prev === null || !/\w/.test(prev))) {
-          if (labelIdx >= LABELS.length) break;
-          const label = LABELS[labelIdx++]!;
+        // Label only word starts for words with at least two characters.  A
+        // one-character word cannot safely display a two-character overlay
+        // without spilling into the next column and visually merging with a
+        // neighboring label (matching Helix's behavior).
+        if (
+          /\w/.test(ch)
+          && (prev === null || !/\w/.test(prev))
+          && next !== null
+          && /\w/.test(next)
+        ) {
           // ci2 = offset within chunk = column within this visual row's content
           // Add paddingX because the editor renders content starting at column paddingX
           const visualCol = paddingX + ci2;
-          map.set(label, {
+          candidates.push({
             visualRow: renderedRow,
             visualCol,
             logicalLine,
             logicalCol,
+            textOffset: lineOffset + logicalCol,
           });
         }
       }
@@ -131,6 +163,29 @@ export function buildLabelMap(
 
     // Advance past all visual rows this logical line occupied
     visualRow += Math.max(1, chunks.length);
+    lineOffset += line.length + 1; // +1 for the \n separator
+  }
+
+  // ── Phase 2: sort by proximity to cursor (if offset provided) ──
+  if (cursorTextOffset !== undefined) {
+    candidates.sort((a, b) => {
+      const da = Math.abs(a.textOffset - cursorTextOffset);
+      const db = Math.abs(b.textOffset - cursorTextOffset);
+      if (da !== db) return da - db;
+      // Tie-break: forward words (offset ≥ cursor) before backward words
+      const aForward = a.textOffset >= cursorTextOffset ? 0 : 1;
+      const bForward = b.textOffset >= cursorTextOffset ? 0 : 1;
+      return aForward - bForward;
+    });
+  }
+
+  // ── Phase 3: assign two-char labels ──
+  const labelGen = buildTwoCharLabels();
+  for (const candidate of candidates) {
+    const next = labelGen.next();
+    if (next.done) break;
+    const { textOffset: _textOffset, ...entry } = candidate;
+    map.set(next.value, entry);
   }
 
   return map;
@@ -213,26 +268,43 @@ const LABEL_OFF = "\x1b[0m";
  * produce new lines where each labeled word-start character is replaced with
  * a bold-red label character.
  *
- * We strip ANSI here because gw is a single-keypress interaction and cursor
+ * @param renderedLines  Raw output of `super.render(width)`.
+ * @param labelMap       Map of full two-char label → position.
+ * @param prefixFilter   When `null` (default), every labeled word shows both
+ *                       characters of its two-char label.  When a single
+ *                       lowercase letter, only labels whose first char matches
+ *                       are shown, and each still displays both characters.
+ *
+ * We strip ANSI here because gw is a two-keypress interaction and cursor
  * precision during it doesn't matter.
  */
-export function applyLabels(renderedLines: string[], labelMap: LabelMap): string[] {
+export function applyLabels(
+  renderedLines: string[],
+  labelMap: LabelMap,
+  prefixFilter: string | null = null,
+): string[] {
   if (labelMap.size === 0) return renderedLines;
 
-  // Build a per-row list of (visualCol → labelChar) substitutions
+  // Build a per-row list of (visualCol → displayChar) substitutions
   const substitutions = new Map<number, Map<number, string>>();
   for (const [label, entry] of labelMap) {
+    // When a prefix filter is active, skip labels that don't match it
+    if (prefixFilter !== null && label[0] !== prefixFilter) continue;
     if (!substitutions.has(entry.visualRow)) {
       substitutions.set(entry.visualRow, new Map());
     }
-    substitutions.get(entry.visualRow)!.set(entry.visualCol, label);
+    const rowSubs = substitutions.get(entry.visualRow)!;
+    rowSubs.set(entry.visualCol, label[0] ?? label);
+    if (label[1] !== undefined) {
+      rowSubs.set(entry.visualCol + 1, label[1]);
+    }
   }
 
   return renderedLines.map((rawLine, rowIdx) => {
     const subs = substitutions.get(rowIdx);
     if (!subs || subs.size === 0) return rawLine;
 
-    // Strip ANSI to get plain visible characters (acceptable for 1-keypress label mode)
+    // Strip ANSI to get plain visible characters (acceptable for brief label mode)
     const plain = stripAnsi(rawLine);
     let out = "";
     for (let col = 0; col < plain.length; col++) {

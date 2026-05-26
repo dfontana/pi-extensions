@@ -107,6 +107,8 @@ export class HelixEditor extends CustomEditor {
   private labelMode = false;
   private labelMap: LabelMap = new Map();
   private lastRenderWidth = 80;
+  /** First character typed during a two-char label jump; null when not in mid-sequence. */
+  private labelPrefix: string | null = null;
 
   // ── Theme getter ─────────────────────────────────────────────────────────
   private readonly getTheme: () => Theme;
@@ -125,6 +127,7 @@ export class HelixEditor extends CustomEditor {
     this.pendingReplace = false;
     this.labelMode = false;
     this.labelMap = new Map();
+    this.labelPrefix = null;
   }
 
   private enterInsert(): void {
@@ -184,7 +187,7 @@ export class HelixEditor extends CustomEditor {
 
     // In label mode, overlay the gw labels (strips ANSI — brief interaction)
     if (this.labelMode && this.labelMap.size > 0) {
-      lines = applyLabels(lines, this.labelMap);
+      lines = applyLabels(lines, this.labelMap, this.labelPrefix);
     }
 
     const last = lines.length - 1;
@@ -885,9 +888,13 @@ export class HelixEditor extends CustomEditor {
     const lines = this.getLines();
     if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) return;
 
+    const { line, col } = this.getCursor();
+    const cursorTextOffset = lineColToOffset(lines, line, col);
+
     this.labelMap = buildLabelMap(
       lines, this.lastRenderWidth, 1, this.getPaddingX(),
       this.getScrollOffset(), this.getMaxVisibleLines(),
+      cursorTextOffset,
     );
     if (this.labelMap.size === 0) return;
 
@@ -896,22 +903,43 @@ export class HelixEditor extends CustomEditor {
   }
 
   private handleLabelInput(data: string): void {
-    this.labelMode = false;
+    // ── Second keypress: complete the two-char label ──
+    if (this.labelPrefix !== null) {
+      const prefix = this.labelPrefix;
+      this.labelMode = false;
+      this.labelPrefix = null;
+      const entry = this.labelMap.get(prefix + data);
+      this.labelMap = new Map();
+      if (entry) {
+        this.navigateTo(entry.logicalLine, entry.logicalCol);
+      } else {
+        this.tui.requestRender();
+      }
+      return;
+    }
 
+    // ── First keypress ──
+    // Cancel on Escape or any non-printable input
     if (matchesKey(data, "escape") || data.length !== 1) {
+      this.labelMode = false;
       this.labelMap = new Map();
       this.tui.requestRender();
       return;
     }
 
-    const entry = this.labelMap.get(data);
-    this.labelMap = new Map();
-
-    if (entry) {
-      this.navigateTo(entry.logicalLine, entry.logicalCol);
-    } else {
+    // If the typed char is a valid first-char prefix of any label, enter prefix mode
+    const isValidPrefix = [...this.labelMap.keys()].some(k => k[0] === data);
+    if (isValidPrefix) {
+      this.labelPrefix = data;
+      // Stay in labelMode so the next keypress is routed here again
       this.tui.requestRender();
+      return;
     }
+
+    // No matching prefix — cancel label mode
+    this.labelMode = false;
+    this.labelMap = new Map();
+    this.tui.requestRender();
   }
 
   // ══════════════════════════════════════════════════════════════════════════
