@@ -63,25 +63,32 @@ function execAsync(cmd: string, args: string[]): Promise<string> {
     );
 }
 
-async function getTabInfo(): Promise<{ name: string; id: string } | null> {
+async function resolveOwnTab(): Promise<{ name: string; id: string } | null> {
+    const paneId = process.env.ZELLIJ_PANE_ID;
+    if (!paneId) return null;
     try {
-        const out = await execAsync("zellij", ["action", "current-tab-info"]);
-        const name = out.match(/^name:\s*(.+)$/m)?.[1]?.trim();
-        const id = out.match(/^id:\s*(\d+)$/m)?.[1]?.trim();
-        return name && id ? { name, id } : null;
+        const raw = await execAsync("zellij", ["action", "list-panes", "--tab", "--json"]);
+        const panes: Array<{ id: number; is_plugin: boolean; tab_id: number; tab_name: string }> =
+            JSON.parse(raw);
+        const pane = panes.find((p) => !p.is_plugin && p.id === Number(paneId));
+        if (!pane) return null;
+        return { name: pane.tab_name, id: String(pane.tab_id) };
     } catch {
         return null;
     }
 }
 
-async function setTabDot(add: boolean): Promise<void> {
-    const tab = await getTabInfo();
-    if (!tab) return;
+async function setTabDot(add: boolean, tab: { name: string; id: string }): Promise<void> {
     const hasDot = tab.name.startsWith("• ");
-    if (add && !hasDot)
-        await execAsync("zellij", ["action", "rename-tab", `• ${tab.name}`, "--tab-id", tab.id]).catch(() => {});
-    else if (!add && hasDot)
-        await execAsync("zellij", ["action", "rename-tab", tab.name.slice(2), "--tab-id", tab.id]).catch(() => {});
+    if (add && !hasDot) {
+        const newName = `• ${tab.name}`;
+        await execAsync("zellij", ["action", "rename-tab", newName, "--tab-id", tab.id]).catch(() => {});
+        tab.name = newName;
+    } else if (!add && hasDot) {
+        const newName = tab.name.slice(2);
+        await execAsync("zellij", ["action", "rename-tab", newName, "--tab-id", tab.id]).catch(() => {});
+        tab.name = newName;
+    }
 }
 
 // ── Extension entry ──────────────────────────────────────────────────────────
@@ -89,23 +96,32 @@ async function setTabDot(add: boolean): Promise<void> {
 export default function (pi: ExtensionAPI) {
     const inZellij = process.env.ZELLIJ !== undefined;
 
+    // Resolved once at startup; null outside Zellij or if probe fails.
+    const tabPromise: Promise<{ name: string; id: string } | null> = inZellij
+        ? resolveOwnTab()
+        : Promise.resolve(null);
+
     pi.registerCommand("ack", {
         description: "Clear the Zellij tab dot (no-op outside Zellij)",
         handler: async (_args, _ctx) => {
-            if (inZellij) await setTabDot(false);
+            const tab = await tabPromise;
+            if (tab) await setTabDot(false, tab);
         },
     });
 
     pi.on("session_shutdown", async (event) => {
-        if (inZellij && event.reason === "quit") await setTabDot(false);
+        const tab = await tabPromise;
+        if (tab && event.reason === "quit") await setTabDot(false, tab);
     });
 
     pi.on("agent_end", async () => {
         notify("Pi", "Ready for input");
-        if (inZellij) await setTabDot(true);
+        const tab = await tabPromise;
+        if (tab) await setTabDot(true, tab);
     });
 
     pi.on("agent_start", async () => {
-        if (inZellij) await setTabDot(false);
+        const tab = await tabPromise;
+        if (tab) await setTabDot(false, tab);
     });
 }
