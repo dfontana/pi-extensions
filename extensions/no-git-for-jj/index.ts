@@ -7,8 +7,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "fs";
-import { join } from "path";
+import { execFile } from "child_process";
 
 const GIT_COMMANDS = [
   "git add",
@@ -54,14 +53,12 @@ const JJ_ALTERNATIVES: Record<string, string> = {
   "git init": "jj git init",
 };
 
-function findJjRoot(startDir: string): string | null {
-  let dir = startDir;
-  while (true) {
-    if (existsSync(join(dir, ".jj"))) return dir;
-    const parent = join(dir, "..");
-    if (parent === dir) return null;
-    dir = parent;
-  }
+function isJjRepo(cwd: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile("jj", ["root", "--quiet"], { cwd, encoding: "utf8", timeout: 5000 }, (err) => {
+      resolve(!err);
+    });
+  });
 }
 
 function isGitCommand(command: string): string | null {
@@ -91,13 +88,12 @@ export default function (pi: ExtensionAPI) {
     const gitCmd = isGitCommand(command);
     if (!gitCmd) return;
 
-    const jjRoot = findJjRoot(ctx.cwd);
-    if (!jjRoot) return;
+    if (!await isJjRepo(ctx.cwd)) return;
 
     const alt = getJjAlternative(gitCmd);
     return {
       block: true,
-      reason: `Git commands are blocked in jj repositories (.jj found at ${jjRoot}). Use jj instead:\n  ${command} → ${alt}`,
+      reason: `Git commands are blocked in jj repositories. Use jj instead:\n  ${command} → ${alt}`,
     };
   });
 }

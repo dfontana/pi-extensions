@@ -14,8 +14,6 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "child_process";
-import { existsSync } from "fs";
-import { join } from "path";
 import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 
 // ─── Jujutsu Bookmark Detection (async, activity-triggered) ───────────────
@@ -29,8 +27,12 @@ function execAsync(cmd: string, args: string[], cwd: string): Promise<string | n
   });
 }
 
+async function detectJjRepo(cwd: string): Promise<boolean> {
+  const result = await execAsync("jj", ["root", "--quiet"], cwd);
+  return result !== null;
+}
+
 async function resolveJjBookmark(cwd: string): Promise<string | null> {
-  if (!existsSync(join(cwd, ".jj"))) return null;
   const result = await execAsync(
     "jj",
     ["log", "-r", "ancestors(@) & bookmarks()", "-T", "local_bookmarks.map(|c| c.name())", "-n", "1", "--no-graph"],
@@ -215,7 +217,7 @@ export default function (pi: ExtensionAPI) {
     modelId = ctx.model?.id ?? "";
     thinkingLevel = pi.getThinkingLevel();
     vcsCwd = ctx.cwd;
-    isJjRepo = existsSync(join(ctx.cwd, ".jj"));
+    isJjRepo = await detectJjRepo(ctx.cwd);
 
     // Backfill token totals from existing session entries (session restore)
     try {
