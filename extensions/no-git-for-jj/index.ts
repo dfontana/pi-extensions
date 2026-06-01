@@ -84,6 +84,10 @@ export default function (pi: ExtensionAPI) {
     if (!isToolCallEventType("bash", event)) return;
 
     const command = event.input.command ?? "";
+
+    // Allow jj git subcommands (e.g. `jj git push`, `jj git fetch`)
+    if (/\bjj\s+git\b/.test(command)) return;
+
     const gitCmd = isGitCommand(command);
     if (!gitCmd) return;
 
