@@ -52,7 +52,7 @@ import {
   applySelectionHighlight,
 } from "./label-overlay.js";
 import type { LabelMap } from "./label-overlay.js";
-import { writeSystemClipboard } from "./clipboard.js";
+import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -645,7 +645,7 @@ export class HelixEditor extends CustomEditor {
     const selectedText = selectionText(text, { start: info.start, end: info.end });
 
     try {
-      await writeSystemClipboard(selectedText);
+      await copyToClipboard(selectedText);
       this.enterNormal();
       this.tui.requestRender();
     } catch (error) {
