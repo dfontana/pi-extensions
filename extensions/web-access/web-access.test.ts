@@ -125,7 +125,7 @@ describe("loadConfig merge (local over global)", () => {
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
   });
 
-  it("overrides scalars and deep-merges providerParams per key", () => {
+  it("merges tool sections local-over-global, providerParams per provider key", () => {
     const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
     const cwd = mkdtempSync(join(tmpdir(), "wa-cwd-"));
     process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -133,36 +133,225 @@ describe("loadConfig merge (local over global)", () => {
     writeFileSync(
       join(agentDir, "web-access.json"),
       JSON.stringify({
-        provider: "openai",
-        model: "global-model",
-        providerParams: { openai: { search_context_size: "low", filters: { allowed_domains: ["g.com"] } } },
+        search: {
+          provider: "openai",
+          model: "global-model",
+          searchContextSize: "low",
+          providerParams: { openai: { user_location: { type: "approximate" } } },
+        },
+        fetch: {
+          provider: "anthropic",
+          model: "claude-opus-4-8",
+          maxUses: 3,
+          maxContentTokens: 50000,
+          providerParams: { anthropic: { citations: true } },
+        },
       }),
     );
     mkdirSync(join(cwd, ".pi"), { recursive: true });
     writeFileSync(
       join(cwd, ".pi", "web-access.json"),
       JSON.stringify({
-        model: "local-model",
-        providerParams: { openai: { search_context_size: "high" }, openrouter: { engine: "exa" } },
+        search: {
+          model: "local-model",
+          searchContextSize: "high",
+          providerParams: { openai: { filters: { allowed_domains: ["l.com"] } }, openrouter: { engine: "exa" } },
+        },
+        fetch: { maxUses: 5, allowedDomains: ["example.com"] },
       }),
     );
 
     const res = loadConfig(cwd);
     assert.ok(res.ok);
-    assert.equal(res.config.provider, "openai"); // from global
-    assert.equal(res.config.model, "local-model"); // local overrides
-    assert.deepEqual(res.config.providerParams, {
-      // openai: local search_context_size wins, global filters preserved
-      openai: { search_context_size: "high", filters: { allowed_domains: ["g.com"] } },
-      openrouter: { engine: "exa" }, // local-only key added
+    assert.equal(res.config.search?.provider, "openai"); // from global
+    assert.equal(res.config.search?.model, "local-model"); // local overrides
+    assert.deepEqual(res.config.search?.params, { searchContextSize: "high" }); // local wins
+    // active provider's (openai) block, merged across files; openrouter stays dormant
+    assert.deepEqual(res.config.search?.providerParams, {
+      user_location: { type: "approximate" }, // global preserved
+      filters: { allowed_domains: ["l.com"] }, // local added
+    });
+    assert.deepEqual(res.config.fetch?.params, {
+      maxUses: 5, // local overrides
+      maxContentTokens: 50000, // global preserved
+      allowedDomains: ["example.com"], // local-only key added
+      citations: true, // global providerParams.anthropic preserved
     });
   });
 
-  it("fails validation when required fields are absent", () => {
+  it("fails validation when a section lacks provider or model", () => {
     const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
     process.env.PI_CODING_AGENT_DIR = agentDir;
-    writeFileSync(join(agentDir, "web-access.json"), JSON.stringify({ provider: "openai" }));
+    writeFileSync(join(agentDir, "web-access.json"), JSON.stringify({ search: { provider: "openai" } }));
     const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
     assert.equal(res.ok, false);
+    assert.match((res as { error: string }).error, /search\.model/);
+  });
+
+  it("rejects legacy top-level keys with a pointer to the new shape", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({ provider: "openai", model: "gpt-5.5" }),
+    );
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.equal(res.ok, false);
+    assert.match((res as { error: string }).error, /'provider' is no longer supported/);
+  });
+
+  it("per-tool sections: search and fetch can use different providers", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({
+        search: {
+          provider: "openai",
+          model: "gpt-5.5",
+          searchContextSize: "medium",
+        },
+        fetch: {
+          provider: "anthropic",
+          model: "claude-opus-4-8",
+          maxUses: 3,
+          providerParams: { anthropic: { citations: true } },
+        },
+      }),
+    );
+
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.ok(res.ok);
+    assert.deepEqual(res.config.search, {
+      provider: "openai",
+      model: "gpt-5.5",
+      params: { searchContextSize: "medium" },
+      providerParams: {},
+    });
+    assert.deepEqual(res.config.fetch, {
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      params: { maxUses: 3, maxContentTokens: 100000, citations: true },
+    });
+  });
+
+  it("fetch: only the active provider's keyed params are applied", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({
+        fetch: {
+          provider: "openrouter",
+          model: "openai/gpt-5.5",
+          providerParams: {
+            anthropic: { citations: true, dynamicFiltering: true },
+            openrouter: { engine: "exa" },
+          },
+        },
+      }),
+    );
+
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.ok(res.ok);
+    // engine applied; anthropic's citations/dynamicFiltering stay dormant
+    assert.deepEqual(res.config.fetch?.params, {
+      maxUses: 5,
+      maxContentTokens: 100000,
+      engine: "exa",
+    });
+  });
+
+  it("fetch: defaults make provider/model the only required fields", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({ fetch: { provider: "anthropic", model: "claude-opus-4-8" } }),
+    );
+
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.ok(res.ok);
+    assert.equal(res.config.search, undefined); // omitted section → tool not configured
+    assert.deepEqual(res.config.fetch, {
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      params: { maxUses: 5, maxContentTokens: 100000 },
+    });
+  });
+
+  it("search: only the active provider's keyed params are applied", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({
+        search: {
+          provider: "openrouter",
+          model: "openai/gpt-5.5",
+          providerParams: {
+            openai: { user_location: { type: "approximate" } },
+            openrouter: { engine: "exa", max_results: 10 },
+          },
+        },
+      }),
+    );
+
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.ok(res.ok);
+    assert.deepEqual(res.config.search?.providerParams, { engine: "exa", max_results: 10 });
+  });
+
+  it("search: rejects an invalid searchContextSize", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({ search: { provider: "openai", model: "m", searchContextSize: "huge" } }),
+    );
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.equal(res.ok, false);
+    assert.match((res as { error: string }).error, /searchContextSize/);
+  });
+
+  it("search: defaults make provider/model the only required fields", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({ search: { provider: "openai", model: "gpt-5.5" } }),
+    );
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.ok(res.ok);
+    assert.deepEqual(res.config.search, {
+      provider: "openai",
+      model: "gpt-5.5",
+      params: {},
+      providerParams: {},
+    });
+    assert.equal(res.config.fetch, undefined);
+  });
+
+  it("fetch: rejects engine 'auto' (non-deterministic; breaks truncation parity)", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({
+        fetch: { provider: "openrouter", model: "m", providerParams: { openrouter: { engine: "auto" } } },
+      }),
+    );
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.equal(res.ok, false);
+    assert.match((res as { error: string }).error, /providerParams\.openrouter\.engine/);
+  });
+
+  it("fails when no tool section is present", () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(join(agentDir, "web-access.json"), JSON.stringify({}));
+    const res = loadConfig(mkdtempSync(join(tmpdir(), "wa-cwd-")));
+    assert.equal(res.ok, false);
+    assert.match((res as { error: string }).error, /no tool configured/);
   });
 });

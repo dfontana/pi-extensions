@@ -1,24 +1,29 @@
 /**
- * web-access — gives the agent a `web_search` tool backed by a configured model
- * provider's OpenAI-style Responses API.
+ * web-access — gives the agent `web_search` and `web_fetch` tools backed by a
+ * configured model provider (`web_search`: OpenAI-style Responses API;
+ * `web_fetch`: Anthropic Messages API or OpenRouter chat/completions).
  *
- * The provider/model and any provider-specific web-search params are read from
+ * The provider/model and any provider-specific params are read from
  * `web-access.json` (global ~/.pi/agent + project ./.pi override). On session
  * start the config is validated and the chosen model is checked against pi's
  * model registry (including credential resolution). If anything is wrong we warn
  * the user and simply don't register the tool, leaving it disabled.
  *
- * pi exposes no internal API to invoke a provider's Responses endpoint, so the
- * tool issues the HTTP request itself via fetch() — but auth (api key + headers)
+ * pi exposes no internal API to invoke a provider's endpoints, so the tools
+ * issue the HTTP requests themselves via fetch() — but auth (api key + headers)
  * is resolved through pi's model registry, never rolled by hand.
+ *
+ * See README.md for the web_fetch behavioral contract (Anthropic context-URL
+ * restriction, OpenRouter raw-content degradation, PDF/citation asymmetries).
  */
 
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { Type, StringEnum } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, type ExtensionAPI, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { loadConfig, type WebAccessConfig } from "./config.ts";
+import { loadConfig, type FetchToolConfig, type SearchToolConfig } from "./config.ts";
 import { getAdapter, parseResponse } from "./providers.ts";
+import { getFetchAdapter, type FetchResult } from "./web-fetch.ts";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -27,30 +32,71 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 const MARKDOWN_THEME = getMarkdownTheme();
 
 /**
- * Resolve the configured model and its credentials from the registry. Shared by
+ * Resolve a provider/model and its credentials from the registry. Shared by
  * session_start (validate-or-disable) and execute (re-resolve fresh each call,
  * so a mid-session credential/registry change is picked up). Callers decide how
  * to present a failure — notify-and-disable vs. throw.
  */
 async function resolveModelAuth(
   modelRegistry: ModelRegistry,
-  cfg: WebAccessConfig,
+  provider: string,
+  modelId: string,
 ): Promise<
   | { ok: true; model: Model<Api>; apiKey: string; headers?: Record<string, string> }
   | { ok: false; error: string }
 > {
-  const model = modelRegistry.find(cfg.provider, cfg.model);
+  const model = modelRegistry.find(provider, modelId);
   if (!model) {
-    return { ok: false, error: `model ${cfg.provider}/${cfg.model} is not in the model registry` };
+    return { ok: false, error: `model ${provider}/${modelId} is not in the model registry` };
   }
   const auth = await modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth.ok) return { ok: false, error: `auth failed for ${cfg.provider} (${auth.error})` };
-  if (!auth.apiKey) return { ok: false, error: `no API key for ${cfg.provider}` };
-  if (!model.baseUrl) return { ok: false, error: `no baseUrl found for ${cfg.provider}/${cfg.model}` };
+  if (!auth.ok) return { ok: false, error: `auth failed for ${provider} (${auth.error})` };
+  if (!auth.apiKey) return { ok: false, error: `no API key for ${provider}` };
+  if (!model.baseUrl) return { ok: false, error: `no baseUrl found for ${provider}/${modelId}` };
   return { ok: true, model, apiKey: auth.apiKey, headers: auth.headers };
 }
 
-function registerWebSearch(pi: ExtensionAPI, cfg: WebAccessConfig) {
+type ToolUpdate = { content: Array<{ type: "text"; text: string }>; details: undefined };
+
+/**
+ * POST a JSON body, animating a spinner through onUpdate while the request is
+ * in flight (the partial content re-renders the result row — see the tools'
+ * renderResult). Shared by web_search and web_fetch. Throws on non-2xx.
+ */
+async function postJsonWithThrobber(opts: {
+  toolName: string;
+  url: string;
+  headers: Record<string, string>;
+  body: unknown;
+  signal: AbortSignal | undefined;
+  onUpdate: ((update: ToolUpdate) => void) | undefined;
+  workingText: string;
+}): Promise<unknown> {
+  let frame = 0;
+  const throbber = setInterval(() => {
+    frame = (frame + 1) % SPINNER_FRAMES.length;
+    opts.onUpdate?.({
+      content: [{ type: "text", text: `${SPINNER_FRAMES[frame]} ${opts.workingText}` }],
+      details: undefined,
+    });
+  }, 120);
+  try {
+    const res = await fetch(opts.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...opts.headers },
+      body: JSON.stringify(opts.body),
+      signal: opts.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`${opts.toolName} request failed (${res.status}): ${await res.text()}`);
+    }
+    return await res.json();
+  } finally {
+    clearInterval(throbber);
+  }
+}
+
+function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
   const adapter = getAdapter(cfg.provider);
 
   pi.registerTool({
@@ -143,53 +189,31 @@ function registerWebSearch(pi: ExtensionAPI, cfg: WebAccessConfig) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       // Re-resolve per call so a mid-session credential/registry change is honored.
-      const resolved = await resolveModelAuth(ctx.modelRegistry, cfg);
+      const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model);
       if (!resolved.ok) throw new Error(resolved.error);
       const { model, apiKey, headers } = resolved;
 
-      const base = model.baseUrl;
+      // Agent-supplied args win; the config's common params are the defaults.
       const body = adapter.buildBody(
         model.id,
         {
           query: params.query,
           maxResults: params.max_results,
-          searchContextSize: params.search_context_size,
-          allowedDomains: params.allowed_domains,
+          searchContextSize: params.search_context_size ?? cfg.params.searchContextSize,
+          allowedDomains: params.allowed_domains ?? cfg.params.allowedDomains,
         },
-        cfg.providerParams[cfg.provider] ?? {},
+        cfg.providerParams,
       );
 
-      // Animate a throbber while the request is in flight: stream spinner frames
-      // as partial content, which re-renders the result row (see renderResult).
-      let frame = 0;
-      const throbber = setInterval(() => {
-        frame = (frame + 1) % SPINNER_FRAMES.length;
-        onUpdate?.({
-          content: [{ type: "text", text: `${SPINNER_FRAMES[frame]} Searching the web…` }],
-          details: undefined,
-        });
-      }, 120);
-
-      let res: Response;
-      let json: unknown;
-      try {
-        res = await fetch(`${base.replace(/\/$/, "")}/responses`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-            ...headers,
-          },
-          body: JSON.stringify(body),
-          signal: signal ?? ctx.signal,
-        });
-        if (!res.ok) {
-          throw new Error(`web_search request failed (${res.status}): ${await res.text()}`);
-        }
-        json = await res.json();
-      } finally {
-        clearInterval(throbber);
-      }
+      const json = await postJsonWithThrobber({
+        toolName: "web_search",
+        url: `${model.baseUrl.replace(/\/$/, "")}/responses`,
+        headers: { Authorization: `Bearer ${apiKey}`, ...headers },
+        body,
+        signal: signal ?? ctx.signal,
+        onUpdate,
+        workingText: "Searching the web…",
+      });
 
       const { text, annotations } = parseResponse(json);
       // `content` is what reaches the LLM; `details` is for rendering only. The
@@ -203,6 +227,112 @@ function registerWebSearch(pi: ExtensionAPI, cfg: WebAccessConfig) {
   });
 }
 
+function registerWebFetch(pi: ExtensionAPI, cfg: FetchToolConfig) {
+  const adapter = getFetchAdapter(cfg.provider);
+
+  pi.registerTool({
+    name: "web_fetch",
+    label: "Web Fetch",
+    description:
+      "Fetch the text content of a specific web page by URL. Does not support PDFs or JavaScript-rendered pages.",
+    promptSnippet: "Fetch the content of a URL",
+    parameters: Type.Object({
+      url: Type.String({ description: "The full http(s) URL to fetch." }),
+      prompt: Type.Optional(
+        Type.String({
+          description:
+            "Optional: what to extract or answer from the page. Guides content filtering where the provider supports it; defaults to returning the page content.",
+        }),
+      ),
+    }),
+
+    renderCall(args, theme, context) {
+      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      let content = theme.fg("toolTitle", theme.bold("web_fetch"));
+      if (args?.url) content += " " + theme.fg("muted", args.url);
+      if (args?.prompt) content += " " + theme.fg("dim", `("${args.prompt}")`);
+      text.setText(content);
+      return text;
+    },
+
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      const first = result.content?.[0];
+      const body = first?.type === "text" ? first.text : "";
+
+      if (isPartial) {
+        return new Text(theme.fg("accent", body || "Fetching…"), 0, 0);
+      }
+      if (context.isError) {
+        return new Text(theme.fg("error", body || "web_fetch failed"), 0, 0);
+      }
+
+      const details = result.details as { result?: FetchResult } | undefined;
+      const fetched = details?.result;
+
+      if (expanded) {
+        return new Markdown(body, 1, 0, MARKDOWN_THEME);
+      }
+
+      const oneLine = body.replace(/\s+/g, " ").trim();
+      return {
+        render(width: number) {
+          const preview = theme.fg("muted", truncateToWidth(oneLine, width, "…"));
+          const bits = [`${fetched?.content.data.length ?? body.length} chars`];
+          if (fetched?.title) bits.push(fetched.title);
+          if (fetched?.retrievedAt) bits.push(fetched.retrievedAt);
+          const stats = theme.fg("dim", bits.join(" · "));
+          return [preview, truncateToWidth(stats, width)];
+        },
+        invalidate() {},
+      };
+    },
+
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      // Re-resolve per call so a mid-session credential/registry change is honored.
+      const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model);
+      if (!resolved.ok) throw new Error(resolved.error);
+      const { model, apiKey, headers } = resolved;
+
+      const body = adapter.buildBody(model.id, params.url, params.prompt, cfg.params);
+
+      const json = await postJsonWithThrobber({
+        toolName: "web_fetch",
+        url: adapter.endpoint(model.baseUrl),
+        headers: { ...adapter.headers(apiKey), ...headers },
+        body,
+        signal: signal ?? ctx.signal,
+        onUpdate,
+        workingText: `Fetching ${params.url}…`,
+      });
+
+      const result = adapter.parseResult(json, { url: params.url });
+      if (result.error) {
+        const detail = result.error.message ? `: ${result.error.message}` : "";
+        throw new Error(`web_fetch failed (${result.error.code})${detail}`);
+      }
+
+      // `content` is what reaches the LLM; `details` is for rendering only.
+      const header = [
+        result.title ? `# ${result.title}` : undefined,
+        `URL: ${result.url}`,
+        result.retrievedAt ? `Retrieved: ${result.retrievedAt}` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const content: Array<{ type: "text"; text: string }> = [
+        { type: "text", text: `${header}\n\n${result.content.data}` },
+      ];
+      if (result.citations?.length) {
+        content.push({
+          type: "text",
+          text: `Citations:\n${JSON.stringify(result.citations, null, 2)}`,
+        });
+      }
+      return { content, details: { result } };
+    },
+  });
+}
+
 export default function (pi: ExtensionAPI) {
   // modelRegistry is only available on ExtensionContext, so validation (and the
   // registry/credential checks) must run in session_start, not the bare factory.
@@ -212,15 +342,30 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`web-access disabled: ${result.error}`, "warning");
       return;
     }
-    const cfg = result.config;
+    const { search, fetch } = result.config;
 
-    // Validate the model + credentials up front; disable (don't register) on failure.
-    const resolved = await resolveModelAuth(ctx.modelRegistry, cfg);
-    if (!resolved.ok) {
-      ctx.ui.notify(`web-access disabled: ${resolved.error}`, "warning");
-      return;
+    // Each tool validates its own provider/model + credentials up front and is
+    // disabled independently on failure — search and fetch may use different
+    // providers, so one being broken must not take the other down.
+    const [searchAuth, fetchAuth] = await Promise.all([
+      search && resolveModelAuth(ctx.modelRegistry, search.provider, search.model),
+      fetch && resolveModelAuth(ctx.modelRegistry, fetch.provider, fetch.model),
+    ]);
+
+    if (search && searchAuth) {
+      if (searchAuth.ok) {
+        registerWebSearch(pi, search);
+      } else {
+        ctx.ui.notify(`web_search disabled: ${searchAuth.error}`, "warning");
+      }
     }
 
-    registerWebSearch(pi, cfg);
+    if (fetch && fetchAuth) {
+      if (fetchAuth.ok) {
+        registerWebFetch(pi, fetch);
+      } else {
+        ctx.ui.notify(`web_fetch disabled: ${fetchAuth.error}`, "warning");
+      }
+    }
   });
 }
