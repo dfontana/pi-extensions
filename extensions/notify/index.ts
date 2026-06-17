@@ -63,7 +63,8 @@ function execAsync(cmd: string, args: string[]): Promise<string> {
     );
 }
 
-async function resolveOwnTab(): Promise<{ name: string; id: string } | null> {
+/** Resolves the tab-id of the pane running Pi once at startup. */
+async function resolveOwnTabId(): Promise<string | null> {
     const paneId = process.env.ZELLIJ_PANE_ID;
     if (!paneId) return null;
     try {
@@ -72,22 +73,37 @@ async function resolveOwnTab(): Promise<{ name: string; id: string } | null> {
             JSON.parse(raw);
         const pane = panes.find((p) => !p.is_plugin && p.id === Number(paneId));
         if (!pane) return null;
-        return { name: pane.tab_name, id: String(pane.tab_id) };
+        return String(pane.tab_id);
     } catch {
         return null;
     }
 }
 
-async function setTabDot(add: boolean, tab: { name: string; id: string }): Promise<void> {
-    const hasDot = tab.name.startsWith("• ");
+/** Fetches the current live name for a tab by id. */
+async function getCurrentTabName(tabId: string): Promise<string | null> {
+    try {
+        const raw = await execAsync("zellij", ["action", "list-panes", "--tab", "--json"]);
+        const panes: Array<{ id: number; is_plugin: boolean; tab_id: number; tab_name: string }> =
+            JSON.parse(raw);
+        const pane = panes.find((p) => p.tab_id === Number(tabId));
+        return pane ? pane.tab_name : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Adds or removes the "• " dot prefix from the tab's *current* name.
+ * Always re-fetches the live name so renames made after startup are respected.
+ */
+async function setTabDot(add: boolean, tabId: string): Promise<void> {
+    const name = await getCurrentTabName(tabId);
+    if (name === null) return;
+    const hasDot = name.startsWith("• ");
     if (add && !hasDot) {
-        const newName = `• ${tab.name}`;
-        await execAsync("zellij", ["action", "rename-tab", newName, "--tab-id", tab.id]).catch(() => {});
-        tab.name = newName;
+        await execAsync("zellij", ["action", "rename-tab", `• ${name}`, "--tab-id", tabId]).catch(() => {});
     } else if (!add && hasDot) {
-        const newName = tab.name.slice(2);
-        await execAsync("zellij", ["action", "rename-tab", newName, "--tab-id", tab.id]).catch(() => {});
-        tab.name = newName;
+        await execAsync("zellij", ["action", "rename-tab", name.slice(2), "--tab-id", tabId]).catch(() => {});
     }
 }
 
@@ -96,32 +112,34 @@ async function setTabDot(add: boolean, tab: { name: string; id: string }): Promi
 export default function (pi: ExtensionAPI) {
     const inZellij = process.env.ZELLIJ !== undefined;
 
-    // Resolved once at startup; null outside Zellij or if probe fails.
-    const tabPromise: Promise<{ name: string; id: string } | null> = inZellij
-        ? resolveOwnTab()
+    // Tab id resolved once at startup; null outside Zellij or if probe fails.
+    // We store only the id so the live tab name is always fetched fresh before
+    // acting — avoiding stale-name restores when the user renames the tab.
+    const tabIdPromise: Promise<string | null> = inZellij
+        ? resolveOwnTabId()
         : Promise.resolve(null);
 
     pi.registerCommand("ack", {
         description: "Clear the Zellij tab dot (no-op outside Zellij)",
         handler: async (_args, _ctx) => {
-            const tab = await tabPromise;
-            if (tab) await setTabDot(false, tab);
+            const tabId = await tabIdPromise;
+            if (tabId) await setTabDot(false, tabId);
         },
     });
 
     pi.on("session_shutdown", async (event) => {
-        const tab = await tabPromise;
-        if (tab && event.reason === "quit") await setTabDot(false, tab);
+        const tabId = await tabIdPromise;
+        if (tabId && event.reason === "quit") await setTabDot(false, tabId);
     });
 
     pi.on("agent_end", async () => {
         notify("Pi", "Ready for input");
-        const tab = await tabPromise;
-        if (tab) await setTabDot(true, tab);
+        const tabId = await tabIdPromise;
+        if (tabId) await setTabDot(true, tabId);
     });
 
     pi.on("agent_start", async () => {
-        const tab = await tabPromise;
-        if (tab) await setTabDot(false, tab);
+        const tabId = await tabIdPromise;
+        if (tabId) await setTabDot(false, tabId);
     });
 }

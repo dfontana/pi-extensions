@@ -53,8 +53,8 @@ function firstText(result: AgentToolResult<unknown>): string {
  */
 const mismatchCalls = new Set<string>();
 
-// Module-level toggle. Default ON; loaded from disk at session_start.
-let enabled = true;
+// Module-level toggle. Default OFF; loaded from disk at session_start.
+let enabled = false;
 
 function loadEnabled(): void {
   try {
