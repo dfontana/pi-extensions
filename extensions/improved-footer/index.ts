@@ -93,6 +93,51 @@ async function fetchGenerationCost(
   }
 }
 
+/**
+ * Fetch OpenRouter's model catalog and build a slug → per-token-rate map.
+ * `pricing.prompt`/`pricing.completion` are USD-per-token strings.
+ */
+async function fetchOpenRouterPricing(
+  apiKey: string | null,
+): Promise<Map<string, { prompt: number; completion: number }> | null> {
+  try {
+    const headers: Record<string, string> = {};
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    const res = await fetch("https://openrouter.ai/api/v1/models", {
+      headers,
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const data = json?.data;
+    if (!Array.isArray(data)) return null;
+    const map = new Map<string, { prompt: number; completion: number }>();
+    for (const m of data) {
+      const id = m?.id;
+      const p = m?.pricing;
+      if (typeof id === "string" && p) {
+        const prompt = parseFloat(p.prompt);
+        const completion = parseFloat(p.completion);
+        if (Number.isFinite(prompt) && Number.isFinite(completion)) {
+          map.set(id, { prompt, completion });
+        }
+      }
+    }
+    return map;
+  } catch {
+    return null;
+  }
+}
+
+/** Format a USD-per-token rate as a per-million-token price (e.g. $15, $3.5, $0.27). */
+function formatRate(perToken: number): string {
+  const perM = perToken * 1_000_000;
+  if (perM === 0) return "$0";
+  if (perM >= 10) return `$${Math.round(perM)}`;
+  if (perM >= 1) return `$${perM.toFixed(1)}`;
+  return `$${perM.toFixed(2)}`;
+}
+
 function getOpenRouterApiKey(ctx: ExtensionContext): string | null {
   try {
     const providers = (ctx.modelRegistry as any).getProviders?.() ?? [];
@@ -120,6 +165,9 @@ export default function (pi: ExtensionAPI) {
   };
 
   let openRouterApiKey: string | null = null;
+  // OpenRouter per-token pricing (slug → rates), fetched once and cached for the process.
+  let openRouterPricing: Map<string, { prompt: number; completion: number }> | null = null;
+  let pricingFetchStarted = false;
   let footerTui: { requestRender: () => void } | null = null;
   let modelId = "";
   let thinkingLevel = "off";
@@ -139,6 +187,20 @@ export default function (pi: ExtensionAPI) {
     footerTui?.requestRender();
   }
 
+  function ensureOpenRouterPricing(ctx: ExtensionContext) {
+    if (openRouterPricing || pricingFetchStarted) return;
+    pricingFetchStarted = true;
+    if (!openRouterApiKey) openRouterApiKey = getOpenRouterApiKey(ctx);
+    void fetchOpenRouterPricing(openRouterApiKey).then((map) => {
+      if (map) {
+        openRouterPricing = map;
+        requestRender();
+      } else {
+        pricingFetchStarted = false; // allow a later retry
+      }
+    });
+  }
+
   function refreshJjBookmark() {
     if (!isJjRepo || !vcsCwd) return;
     void resolveJjBookmark(vcsCwd).then((value) => {
@@ -151,8 +213,9 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Event: model changes ───────────────────────────────────────────────
 
-  pi.on("model_select", async (event, _ctx) => {
+  pi.on("model_select", async (event, ctx) => {
     modelId = event.model.id;
+    ensureOpenRouterPricing(ctx);
     requestRender();
   });
 
@@ -218,6 +281,7 @@ export default function (pi: ExtensionAPI) {
     thinkingLevel = pi.getThinkingLevel();
     vcsCwd = ctx.cwd;
     isJjRepo = await detectJjRepo(ctx.cwd);
+    ensureOpenRouterPricing(ctx);
 
     // Backfill token totals from existing session entries (session restore)
     try {
@@ -302,12 +366,16 @@ export default function (pi: ExtensionAPI) {
 
           const statsLeft = statsParts.join(" ");
 
-          // Model + thinking on the right
+          // Model + per-token rate + thinking on the right
           const mId = modelId || ctx.model?.id || "no-model";
-          let rightSide = mId;
+          const rate = openRouterPricing?.get(mId);
+          const modelLabel = rate
+            ? `${mId} ${formatRate(rate.prompt)}/${formatRate(rate.completion)}`
+            : mId;
+          let rightSide = modelLabel;
           if (ctx.model?.reasoning) {
             const tl = thinkingLevel || "off";
-            rightSide = tl === "off" ? `${mId} • thinking off` : `${mId} • ${tl}`;
+            rightSide = tl === "off" ? `${modelLabel} • thinking off` : `${modelLabel} • ${tl}`;
           }
 
           const statsLine2 = theme.fg("dim", padBetween(statsLeft, rightSide, width));
