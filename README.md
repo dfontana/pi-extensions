@@ -55,6 +55,8 @@ The Helix editor black-box tests live under `extensions/helix-mode/__tests__/` a
 
 **helix-mode** — Helix-style modal editing for the pi input box. Normal / Insert / Select modes with word-level navigation, `gw` jump-to-word labels, selection-based search (`*`, `/`, `n`/`N`), and indent/unindent. On by default; toggle with `/helix [on|off]`. See [helix-mode cheatsheet](#helix-mode-extension) below.
 
+**mcp** — A lean [Model Context Protocol](https://modelcontextprotocol.io) client. Reads standard `.mcp.json` (read-only), connects stdio + HTTP servers lazily, caches tool metadata, and exposes everything through a single `mcp` proxy tool (status / search / describe / call). Supports bearer + OAuth (PKCE, dynamic client registration, token refresh). Curate active servers per session from the `/mcp` panel. See [extensions/mcp/README.md](extensions/mcp/README.md).
+
 **improved-footer** — Replaces pi's default footer with:
 - **jj bookmark support**: shows `jj:bookmark` instead of git branch, with git fallback and "(no vcs)" when neither is present
 - **Accurate OpenRouter cost**: queries OpenRouter's `/api/v1/generation` API for actual response cost instead of pi's client-side estimation (which uses static pricing and doesn't account for OpenRouter's dynamic provider pricing)
