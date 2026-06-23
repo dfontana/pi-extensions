@@ -16,6 +16,8 @@ import {
   type ExtensionCommandContext,
   type ExtensionUIContext,
   formatSize,
+  keyHint,
+  type Theme,
   type ThemeColor,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
@@ -26,6 +28,75 @@ import { Manager, type ServerState } from "./manager.ts";
 
 const manager = new Manager();
 let ui: ExtensionUIContext | undefined;
+
+// ---- compact single-line rendering for the mcp tool -----------------------
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+interface McpRowState {
+  done: boolean;
+  isError: boolean;
+  frameIdx: number;
+  spinnerTimer?: ReturnType<typeof setInterval>;
+  invalidateFn?: () => void;
+}
+
+/**
+ * A minimal single-line component that renders exactly one ANSI-safe truncated line.
+ * Used for both the spinner call header and the collapsed checkmark/cross line.
+ */
+class SingleLine {
+  private content = "";
+  private cachedWidth?: number;
+  private cachedLine?: string;
+
+  setText(content: string) {
+    if (this.content !== content) {
+      this.content = content;
+      this.cachedWidth = undefined;
+      this.cachedLine = undefined;
+    }
+  }
+
+  render(width: number): string[] {
+    if (this.cachedLine !== undefined && this.cachedWidth === width) return [this.cachedLine];
+    this.cachedLine = truncateToWidth(this.content, width);
+    this.cachedWidth = width;
+    return [this.cachedLine];
+  }
+
+  invalidate() {
+    this.cachedWidth = undefined;
+    this.cachedLine = undefined;
+  }
+}
+
+/** Zero-height component — renders nothing when result is collapsed. */
+const EMPTY_COMPONENT = { render: (_w: number): string[] => [], invalidate: () => {} };
+
+/** Build the description + params strings for a given set of proxy args. */
+function buildMcpLineParts(a: ProxyArgs | undefined): { mode: string; params: string } {
+  if (!a) return { mode: "status", params: "" };
+  if (a.action) return { mode: a.action, params: a.server ?? "" };
+  if (a.tool) return { mode: `call ${a.tool}`, params: a.args ?? "" };
+  if (a.search) return { mode: "search", params: `"${a.search}"` };
+  if (a.describe) return { mode: "describe", params: a.describe };
+  if (a.connect) return { mode: "connect", params: a.connect };
+  if (a.server) return { mode: "list", params: a.server };
+  return { mode: "status", params: "" };
+}
+
+/** Assemble the full colored line string. */
+function buildMcpLine(
+  prefix: string,
+  mode: string,
+  params: string,
+  theme: Theme,
+): string {
+  let line = prefix + " " + theme.fg("toolTitle", theme.bold("mcp")) + " " + theme.fg("muted", mode);
+  if (params) line += " " + theme.fg("dim", params);
+  return line;
+}
 
 const ICON: Record<ServerState, string> = {
   off: "·",
@@ -384,23 +455,88 @@ export default function (pi: ExtensionAPI) {
     }),
 
     renderCall(args, theme, context) {
-      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      const state = context.state as McpRowState;
+      // Lazily initialise state fields the first time renderCall fires.
+      state.done ??= false;
+      state.isError ??= false;
+      state.frameIdx ??= 0;
+
+      const comp = (context.lastComponent as SingleLine | undefined) ?? new SingleLine();
+
+      // Keep the invalidate reference fresh so the timer always reaches the live fn.
+      state.invalidateFn = context.invalidate;
+
       const a = args as ProxyArgs | undefined;
-      const desc = a?.action
-        ? `${a.action}${a.server ? ` ${a.server}` : ""}`
-        : a?.tool
-          ? `call ${a.tool}`
-          : a?.search
-            ? `search "${a.search}"`
-            : a?.describe
-              ? `describe ${a.describe}`
-              : a?.connect
-                ? `connect ${a.connect}`
-                : a?.server
-                  ? `list ${a.server}`
-                  : "status";
-      text.setText(theme.fg("toolTitle", theme.bold("mcp")) + " " + theme.fg("muted", desc));
-      return text;
+      const { mode, params } = buildMcpLineParts(a);
+
+      if (!state.done) {
+        // Start the spinner timer once.
+        if (!state.spinnerTimer) {
+          state.frameIdx = 0;
+          state.spinnerTimer = setInterval(() => {
+            state.frameIdx = (state.frameIdx + 1) % SPINNER_FRAMES.length;
+            comp.invalidate();
+            state.invalidateFn?.();
+          }, 80);
+        }
+        const spinChar = theme.fg("dim", SPINNER_FRAMES[state.frameIdx] ?? SPINNER_FRAMES[0]);
+        comp.setText(buildMcpLine(spinChar, mode, params, theme));
+      } else {
+        // Execution finished — show checkmark or cross.
+        const icon = state.isError
+          ? theme.fg("error", "✗")
+          : theme.fg("success", "✓");
+        const hint = keyHint("app.tools.expand", "expand");
+        comp.setText(buildMcpLine(icon, mode, params, theme) + " " + theme.fg("dim", hint));
+      }
+
+      return comp;
+    },
+
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      const state = context.state as McpRowState;
+
+      // On first final result: stop spinner and trigger call slot to re-render with icon.
+      if (!isPartial && !state.done) {
+        state.done = true;
+        state.isError = context.isError;
+        if (state.spinnerTimer) {
+          clearInterval(state.spinnerTimer);
+          state.spinnerTimer = undefined;
+        }
+        context.invalidate(); // re-render renderCall with ✓ / ✗
+      }
+
+      if (!expanded) {
+        // Collapsed: renderCall already shows the summary — render nothing here.
+        return EMPTY_COMPONENT;
+      }
+
+      // Expanded: full request + response details.
+      const a = context.args as ProxyArgs | undefined;
+      const lines: string[] = [];
+
+      // Show call parameters.
+      if (a?.tool && a.args && a.args !== "{}") {
+        lines.push(theme.fg("muted", "args: ") + theme.fg("dim", a.args));
+      } else if (a?.search) {
+        lines.push(theme.fg("muted", "query: ") + theme.fg("dim", a.search));
+      } else if (a?.describe) {
+        lines.push(theme.fg("muted", "tool: ") + theme.fg("dim", a.describe));
+      } else if (a?.server) {
+        lines.push(theme.fg("muted", "server: ") + theme.fg("dim", a.server));
+      } else if (a?.connect) {
+        lines.push(theme.fg("muted", "connect: ") + theme.fg("dim", a.connect));
+      }
+
+      // Show result content.
+      const content = result.content[0];
+      if (content?.type === "text") {
+        const color = state.isError ? "error" : "dim";
+        lines.push(...content.text.split("\n").map((l) => theme.fg(color, l)));
+      }
+
+      return new Text(lines.join("\n"), 0, 0);
     },
 
     async execute(_id, p: ProxyArgs, signal, _onUpdate, ctx) {
