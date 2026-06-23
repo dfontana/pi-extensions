@@ -101,10 +101,10 @@ function normalize(name: string, raw: Record<string, unknown>): ServerDef {
   return def;
 }
 
-/** Merge `~/.config/mcp/mcp.json` then `./.mcp.json` (project overrides global). */
+/** Merge `~/.pi/agent/mcp.json` (global) then `./.mcp.json` (project overrides global). */
 export function loadServers(cwd: string): Map<string, ServerDef> {
   const merged = new Map<string, ServerDef>();
-  for (const path of [join(HOME, ".config", "mcp", "mcp.json"), resolve(cwd, ".mcp.json")]) {
+  for (const path of [join(getAgentDir(), "mcp.json"), resolve(cwd, ".mcp.json")]) {
     const servers = readJson(path)?.mcpServers;
     if (!servers || typeof servers !== "object") continue;
     for (const [name, raw] of Object.entries(servers as Record<string, Record<string, unknown>>)) {

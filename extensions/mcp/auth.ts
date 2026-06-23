@@ -30,8 +30,14 @@ const AUTH_FILE = "auth.json";
 // the address-bar URL), so it must be identical across auth-start/auth-complete.
 const MANUAL_REDIRECT = "http://localhost:33418/callback";
 
+// OAuth servers can silently expire DCR registrations.  Re-register after this
+// period so stale client_ids never reach the authorization endpoint.
+const CLIENT_REGISTRATION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 h
+
 interface AuthRecord {
   client?: OAuthClientInformationFull;
+  /** Unix-ms timestamp recorded when the DCR response was saved. */
+  registeredAt?: number;
   tokens?: OAuthTokens;
   codeVerifier?: string;
 }
@@ -80,7 +86,7 @@ class FileProvider implements OAuthClientProvider {
     return undefined;
   }
   saveClientInformation(info: OAuthClientInformationFull): void {
-    this.write({ client: info });
+    this.write({ client: info, registeredAt: Date.now() });
   }
   tokens(): OAuthTokens | undefined {
     return this.read().tokens;
@@ -180,6 +186,21 @@ function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
 
 // ---- public API ------------------------------------------------------------
 
+/**
+ * Returns true when the stored DCR client for `serverUrl` is absent, has no
+ * `registeredAt` timestamp (written by older versions), or is older than
+ * CLIENT_REGISTRATION_MAX_AGE_MS.  In those cases the caller should invalidate
+ * the stored client before starting a new authorization flow so that fresh DCR
+ * runs and the authorization URL uses a valid client_id.
+ */
+function isDcrStale(serverUrl: string): boolean {
+  const store = readState<Record<string, AuthRecord>>(AUTH_FILE, {});
+  const rec = store[serverUrl];
+  if (!rec?.client) return false; // nothing stored — DCR will run naturally
+  if (!rec.registeredAt) return true; // old record with no timestamp — treat as stale
+  return Date.now() - rec.registeredAt > CLIENT_REGISTRATION_MAX_AGE_MS;
+}
+
 export function bearerHeaders(def: ServerDef): Record<string, string> {
   return def.bearerToken ? { Authorization: `Bearer ${def.bearerToken}` } : {};
 }
@@ -201,6 +222,12 @@ export async function authInteractive(def: ServerDef, signal?: AbortSignal): Pro
   const cb = await startCallback(def.oauth?.redirectUri);
   try {
     const provider = new FileProvider(url, cb.redirect, def, (u) => openBrowser(u.href));
+    // Pre-invalidate any stored client registration that is too old.  OAuth servers
+    // (e.g. Atlassian) silently expire DCR registrations; using a stale client_id
+    // causes the authorization endpoint to return 500 before the user can authorize.
+    // Clearing it here forces a fresh DCR so the authorization URL always uses a
+    // valid client.
+    if (isDcrStale(url)) provider.invalidateCredentials("client");
     if ((await auth(provider, { serverUrl: url })) === "AUTHORIZED") return; // tokens already valid
     const code = await withAbort(cb.code, signal);
     if ((await auth(provider, { serverUrl: url, authorizationCode: code })) !== "AUTHORIZED") {
@@ -215,6 +242,8 @@ export async function authInteractive(def: ServerDef, signal?: AbortSignal): Pro
 export async function authStart(def: ServerDef): Promise<string> {
   const url = def.url!;
   const provider = new FileProvider(url, def.oauth?.redirectUri ?? MANUAL_REDIRECT, def);
+  // Same stale-client guard as authInteractive — applies to the headless flow too.
+  if (isDcrStale(url)) provider.invalidateCredentials("client");
   if ((await auth(provider, { serverUrl: url })) === "AUTHORIZED") return "";
   if (!provider.authUrl) throw new Error("no authorization URL was produced");
   return provider.authUrl.href;
