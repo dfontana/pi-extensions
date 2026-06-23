@@ -18,3 +18,4 @@ Wishlist:
 - Subagents should have a structured communication channel back to the main agent when they are done (and the main agent should be able to re-fetch the results when they are done). This should not be redunant (to avoid re-notify) it should be subagent states it's done state (interrupted, complete, out of context) -> parent can fetch this and then decide how to proceed (retry on exponential backoff, fetch results, compact and resume with original prompt and compacted status)
 - Ideally can customize the model performing maintence tasks like summarizing what's going on, compaction, etc. Haiku vs ...
 - Provide generic agents like General, Explore, Research
+- Avoid agents getting hung up so easily. Seem to keep hitting cases where agents are just idling and need to be manually killed.
