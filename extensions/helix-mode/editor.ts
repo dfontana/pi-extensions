@@ -523,59 +523,55 @@ export class HelixEditor extends CustomEditor {
   // Semantics:
   //   - `line`  is a 0-based index into getLines() (logical lines separated by \n).
   //   - `col`   is a 0-based character offset within that logical line.
-  //   - Both values must be within the bounds of the current text; callers are
-  //     responsible for clamping (offsetToLineCol already does this).
+  //   - Out-of-range values are clamped by setCursorPosition(), so callers need
+  //     not clamp themselves (offsetToLineCol already does anyway).
   //
-  // Why Up/Down is avoided:
-  //   Up/Down arrows navigate VISUAL lines in pi's editor, not logical lines.
-  //   A logical line longer than the terminal width spans multiple visual lines,
-  //   causing off-by-N errors equal to the wrap count. Additionally, pressing Up
-  //   on the first visual line of the editor calls moveToLineStart() (no logical
-  //   line change) or navigates into shell history — corrupting editor state.
+  // Implementation — direct cursor placement (O(1)):
+  //   navigateTo delegates to setCursorPosition(), which sets the editor's
+  //   logical cursor coordinates in one shot. This replaces the previous
+  //   O(|lineDelta| + targetCol) loop of synthetic key events (Ctrl+A/E +
+  //   Left/Right via handleInput), which was noticeably laggy on long prompts
+  //   for jumps like gg/ge/gw and n/N search navigation.
   //
-  // Implementation — logical-line traversal:
-  //   Ctrl+E (lineEnd) and Ctrl+A (lineStart) operate on state.cursorLine, the
-  //   logical line index, and are therefore visual-wrap agnostic. Right/Left at
-  //   logical line boundaries cross \n correctly with no history side effects.
-  //
-  //   Forward (lineDelta > 0): Ctrl+E to end of current logical line, then
-  //     Right to cross \n and land at col 0 of the next logical line.
-  //   Backward (lineDelta < 0): Ctrl+A to start of current logical line, then
-  //     Left to cross \n and land at end of the previous logical line.
-  //   Final placement: Ctrl+A to col 0 of target line, then N×Right to targetCol.
-  //
-  // Known limitation — no direct setCursor() API:
-  //   CustomEditor / Editor does not expose a setCursor(line, col) method.
-  //   This implementation still uses synthetic key sequences via handleInput,
-  //   which is O(|lineDelta| + targetCol) in key events. For typical prompt
-  //   sizes this is imperceptible. A future Pi API addition of setCursor() would
-  //   allow replacing the entire body with a single atomic call.
+  //   Note we use logical line/col directly rather than the editor's private
+  //   moveCursor(), because moveCursor() is single-step and operates on VISUAL
+  //   lines — looping it would reintroduce the O(distance) cost and the
+  //   visual-vs-logical line mismatch (a logical line wider than the terminal
+  //   spans multiple visual lines).
   // ══════════════════════════════════════════════════════════════════════════
 
   private navigateTo(targetLine: number, targetCol: number): void {
-    const { line } = this.getCursor();
-    const lineDelta = targetLine - line;
-
-    if (lineDelta > 0) {
-      // Advance by lineDelta logical lines using lineEnd+Right per boundary.
-      for (let i = 0; i < lineDelta; i++) {
-        super.handleInput(SEQ.lineEnd);   // Ctrl+E: jump to end of current logical line
-        super.handleInput(SEQ.right);     // Right: cross \n → land at col 0 of next logical line
-      }
-    } else if (lineDelta < 0) {
-      // Retreat by |lineDelta| logical lines using lineStart+Left per boundary.
-      for (let i = 0; i < -lineDelta; i++) {
-        super.handleInput(SEQ.lineStart); // Ctrl+A: jump to start of current logical line
-        super.handleInput(SEQ.left);      // Left: cross \n → land at end of previous logical line
-      }
-    }
-
-    // Land at targetCol: go to start of target logical line, then advance right.
-    super.handleInput(SEQ.lineStart);
-    for (let i = 0; i < targetCol; i++) super.handleInput(SEQ.right);
-
+    this.setCursorPosition(targetLine, targetCol);
     this.syncSelectionHead();
     this.tui.requestRender();
+  }
+
+  /**
+   * Place the cursor at a logical (line, col) in O(1).
+   *
+   * ⚠️  PRIVATE-API DEPENDENCY — may break on pi upgrades.
+   *   This reaches into CustomEditor's internal `state` ({ lines, cursorLine,
+   *   cursorCol }) and its private `setCursorCol()` — the same fields the
+   *   editor's own private `moveCursor()` mutates. None of this is part of pi's
+   *   public API. All such access is isolated in this single method so the
+   *   implementation can be swapped (e.g. for a future public setCursor(), or
+   *   back to the synthetic-key fallback) without touching any caller.
+   *
+   * Scroll is deliberately left alone: the base render() clamps scrollOffset to
+   * keep the cursor visible on the next frame, so no manual scroll handling is
+   * needed here.
+   */
+  private setCursorPosition(targetLine: number, targetCol: number): void {
+    const internals = this as unknown as {
+      state: { lines: string[]; cursorLine: number; cursorCol: number };
+      setCursorCol(col: number): void;
+    };
+    const lines = internals.state.lines;
+    const line = Math.max(0, Math.min(targetLine, lines.length - 1));
+    const lineLen = (lines[line] ?? "").length;
+    const col = Math.max(0, Math.min(targetCol, lineLen));
+    internals.state.cursorLine = line;
+    internals.setCursorCol(col);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
