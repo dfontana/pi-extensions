@@ -250,8 +250,8 @@ async function describeText(arg: string): Promise<string> {
 
 async function connectText(server: string): Promise<string> {
   const def = manager.servers.get(server);
-  if (!def) return `Unknown server "${server}".`;
-  if (!manager.enabled.has(server)) return `Server "${server}" is off — enable it from the /mcp panel.`;
+  if (!def) return `Unknown server "${server}". Configured: ${manager.list().join(", ") || "none"}.`;
+  manager.enabled.add(server); // enable the server (and connect) even if it was off
   const tools = await manager.connect(server);
   updateFooter();
   return `Connected "${server}" — ${tools.length} tools:\n` + tools.map((t) => `  ${qualify(server, t.name)}`).join("\n");
