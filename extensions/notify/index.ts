@@ -2,6 +2,8 @@
  * Notify Extension
  *
  * Sends a desktop notification when Pi finishes and is waiting for input.
+ * Also rings the terminal bell (\x07) so attention is audible even when
+ * desktop notifications are muted or unavailable.
  * Also adds a "•" prefix to the active Zellij tab on agent_end (cleared on agent_start)
  * so attention is visible from other tabs.
  *
@@ -48,7 +50,12 @@ function runSoundHook(): void {
     }
 }
 
+function bell(): void {
+    process.stdout.write("\x07");
+}
+
 function notify(title: string, body: string): void {
+    bell();
     process.env.KITTY_WINDOW_ID ? notifyOSC99(title, body) : notifyOSC777(title, body);
     runSoundHook();
 }
