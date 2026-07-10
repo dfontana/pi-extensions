@@ -32,10 +32,31 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 const MARKDOWN_THEME = getMarkdownTheme();
 
 /**
- * Resolve a provider/model and its credentials from the registry. Shared by
- * session_start (validate-or-disable) and execute (re-resolve fresh each call,
- * so a mid-session credential/registry change is picked up). Callers decide how
- * to present a failure — notify-and-disable vs. throw.
+ * Check that a provider/model exists in the registry. Used at session_start to
+ * catch misconfigured provider/model names early without triggering credential
+ * resolution (auth headers sourced from env vars — e.g. $PI_CLIENT_SESSION_ID —
+ * may not be set yet at session_start time; they are resolved correctly at
+ * execute time).
+ */
+function checkModelExists(
+  modelRegistry: ModelRegistry,
+  provider: string,
+  modelId: string,
+): { ok: true } | { ok: false; error: string } {
+  const model = modelRegistry.find(provider, modelId);
+  if (!model) {
+    return { ok: false, error: `model ${provider}/${modelId} is not in the model registry` };
+  }
+  if (!model.baseUrl) {
+    return { ok: false, error: `no baseUrl found for ${provider}/${modelId}` };
+  }
+  return { ok: true };
+}
+
+/**
+ * Resolve a provider/model and its credentials from the registry. Used by
+ * execute (re-resolve fresh each call so a mid-session credential/registry
+ * change is picked up).
  */
 async function resolveModelAuth(
   modelRegistry: ModelRegistry,
@@ -344,27 +365,31 @@ export default function (pi: ExtensionAPI) {
     }
     const { search, fetch } = result.config;
 
-    // Each tool validates its own provider/model + credentials up front and is
+    // Each tool checks that its provider/model exists in the registry and is
     // disabled independently on failure — search and fetch may use different
     // providers, so one being broken must not take the other down.
-    const [searchAuth, fetchAuth] = await Promise.all([
-      search && resolveModelAuth(ctx.modelRegistry, search.provider, search.model),
-      fetch && resolveModelAuth(ctx.modelRegistry, fetch.provider, fetch.model),
-    ]);
+    //
+    // Full credential resolution (API key + headers) is intentionally deferred
+    // to execute() time. Some header values (e.g. $PI_CLIENT_SESSION_ID) are
+    // sourced from env vars that pi populates after session_start fires, so
+    // calling getApiKeyAndHeaders() here would produce a false-negative failure
+    // even though the credentials resolve correctly at request time.
+    const searchCheck = search && checkModelExists(ctx.modelRegistry, search.provider, search.model);
+    const fetchCheck = fetch && checkModelExists(ctx.modelRegistry, fetch.provider, fetch.model);
 
-    if (search && searchAuth) {
-      if (searchAuth.ok) {
+    if (search && searchCheck) {
+      if (searchCheck.ok) {
         registerWebSearch(pi, search);
       } else {
-        ctx.ui.notify(`web_search disabled: ${searchAuth.error}`, "warning");
+        ctx.ui.notify(`web_search disabled: ${searchCheck.error}`, "warning");
       }
     }
 
-    if (fetch && fetchAuth) {
-      if (fetchAuth.ok) {
+    if (fetch && fetchCheck) {
+      if (fetchCheck.ok) {
         registerWebFetch(pi, fetch);
       } else {
-        ctx.ui.notify(`web_fetch disabled: ${fetchAuth.error}`, "warning");
+        ctx.ui.notify(`web_fetch disabled: ${fetchCheck.error}`, "warning");
       }
     }
   });
