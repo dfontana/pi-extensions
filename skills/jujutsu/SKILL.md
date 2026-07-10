@@ -25,14 +25,21 @@ Before writing any code, complete these steps in order:
 
 ## Subagent Restrictions
 
-Subagents may **inspect only**. Permitted commands:
+Subagents are **inspect-only by default**. Permitted commands:
 
 - `jj log`, `jj status`, `jj diff`
 
-Subagents must **never** run: `jj commit`, `jj describe`, `jj squash`,
-`jj new`, or any other mutation. If a subagent detects it is on a non-empty
-`@` and cannot safely proceed, it must defer to the parent agent to resolve
-the situation.
+A narrow exception allows a subagent to edit working-copy files only when the
+primary agent explicitly designates it as the implementation/fixer agent for a
+workflow that requires code changes. Review, exploration, and research agents
+remain inspect-only. The designation must be stated in the subagent's prompt;
+it is never inferred from a general request.
+
+No subagent, including a designated implementer, may run `jj commit`,
+`jj describe`, `jj squash`, `jj new`, or any other mutating `jj` command. The
+primary agent retains responsibility for revision state. If a subagent detects
+it is on a non-empty `@` and cannot safely perform its assigned role, it must
+defer to the parent agent.
 
 ## Commit Discipline
 

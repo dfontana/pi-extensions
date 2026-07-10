@@ -57,6 +57,8 @@ The Helix editor black-box tests live under `extensions/helix-mode/__tests__/` a
 
 **mcp** — A lean [Model Context Protocol](https://modelcontextprotocol.io) client. Reads standard `.mcp.json` (read-only), connects stdio + HTTP servers lazily, caches tool metadata, and exposes everything through a single `mcp` proxy tool (status / search / describe / call). Supports bearer + OAuth (PKCE, dynamic client registration, token refresh). Curate active servers per session from the `/mcp` panel. See [extensions/mcp/README.md](extensions/mcp/README.md).
 
+**review-model-selector** — Exposes `select_review_model`, which reads the live session model and available model registry, validates `medium|high|xhigh` thinking support, and deterministically chooses an adversarial reviewer. Its model-ID heuristic ranks Opus/Sol, Sonnet/Terra, Luna, then Mini/Haiku/Nano; unknown tiers are excluded and reported.
+
 **improved-footer** — Replaces pi's default footer with:
 - **jj bookmark support**: shows `jj:bookmark` instead of git branch, with git fallback and "(no vcs)" when neither is present
 - **Accurate OpenRouter cost**: queries OpenRouter's `/api/v1/generation` API for actual response cost instead of pi's client-side estimation (which uses static pricing and doesn't account for OpenRouter's dynamic provider pricing)
@@ -70,6 +72,23 @@ The Helix editor black-box tests live under `extensions/helix-mode/__tests__/` a
 ### Skills
 
 **jujutsu** — Jujutsu version control workflow. Pre-work checklist, commit discipline rules, subagent restrictions, and a git→jj command reference.
+
+**run-review** — Adversarial review/fix workflow for working changes, branches, files, revisions, or another explicit scope. The coordinator launches completeness, correctness, duplication, and simplicity investigations in parallel, then a high-thinking reviewer assumes the code is wrong and independently verifies their findings. Reviews 1–2 may trigger fixes; review 3 is final verification.
+
+**run-plan** — Consolidates incoming review feedback, delegates implementation to a persistent Claude Sonnet 4.6 1M agent, then invokes `run-review` with that implementer as the fixer.
+
+These workflows require the separately installed `@tintinweb/pi-subagents` package (listed above). They preflight the `Agent` tools and return installation guidance rather than silently degrading when it is absent.
+
+Invoke them as skills:
+
+```text
+/skill:run-review
+/skill:run-review scope=branch base=main thinking=xhigh
+/skill:run-review file=src/example.ts model=provider/model-id
+/skill:run-plan <review feedback and optional instructions>
+```
+
+`run-review` defaults to current working changes, automatic reviewer selection, `thinking=high`, and fixes by the coordinating session.
 
 ### Themes
 
