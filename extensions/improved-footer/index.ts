@@ -7,10 +7,12 @@
  *   input/output rates. The cost is recomputed from the current session-tree
  *   branch, so /tree rewinds are reflected immediately and a new session
  *   starts back at $0.00.
- * - Includes subagent spend (@tintinweb/pi-subagents): live cost is
- *   accumulated by subscribing to each subagent's in-process session, and
- *   the final amount is persisted as a custom session entry so it survives
- *   rewind/resume anchored where the agent completed.
+ * - Includes subagent spend (@tintinweb/pi-subagents): cost accrues live by
+ *   subscribing to each subagent's in-process session, then on completion is
+ *   recomputed authoritatively from the finished session's own message list
+ *   (reconciled with the live total to survive compaction) and persisted as a
+ *   custom session entry, so it survives rewind/resume anchored where the
+ *   agent completed.
  * - Uses OpenRouter's /api/v1/generation API for accurate cost tracking of
  *   openrouter responses, and falls back to OpenRouter catalog pricing
  *   (vendor-preferring fuzzy match) when pi reports zero cost — e.g.
@@ -338,6 +340,24 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  /**
+   * Sum messageCost over a session's assistant messages. Used to price a
+   * finished subagent from its own final message list — authoritative for the
+   * normal completion path, and available even when our live subscription
+   * never attached (the sub-second race). Note `session.messages` is the
+   * post-compaction window, so a compacted agent is undercounted here; the
+   * caller reconciles against the live accumulator to cover that.
+   */
+  function costFromSession(session: any): number {
+    const messages = session?.messages;
+    if (!Array.isArray(messages)) return 0;
+    let cost = 0;
+    for (const msg of messages) {
+      if (msg?.role === "assistant") cost += messageCost(msg as AssistantMessage);
+    }
+    return cost;
+  }
+
   /** Recompute token totals and cost from the current branch (root → leaf). */
   function recomputeFromBranch() {
     const sm = currentCtx?.sessionManager;
@@ -399,9 +419,11 @@ export default function (pi: ExtensionAPI) {
   // Subagents run in-process but on their own session/event bus, so the
   // parent's message_end never fires for them. Instead we subscribe to each
   // subagent session directly (via the manager's Symbol.for registry) and
-  // accumulate per-message cost live. On completion the total is persisted
-  // as a custom entry in the parent session, anchored at the current leaf —
-  // which makes it rewind- and resume-accurate from then on.
+  // accumulate per-message cost live. On completion finalizeSubagent reprices
+  // from the finished session's full message list (authoritative, and robust
+  // to a lost attach race) and persists the total as a custom entry in the
+  // parent session, anchored at the current leaf — making it rewind- and
+  // resume-accurate from then on.
 
   function countSubagentMessage(track: SubagentTrack, msg: AssistantMessage) {
     if (track.counted.has(msg)) return;
@@ -455,15 +477,30 @@ export default function (pi: ExtensionAPI) {
     if (track.attachTimer) clearInterval(track.attachTimer);
     liveSubagents.delete(id);
 
-    // Attach never succeeded (e.g. race lost, session gone) — estimate from
-    // the lifetime token totals the completion event carries. cacheRead isn't
-    // reported there, so this floor slightly undercounts cached agents.
-    if (track.cost === 0 && tokens && tokens.total > 0) {
-      const subModelId = getSubagentRecord(id)?.session?.model?.id ?? modelId;
-      const rates = resolveRates(subModelId);
+    // Price the finished agent authoritatively from its own session. The
+    // manager keeps record.session alive after completion (disposed only on
+    // stop or its ~10min cleanup), so the full message list is here even for
+    // agents that finished before our live subscription could attach.
+    const session = getSubagentRecord(id)?.session;
+    let cost = costFromSession(session);
+
+    // Reconcile with the live-accumulated total. They agree when we attached
+    // cleanly and no compaction occurred; otherwise take the larger, since each
+    // is complete in the case the other is missing:
+    //  - live > session recompute: the agent compacted, dropping messages from
+    //    session.messages that our per-message_end accumulator already counted.
+    //  - session recompute > live: we attached late (or never), so the live
+    //    total missed early messages still present in session.messages.
+    if (track.cost > cost) cost = track.cost;
+
+    // Last resort — session already gone (disposed) AND never attached:
+    // estimate from the lifetime token totals the completion event carries.
+    // cacheRead isn't reported there, so this floor undercounts cached agents.
+    if (cost === 0 && tokens && tokens.total > 0) {
+      const rates = resolveRates(session?.model?.id ?? modelId);
       if (rates) {
         const cacheWrite = Math.max(0, tokens.total - tokens.input - tokens.output);
-        track.cost =
+        cost =
           tokens.input * rates.prompt +
           tokens.output * rates.completion +
           cacheWrite * rates.cacheWrite;
@@ -472,9 +509,9 @@ export default function (pi: ExtensionAPI) {
 
     // Persist into the session tree so rewinds/resumes account for it at the
     // point the agent finished.
-    if (track.cost > 0) {
+    if (cost > 0) {
       try {
-        pi.appendEntry(SUBAGENT_COST_ENTRY, { id, cost: track.cost });
+        pi.appendEntry(SUBAGENT_COST_ENTRY, { id, cost });
       } catch { /* no active session to write to */ }
       recomputeFromBranch();
     }
