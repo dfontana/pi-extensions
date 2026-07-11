@@ -42,10 +42,8 @@ The Helix editor black-box tests live under `extensions/helix-mode/__tests__/` a
 ## Installed Packages
 
 - npm:@tintinweb/pi-subagents
-- npm:pi-web-access
 - npm:@juicesharp/rpiv-ask-user-question
 - npm:@tintinweb/pi-tasks
-- npm:pi-notify
 - npm:@plannotator/pi-extension
 - git:github.com/dfontana/pi-extensions
 
@@ -70,8 +68,6 @@ The Helix editor black-box tests live under `extensions/helix-mode/__tests__/` a
 **claude-marketplace** — Pulls skills from Claude Code plugin marketplaces (e.g. `github.com/acme-corp/claude-marketplace`) and surfaces them in Pi. Configure which marketplaces and which specific plugins to install; repos are kept up-to-date automatically on a configurable schedule. Requires the [`gh` CLI](https://cli.github.com/) for repository access.
 
 ### Skills
-
-**jujutsu** — Jujutsu version control workflow. Pre-work checklist, commit discipline rules, subagent restrictions, and a git→jj command reference.
 
 **run-review** — Adversarial review/fix workflow for working changes, branches, files, revisions, or another explicit scope. The coordinator launches completeness, correctness, duplication, and simplicity investigations in parallel, then a high-thinking reviewer assumes the code is wrong and independently verifies their findings. Reviews 1–2 may trigger fixes; review 3 is final verification.
 
