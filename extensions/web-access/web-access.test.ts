@@ -7,6 +7,8 @@ import { after, describe, it } from "node:test";
 import { getAdapter, parseResponse } from "./providers.ts";
 import { loadConfig } from "./config.ts";
 
+describe("web-access", () => {
+
 describe("provider adapters buildBody", () => {
   it("openai: flat tool params, agent search_context_size wins over config", () => {
     const body = getAdapter("openai").buildBody(
@@ -354,4 +356,6 @@ describe("loadConfig merge (local over global)", () => {
     assert.equal(res.ok, false);
     assert.match((res as { error: string }).error, /no tool configured/);
   });
+});
+
 });

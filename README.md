@@ -36,6 +36,7 @@ Each extension has its own README covering configuration, provided tools/command
 | [mcp](extensions/mcp/README.md) | Lean MCP client: `.mcp.json` servers behind a single `mcp` proxy tool, `/mcp` panel |
 | [no-git-for-jj](extensions/no-git-for-jj/README.md) | Blocks `git` commands in jj repos, suggesting the `jj` equivalent |
 | [notify](extensions/notify/README.md) | Bell, desktop notification, and Zellij tab dot when Pi is ready for input |
+| [pane-control](extensions/pane-control/README.md) | Multiplexing tools for opening, driving, reading, and closing Kitty or Zellij panes |
 | [prompt-stash](extensions/prompt-stash/README.md) | Stash/restore the prompt editor with `Alt+Shift+S` |
 | [rainbow-spinner](extensions/rainbow-spinner/README.md) | Theme-colored spinner with a random whimsical phrase each turn |
 | [review-model-selector](extensions/review-model-selector/README.md) | `select_review_model` tool: deterministic adversarial-reviewer selection |

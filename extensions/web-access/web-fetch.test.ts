@@ -8,6 +8,8 @@ import {
   type WebFetchConfig,
 } from "./web-fetch.ts";
 
+describe("web-access", () => {
+
 const anthropic = getFetchAdapter("anthropic");
 const openrouter = getFetchAdapter("openrouter");
 
@@ -380,4 +382,6 @@ describe("mapOpenRouterFetchError", () => {
     assert.equal(mapped.message, "HTTP 404: Page not found");
     assert.equal(mapped.code, "url_not_accessible");
   });
+});
+
 });

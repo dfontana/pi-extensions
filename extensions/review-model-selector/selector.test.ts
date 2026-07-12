@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { describe } from "node:test";
 
 import type { Api, Model } from "@earendil-works/pi-ai";
 
 import { canonicalModel, rankModel, selectReviewModel, type ReviewIntelligencePreference, type ReviewThinkingLevel } from "./selector.ts";
+
+describe("review-model-selector", () => {
 
 function model(
   provider: string,
@@ -161,4 +163,6 @@ test("does not infer tiers from unrelated display-name branding", () => {
 test("refuses to guess when the current model tier is unknown", () => {
   const unknown = model("custom", "acme/reviewer-ultra");
   assert.throws(() => select(unknown, [unknown, sol]), /unrecognized intelligence tier/);
+});
+
 });

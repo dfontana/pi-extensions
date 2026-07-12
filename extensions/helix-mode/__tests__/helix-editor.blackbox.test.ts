@@ -12,6 +12,8 @@ import {
   typeText,
 } from "./test-harness.js";
 
+describe("helix-mode", () => {
+
 const WRAP_WIDTH = 32;
 const WRAPPED_SENTENCE = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
 
@@ -345,4 +347,6 @@ describe("HelixEditor black-box Unicode deletion", () => {
       "epsilon zeta",
     ]);
   });
+});
+
 });
