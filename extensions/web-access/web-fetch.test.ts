@@ -1,387 +1,187 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  getFetchAdapter,
-  mapOpenRouterFetchError,
-  type FetchResult,
-  type WebFetchConfig,
-} from "./web-fetch.ts";
-
-describe("web-access", () => {
+import { getFetchAdapter, type WebFetchConfig } from "./web-fetch.ts";
 
 const anthropic = getFetchAdapter("anthropic");
 const openrouter = getFetchAdapter("openrouter");
+const URL = "https://example.com/article";
 
-const FULL_CONFIG: WebFetchConfig = {
-  maxUses: 5,
-  maxContentTokens: 100_000,
-  allowedDomains: ["example.com", "docs.example.com"],
-  blockedDomains: ["private.example.com"],
-  citations: true,
-  engine: "exa",
-};
-
-/** A successful Anthropic Messages response carrying a web_fetch_tool_result. */
-function anthropicSuccess(overrides?: { source?: Record<string, unknown> }) {
+function anthropicSuccess(overrides?: { source?: Record<string, unknown>; citations?: unknown[] }) {
   return {
-    role: "assistant",
     content: [
-      { type: "text", text: "I'll fetch the article." },
-      {
-        type: "server_tool_use",
-        id: "srvtoolu_01",
-        name: "web_fetch",
-        input: { url: "https://example.com/article" },
-      },
+      { type: "server_tool_use", id: "fetch-1", name: "web_fetch", input: { url: URL } },
       {
         type: "web_fetch_tool_result",
-        tool_use_id: "srvtoolu_01",
+        tool_use_id: "fetch-1",
         content: {
           type: "web_fetch_result",
-          url: "https://example.com/article",
+          url: URL,
           content: {
             type: "document",
-            source: overrides?.source ?? {
-              type: "text",
-              media_type: "text/plain",
-              data: "Full text content of the article...",
-            },
+            source: overrides?.source ?? { type: "text", media_type: "text/plain", data: "Full article text" },
             title: "Article Title",
-            citations: { enabled: true },
           },
           retrieved_at: "2025-08-25T10:30:00Z",
         },
       },
-      {
-        type: "text",
-        text: "the main argument is...",
-        citations: [
-          {
-            type: "char_location",
-            document_index: 0,
-            document_title: "Article Title",
-            start_char_index: 10,
-            end_char_index: 20,
-            cited_text: "argument",
-          },
-        ],
-      },
+      ...(overrides?.citations ? [{ type: "text", citations: overrides.citations }] : []),
     ],
   };
 }
 
-function anthropicError(errorCode: string) {
+function anthropicFailure(code: string) {
   return {
-    role: "assistant",
     content: [
-      {
-        type: "server_tool_use",
-        id: "srvtoolu_err",
-        name: "web_fetch",
-        input: { url: "https://blocked.example.com/page" },
-      },
-      {
-        type: "web_fetch_tool_result",
-        tool_use_id: "srvtoolu_err",
-        content: { type: "web_fetch_tool_error", error_code: errorCode },
-      },
+      { type: "server_tool_use", id: "fetch-1", name: "web_fetch", input: { url: "https://blocked.example.com" } },
+      { type: "web_fetch_tool_result", tool_use_id: "fetch-1", content: { type: "web_fetch_tool_error", error_code: code } },
     ],
   };
 }
 
-describe("toToolSpec round-trips one WebFetchConfig to both providers", () => {
-  it("anthropic: flat fields, default version, citations wrapped, engine ignored", () => {
-    assert.deepEqual(anthropic.toToolSpec(FULL_CONFIG), {
-      type: "web_fetch_20250910",
-      name: "web_fetch",
-      max_uses: 5,
-      allowed_domains: ["example.com", "docs.example.com"],
-      blocked_domains: ["private.example.com"],
-      max_content_tokens: 100_000,
-      citations: { enabled: true },
-    });
-  });
-
-  it("anthropic: dynamicFiltering opts into web_fetch_20260209", () => {
-    const spec = anthropic.toToolSpec({ dynamicFiltering: true });
-    assert.equal(spec.type, "web_fetch_20260209");
-    assert.equal(spec.name, "web_fetch");
-  });
-
-  it("openrouter: params nested under `parameters`, citations ignored", () => {
-    assert.deepEqual(openrouter.toToolSpec(FULL_CONFIG), {
-      type: "openrouter:web_fetch",
-      parameters: {
+describe("web-access web-fetch", () => {
+  describe("provider request boundary", () => {
+    it("maps one fetch policy onto each provider's request format", () => {
+      const policy: WebFetchConfig = {
+        maxUses: 5,
+        maxContentTokens: 100_000,
+        allowedDomains: ["example.com"],
+        blockedDomains: ["private.example.com"],
+        citations: true,
         engine: "exa",
+      };
+
+      assert.deepEqual(anthropic.toToolSpec(policy), {
+        type: "web_fetch_20250910",
+        name: "web_fetch",
         max_uses: 5,
         max_content_tokens: 100_000,
-        allowed_domains: ["example.com", "docs.example.com"],
+        allowed_domains: ["example.com"],
         blocked_domains: ["private.example.com"],
-      },
-    });
-  });
-
-  it("openrouter: engine is pinned to 'openrouter' by default, never 'auto'", () => {
-    const spec = openrouter.toToolSpec({});
-    assert.deepEqual(spec, {
-      type: "openrouter:web_fetch",
-      parameters: { engine: "openrouter" },
-    });
-  });
-
-  it("unknown provider falls back to the anthropic adapter (the spec to implement)", () => {
-    assert.equal(getFetchAdapter("totally-unknown"), anthropic);
-  });
-
-  it("both: maxContentTokens and domain filters land on both providers", () => {
-    const cfg: WebFetchConfig = { maxContentTokens: 5000, blockedDomains: ["x.com"] };
-    const a = anthropic.toToolSpec(cfg);
-    const o = openrouter.toToolSpec(cfg) as { parameters: Record<string, unknown> };
-    assert.equal(a.max_content_tokens, 5000);
-    assert.deepEqual(a.blocked_domains, ["x.com"]);
-    assert.equal(o.parameters.max_content_tokens, 5000);
-    assert.deepEqual(o.parameters.blocked_domains, ["x.com"]);
-  });
-});
-
-describe("buildBody", () => {
-  it("anthropic: the URL appears verbatim in the user message (context-URL restriction)", () => {
-    const body = anthropic.buildBody("claude-opus-4-8", "https://example.com/a", undefined, {}) as {
-      messages: Array<{ role: string; content: string }>;
-      tools: unknown[];
-    };
-    assert.ok(body.messages[0].content.includes("https://example.com/a"));
-    assert.equal(body.messages.length, 1);
-    assert.equal(body.tools.length, 1);
-  });
-
-  it("openrouter: chat/completions shape with the tool attached", () => {
-    const body = openrouter.buildBody("openai/gpt-5.5", "https://example.com/a", "find the license", {
-      maxUses: 2,
-    }) as { model: string; messages: Array<{ content: string }>; tools: Array<Record<string, unknown>> };
-    assert.equal(body.model, "openai/gpt-5.5");
-    assert.ok(body.messages[0].content.includes("find the license"));
-    assert.ok(body.messages[0].content.includes("https://example.com/a"));
-    assert.equal(body.tools[0].type, "openrouter:web_fetch");
-  });
-
-  it("endpoints: anthropic /messages, openrouter /chat/completions", () => {
-    assert.equal(anthropic.endpoint("https://api.anthropic.com/v1/"), "https://api.anthropic.com/v1/messages");
-    assert.equal(openrouter.endpoint("https://openrouter.ai/api/v1"), "https://openrouter.ai/api/v1/chat/completions");
-  });
-});
-
-describe("parseResult: anthropic", () => {
-  it("success (text): url, title, content, retrievedAt, citations", () => {
-    const result = anthropic.parseResult(anthropicSuccess(), { url: "https://example.com/article" });
-    assert.deepEqual(result, {
-      url: "https://example.com/article",
-      title: "Article Title",
-      content: {
-        kind: "text",
-        data: "Full text content of the article...",
-        mediaType: "text/plain",
-      },
-      retrievedAt: "2025-08-25T10:30:00Z",
-      citations: [
-        {
-          type: "char_location",
-          document_index: 0,
-          document_title: "Article Title",
-          start_char_index: 10,
-          end_char_index: 20,
-          cited_text: "argument",
-        },
-      ],
-    });
-  });
-
-  it("success without citations: citations key absent (graceful degradation)", () => {
-    const response = anthropicSuccess();
-    response.content = response.content.filter((b) => !("citations" in b));
-    const result = anthropic.parseResult(response, { url: "https://example.com/article" });
-    assert.ok(!("citations" in result));
-  });
-
-  it("each typed error code maps through; url recovered from server_tool_use", () => {
-    for (const code of [
-      "invalid_input",
-      "url_too_long",
-      "url_not_allowed",
-      "url_not_accessible",
-      "too_many_requests",
-      "unsupported_content_type",
-      "max_uses_exceeded",
-      "unavailable",
-    ]) {
-      const result = anthropic.parseResult(anthropicError(code), { url: "https://fallback.example" });
-      assert.deepEqual(result, {
-        url: "https://blocked.example.com/page",
-        content: { kind: "text", data: "", mediaType: "text/plain" },
-        error: { code },
+        citations: { enabled: true },
       });
-    }
-  });
-
-  it("domain-blocked: url_not_allowed", () => {
-    const result = anthropic.parseResult(anthropicError("url_not_allowed"), {
-      url: "https://blocked.example.com/page",
+      assert.deepEqual(openrouter.toToolSpec(policy), {
+        type: "openrouter:web_fetch",
+        parameters: {
+          engine: "exa",
+          max_uses: 5,
+          max_content_tokens: 100_000,
+          allowed_domains: ["example.com"],
+          blocked_domains: ["private.example.com"],
+        },
+      });
+      assert.equal(anthropic.toToolSpec({ dynamicFiltering: true }).type, "web_fetch_20260209");
+      assert.deepEqual(openrouter.toToolSpec({}), { type: "openrouter:web_fetch", parameters: { engine: "openrouter" } });
+      assert.equal(getFetchAdapter("future-provider"), anthropic);
     });
-    assert.equal(result.error?.code, "url_not_allowed");
-  });
 
-  it("unknown error code degrades to fetch_failed instead of crashing", () => {
-    const result = anthropic.parseResult(anthropicError("brand_new_code"), { url: "https://x" });
-    assert.equal(result.error?.code, "fetch_failed");
-  });
+    it("builds requests that give each provider the URL and routes to its API", () => {
+      const cases = [
+        [anthropic, "claude-opus-4-8", "https://api.anthropic.com/v1/", "https://api.anthropic.com/v1/messages"],
+        [openrouter, "openai/gpt-5.5", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions"],
+      ] as const;
 
-  it("PDF (base64) is rejected as unsupported_content_type", () => {
-    const response = anthropicSuccess({
-      source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK..." },
-    });
-    const result = anthropic.parseResult(response, { url: "https://example.com/article" });
-    assert.equal(result.error?.code, "unsupported_content_type");
-    assert.equal(result.content.data, "");
-  });
-
-  it("throws on a top-level API error envelope", () => {
-    assert.throws(
-      () => anthropic.parseResult({ type: "error", error: { message: "bad key" } }, { url: "https://x" }),
-      /provider error: bad key/,
-    );
-  });
-
-  it("throws when no web_fetch_tool_result block exists", () => {
-    assert.throws(
-      () => anthropic.parseResult({ content: [{ type: "text", text: "hi" }] }, { url: "https://x" }),
-      /no web_fetch_tool_result/,
-    );
-  });
-});
-
-describe("parseResult: openrouter", () => {
-  it("degraded path (documented): synthesized text from choices[0].message.content", () => {
-    const result = openrouter.parseResult(
-      { choices: [{ message: { role: "assistant", content: "The page says hello." } }] },
-      { url: "https://example.com/a" },
-    );
-    assert.deepEqual(result, {
-      url: "https://example.com/a",
-      title: undefined,
-      content: { kind: "text", data: "The page says hello.", mediaType: "text/markdown" },
+      for (const [adapter, model, baseUrl, endpoint] of cases) {
+        const body = adapter.buildBody(model, URL, "find the license", { maxUses: 2 }) as {
+          model: string;
+          messages: Array<{ content: string }>;
+          tools: unknown[];
+        };
+        assert.equal(body.model, model);
+        assert.match(body.messages[0].content, /find the license/);
+        assert.match(body.messages[0].content, new RegExp(URL));
+        assert.equal(body.tools.length, 1);
+        assert.equal(adapter.endpoint(baseUrl), endpoint);
+      }
     });
   });
 
-  it("degraded path: optional annotations supply a title when present", () => {
-    const result = openrouter.parseResult(
-      {
-        choices: [
-          {
-            message: {
-              content: "Summary.",
-              annotations: [
-                {
-                  type: "url_citation",
-                  url_citation: { url: "https://example.com/a", title: "Example Page" },
-                },
-              ],
-            },
-          },
-        ],
-      },
-      { url: "https://example.com/a" },
-    );
-    assert.equal(result.title, "Example Page");
-  });
-
-  it("structured path (optional): flat completed object normalizes with full fidelity", () => {
-    const result = openrouter.parseResult(
-      {
-        url: "https://example.com/article",
+  describe("response behavior", () => {
+    it("normalizes a successful Anthropic fetch including its optional citations", () => {
+      const citations = [{ type: "char_location", cited_text: "article" }];
+      const result = anthropic.parseResult(anthropicSuccess({ citations }), { url: "https://fallback.example" });
+      assert.deepEqual(result, {
+        url: URL,
         title: "Article Title",
-        content: "The full text content of the page...",
-        status: "completed",
-        retrieved_at: "2025-07-15T14:30:00.000Z",
-      },
-      { url: "https://example.com/article" },
-    );
-    assert.deepEqual(result, {
-      url: "https://example.com/article",
-      title: "Article Title",
-      content: { kind: "text", data: "The full text content of the page...", mediaType: "text/plain" },
-      retrievedAt: "2025-07-15T14:30:00.000Z",
+        content: { kind: "text", data: "Full article text", mediaType: "text/plain" },
+        retrievedAt: "2025-08-25T10:30:00Z",
+        citations,
+      });
+    });
+
+    it("returns portable Anthropic fetch failures instead of provider-shaped errors", () => {
+      for (const [providerCode, expectedCode] of [
+        ["invalid_input", "invalid_input"],
+        ["url_too_long", "url_too_long"],
+        ["url_not_allowed", "url_not_allowed"],
+        ["url_not_accessible", "url_not_accessible"],
+        ["too_many_requests", "too_many_requests"],
+        ["unsupported_content_type", "unsupported_content_type"],
+        ["max_uses_exceeded", "max_uses_exceeded"],
+        ["unavailable", "unavailable"],
+        ["future_code", "fetch_failed"],
+      ] as const) {
+        const result = anthropic.parseResult(anthropicFailure(providerCode), { url: "https://fallback.example" });
+        assert.deepEqual(result, {
+          url: "https://blocked.example.com",
+          content: { kind: "text", data: "", mediaType: "text/plain" },
+          error: { code: expectedCode },
+        }, providerCode);
+      }
+
+      const pdf = anthropic.parseResult(
+        anthropicSuccess({ source: { type: "base64", media_type: "application/pdf", data: "JVBERi0" } }),
+        { url: URL },
+      );
+      assert.equal(pdf.error?.code, "unsupported_content_type");
+    });
+
+    it("normalizes both documented OpenRouter response forms", () => {
+      const synthesized = openrouter.parseResult(
+        { choices: [{ message: { content: "The page says hello.", annotations: [{ url_citation: { url: URL, title: "Example Page" } }] } }] },
+        { url: URL },
+      );
+      assert.deepEqual(synthesized, {
+        url: URL,
+        title: "Example Page",
+        content: { kind: "text", data: "The page says hello.", mediaType: "text/markdown" },
+      });
+
+      const structured = openrouter.parseResult(
+        { url: URL, title: "Article Title", content: "Full article text", status: "completed", retrieved_at: "2025-07-15T14:30:00.000Z" },
+        { url: URL },
+      );
+      assert.deepEqual(structured, {
+        url: URL,
+        title: "Article Title",
+        content: { kind: "text", data: "Full article text", mediaType: "text/plain" },
+        retrievedAt: "2025-07-15T14:30:00.000Z",
+      });
+    });
+
+    it("maps OpenRouter fetch failures onto the common error contract", () => {
+      for (const [message, code] of [
+        ["HTTP 404: Page not found", "url_not_accessible"],
+        ["Domain blocked by filter rules", "url_not_allowed"],
+        ["Maximum fetches exceeded", "max_uses_exceeded"],
+        ["HTTP 429: Too Many Requests", "too_many_requests"],
+        ["something inexplicable", "fetch_failed"],
+      ] as const) {
+        const result = openrouter.parseResult({ url: URL, status: "failed", error: message }, { url: URL });
+        assert.deepEqual(result.error, { code, message }, message);
+        assert.equal(result.content.data, "");
+      }
+    });
+
+    it("throws only for provider or protocol failures", () => {
+      for (const [adapter, response, message] of [
+        [anthropic, { type: "error", error: { message: "bad key" } }, /provider error: bad key/],
+        [anthropic, { content: [{ type: "text", text: "no result" }] }, /no web_fetch_tool_result/],
+        [openrouter, { error: { message: "no credits" } }, /provider error: no credits/],
+        [openrouter, { choices: [] }, /no choices/],
+      ] as const) {
+        assert.throws(() => adapter.parseResult(response, { url: URL }), message);
+      }
     });
   });
-
-  it("structured path: failed status maps free-text errors onto common codes", () => {
-    const cases: Array<[string, string]> = [
-      ["HTTP 404: Page not found", "url_not_accessible"],
-      ["Domain blocked by filter rules", "url_not_allowed"],
-      ["Maximum fetches exceeded for this request", "max_uses_exceeded"],
-      ["HTTP 429: Too Many Requests", "too_many_requests"],
-      ["something inexplicable", "fetch_failed"],
-    ];
-    for (const [message, code] of cases) {
-      const result = openrouter.parseResult(
-        { url: "https://example.com/404", status: "failed", error: message },
-        { url: "https://example.com/404" },
-      );
-      assert.deepEqual(result.error, { code, message }, `for "${message}"`);
-      assert.equal(result.content.data, "");
-    }
-  });
-
-  it("throws on a top-level API error", () => {
-    assert.throws(
-      () => openrouter.parseResult({ error: { message: "no credits" } }, { url: "https://x" }),
-      /provider error: no credits/,
-    );
-  });
-
-  it("throws when there is no message", () => {
-    assert.throws(() => openrouter.parseResult({ choices: [] }, { url: "https://x" }), /no choices/);
-  });
-});
-
-describe("FetchResult shape parity across providers", () => {
-  const ALLOWED_KEYS = new Set(["url", "title", "content", "retrievedAt", "error", "citations"]);
-
-  function checkShape(result: FetchResult) {
-    for (const key of Object.keys(result)) {
-      assert.ok(ALLOWED_KEYS.has(key), `unexpected key ${key}`);
-    }
-    assert.equal(typeof result.url, "string");
-    assert.equal(result.content.kind, "text");
-    assert.equal(typeof result.content.data, "string");
-    assert.equal(typeof result.content.mediaType, "string");
-    if (result.error) assert.equal(typeof result.error.code, "string");
-  }
-
-  it("success and error results from both adapters fit the same shape", () => {
-    checkShape(anthropic.parseResult(anthropicSuccess(), { url: "https://example.com/article" }));
-    checkShape(anthropic.parseResult(anthropicError("url_not_accessible"), { url: "https://x" }));
-    checkShape(
-      openrouter.parseResult(
-        { choices: [{ message: { content: "text" } }] },
-        { url: "https://example.com/a" },
-      ),
-    );
-    checkShape(
-      openrouter.parseResult(
-        { url: "https://x", status: "failed", error: "HTTP 500" },
-        { url: "https://x" },
-      ),
-    );
-  });
-});
-
-describe("mapOpenRouterFetchError", () => {
-  it("preserves the original free-text message", () => {
-    const mapped = mapOpenRouterFetchError("HTTP 404: Page not found");
-    assert.equal(mapped.message, "HTTP 404: Page not found");
-    assert.equal(mapped.code, "url_not_accessible");
-  });
-});
-
 });

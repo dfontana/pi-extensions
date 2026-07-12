@@ -16,14 +16,6 @@ skills/             # Auto-discovered SKILL.md folders
 pi install git:github.com/dfontana/pi-extensions
 ```
 
-## Development
-
-```bash
-npm install        # repo-level dev dependencies
-npm test           # TypeScript unit tests (Node built-in runner)
-npm run typecheck  # TypeScript type-checking
-```
-
 ## Extensions
 
 Each extension has its own README covering configuration, provided tools/commands, and limitations.

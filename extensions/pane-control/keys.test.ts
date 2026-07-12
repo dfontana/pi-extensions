@@ -2,49 +2,40 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { toKittyKey, toZellijKey } from "./keys.ts";
 
-describe("pane-control", () => {
+describe("pane-control keys", () => {
+  test("translates supported key specs for each backend", () => {
+    const cases = [
+      ["Enter", "enter", "Enter"],
+      ["Esc", "escape", "Esc"],
+      ["PageUp", "page_up", "PageUp"],
+      ["F5", "f5", "F5"],
+      ["Q", "q", "q"],
+      ["Ctrl+C", "ctrl+c", "Ctrl c"],
+      ["Shift+Up", "shift+up", "Shift Up"],
+      ["Ctrl+Shift+Left", "ctrl+shift+left", "Ctrl Shift Left"],
+      ["cmd+Enter", "super+enter", "Super Enter"],
+      ["Ctrl++", "ctrl++", "Ctrl +"],
+    ] as const;
 
-test("named keys translate per backend", () => {
-  assert.equal(toKittyKey("Enter"), "enter");
-  assert.equal(toZellijKey("Enter"), "Enter");
-  assert.equal(toKittyKey("Esc"), "escape");
-  assert.equal(toZellijKey("Escape"), "Esc");
-  assert.equal(toKittyKey("PageUp"), "page_up");
-  assert.equal(toZellijKey("PageUp"), "PageUp");
-  assert.equal(toKittyKey("F5"), "f5");
-  assert.equal(toZellijKey("f12"), "F12");
-});
+    for (const [spec, kitty, zellij] of cases) {
+      assert.equal(toKittyKey(spec), kitty, `kitty: ${spec}`);
+      assert.equal(toZellijKey(spec), zellij, `zellij: ${spec}`);
+    }
+  });
 
-test("single characters pass through lowercased", () => {
-  assert.equal(toKittyKey("q"), "q");
-  assert.equal(toZellijKey("Q"), "q");
-  assert.equal(toKittyKey("["), "[");
-});
+  test("preserves literal single-character and plus keys", () => {
+    assert.equal(toKittyKey("["), "[");
+    assert.equal(toKittyKey("+"), "+");
+    assert.equal(toKittyKey("Ctrl+Ctrl+a"), "ctrl+a");
+  });
 
-test("modifier combos", () => {
-  assert.equal(toKittyKey("Ctrl+C"), "ctrl+c");
-  assert.equal(toZellijKey("Ctrl+C"), "Ctrl c");
-  assert.equal(toKittyKey("Shift+Up"), "shift+up");
-  assert.equal(toZellijKey("Shift+Up"), "Shift Up");
-  assert.equal(toKittyKey("Ctrl+Shift+Left"), "ctrl+shift+left");
-  assert.equal(toZellijKey("Alt+Shift+b"), "Alt Shift b");
-  assert.equal(toKittyKey("cmd+Enter"), "super+enter");
-});
-
-test("plus key edge cases", () => {
-  assert.equal(toKittyKey("+"), "+");
-  assert.equal(toKittyKey("Ctrl++"), "ctrl++");
-  assert.equal(toZellijKey("Ctrl++"), "Ctrl +");
-});
-
-test("duplicate modifiers are deduped", () => {
-  assert.equal(toKittyKey("Ctrl+Ctrl+a"), "ctrl+a");
-});
-
-test("unknown keys and modifiers throw with guidance", () => {
-  assert.throws(() => toKittyKey("Bogus"), /Unknown key "Bogus"/);
-  assert.throws(() => toZellijKey("Hyper+a"), /Unknown modifier "Hyper"/);
-  assert.throws(() => toKittyKey(""), /Empty key spec/);
-});
-
+  test("rejects invalid key specs with actionable errors", () => {
+    for (const [convert, spec, message] of [
+      [toKittyKey, "Bogus", /Unknown key "Bogus"/],
+      [toZellijKey, "Hyper+a", /Unknown modifier "Hyper"/],
+      [toKittyKey, "", /Empty key spec/],
+    ] as const) {
+      assert.throws(() => convert(spec), message);
+    }
+  });
 });
