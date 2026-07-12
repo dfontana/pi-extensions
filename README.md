@@ -31,7 +31,6 @@ Each extension has its own README covering configuration, provided tools/command
 | Extension | Purpose |
 |---|---|
 | [claude-marketplace](extensions/claude-marketplace/README.md) | Pull skills from Claude Code plugin marketplaces into Pi, auto-synced on a schedule |
-| [hashline](extensions/hashline/README.md) | Content-hash-anchored read/edit tools that reject stale edits, plus usage statistics |
 | [helix-mode](extensions/helix-mode/README.md) | Helix-style modal editing for the input box (on by default; `/helix` to toggle) |
 | [improved-footer](extensions/improved-footer/README.md) | Footer with jj bookmark support and accurate OpenRouter cost tracking |
 | [mcp](extensions/mcp/README.md) | Lean MCP client: `.mcp.json` servers behind a single `mcp` proxy tool, `/mcp` panel |
