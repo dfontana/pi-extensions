@@ -69,4 +69,4 @@ The two fetch backends are not perfectly symmetric; differences are documented r
 - **Citations (Anthropic only)** — `citations: true` passes `char_location` citations through; the field is simply absent on OpenRouter. Treat `citations` as optional.
 - **Errors** — both providers normalize to `error: { code, message? }`. Anthropic's typed enum (`url_not_accessible`, `max_uses_exceeded`, `url_not_allowed`, `unsupported_content_type`, …) passes through verbatim; OpenRouter's free-text failures are pattern-matched onto the same codes (fallback `fetch_failed`) with the original text preserved in `message`.
 - pi exposes no internal API for provider endpoints, so the tools issue HTTP requests themselves via `fetch()` — auth is still resolved through pi's model registry, never rolled by hand.
-- The `web-access-smoke-test` skill (in this repo's `skills/`) exercises both tools end-to-end after code changes.
+- The `web-access-smoke-test` skill (repo-local, in `.pi/skills/`) exercises both tools end-to-end after code changes.

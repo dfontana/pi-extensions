@@ -45,7 +45,8 @@ Each extension has its own README covering configuration, provided tools/command
 
 - **run-review** — adversarial review/fix workflow over working changes, a branch, files, or revisions: parallel investigations, an independent high-thinking reviewer, and a bounded fix/re-review loop.
 - **run-plan** — consolidates review feedback, delegates implementation to a persistent large-context agent, then invokes `run-review` with that implementer as the fixer.
-- **web-access-smoke-test** — end-to-end check of the web-access tools after code changes.
+
+A repo-local **web-access-smoke-test** skill (in `.pi/skills/`, not shipped with the package) provides an end-to-end check of the web-access tools after code changes.
 
 `run-review` and `run-plan` require the separately installed `@tintinweb/pi-subagents` package; they preflight the `Agent` tools and return installation guidance rather than silently degrading.
 
