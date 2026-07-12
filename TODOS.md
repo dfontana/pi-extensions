@@ -1,4 +1,4 @@
 - Move all documentation that is extension specific into extension specific READMEs instead of partly in the global config
 - Update each extensions docs to correctly specify their configuaration
-- Subagents: tintinweb is getting heavy, wondering if we can make this lighter using pi's built ins. Session tracking for example is hard to do, their session information should be persisted somewhere. Being able to see the session details is inconsistent (the log, which agent used, etc). The activity view is good and fetching agent details. Handing off extensions to subagents is inconsistent. Wondering if we can do better with forking pi sessions?
 - Could use general purpose tools or skills for managing kitty splits / zmx sessions. This could also be how subagents get implemented for example.
+- General purpose intelligence selection, favoring subscription routes instead of paid for (openrouter). Can we limit the number of openrouter methods by default?
