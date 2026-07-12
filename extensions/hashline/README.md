@@ -1,84 +1,42 @@
 # hashline
 
-Content-hash-anchored file reading and editing for the pi coding agent, plus
-always-on usage statistics. A fresh, minimal reimplementation of the "hashline"
-idea from [the harness problem](https://blog.can.ac/2026/02/12/the-harness-problem/).
+Content-hash-anchored file reading and editing for the pi coding agent, plus always-on usage statistics. Line numbers are a fragile edit anchor — the file can change between read and edit. hashline gives every line a short content hash and requires edits to cite `line:hash`; if the hash has drifted at apply time the **entire edit is rejected** with an actionable diff, so the model re-reads instead of corrupting the file. A minimal reimplementation of the idea from [the harness problem](https://blog.can.ac/2026/02/12/the-harness-problem/).
 
-## Why
+## Configuration
 
-Line numbers are a fragile edit anchor: a file can change between the moment the
-model reads it and the moment it edits. hashline gives every line a short
-content hash and requires edits to cite `line:hash`. On apply, the current hash
-for that line number is recomputed; if it has drifted, the **entire edit is
-rejected** with an actionable diff so the model re-reads and retries instead of
-corrupting the file.
-
-## Read format
-
-`hashline_read` returns one row per line:
-
-```
-LINENUM:HASH|CONTENT
-```
-
-e.g. `11:a3f|function hello() {`. The hash is the first 3 hex chars of the
-SHA-1 of the exact (LF-normalized, BOM-stripped) line text. Whitespace is
-significant — a trailing-space change changes the hash.
-
-## Edit operations
-
-`hashline_edit` takes `{ path, operations: [...] }`. Each operation:
-
-| op              | fields                                  | meaning |
-|-----------------|-----------------------------------------|---------|
-| `replace`       | `line`, `hash`, optional `to:{line,hash}`, `body` | replace a line or `line..to` range with `body` |
-| `insert_before` | `line`, `hash`, `body`                  | insert `body` before the anchored line |
-| `insert_after`  | `line`, `hash`, `body`                  | insert `body` after the anchored line |
-| `insert_head`   | `body`                                  | prepend `body` to the file |
-| `insert_tail`   | `body`                                  | append `body` to the file |
-| `delete`        | `line`, `hash`, optional `to:{line,hash}` | delete a line or `line..to` range |
-
-`body` is an array of lines (no trailing newlines). All operations address
-**original** line numbers (not applied incrementally); overlapping operations
-are rejected. Any anchor whose `hash` no longer matches the current file rejects
-the whole edit, with ±2 lines of real context (and real hashes) in the error.
-The result is written with LF endings, preserving the file's original
-trailing-newline state.
-
-## Toggle
-
-`/hashline` flips the extension on/off (default ON). State persists to
-`~/.pi/agent/hashline.json` and survives restarts. When OFF, the tools defer to
-the built-in `read`/`edit`.
-
-## Statistics
-
-Every read/edit-class tool result — built-in **and** hashline — is recorded to
-`~/.pi/agent/hashline-stats.json` (atomic temp-file + rename; corrupt/missing
-file tolerated). Events go into the `active` bucket when hashline is on at the
-time, `inactive` otherwise (the native-edit baseline). Schema:
+No configuration file. The only setting is the on/off toggle:
 
 ```jsonc
-{
-  "version": 1,
-  "active":   { /* Counters */ },
-  "inactive": { /* Counters */ },
-  "recent": [ { "ts", "tool", "path", "isError", "kind" } ]  // bounded to last 500
-}
+// ~/.pi/agent/hashline.json (written by the /hashline command)
+{ "enabled": false }   // boolean, default false
 ```
 
-Each `Counters` bucket:
+The minimum configuration is: none — install and run `/hashline` to enable.
 
-```jsonc
-{
-  "edit_calls": 0,
-  "edit_successes": 0,
-  "edit_failures": 0,
-  "hash_mismatch_rejections": 0,  // hashline_edit anchor mismatches
-  "read_calls": 0,
-  "firstSeen": null,              // ISO timestamp
-  "lastUpdated": null             // ISO timestamp
-}
-```
+### Configuration Details
 
-`recent[].kind` is `"edit" | "read" | "hash_mismatch"`.
+- `enabled` — persisted automatically when you run `/hashline`; loaded at session start. A missing or corrupt file falls back to the default (off).
+
+## Provides
+
+- `hashline_read` tool — reads a file as `LINENUM:HASH|CONTENT` rows (e.g. `11:a3f|function hello() {`). Accepts `path` (required), `offset` (1-based start line), `limit` (max lines).
+- `hashline_edit` tool — applies `{ path, operations: [...] }`:
+
+  | op              | fields                                            | meaning |
+  |-----------------|---------------------------------------------------|---------|
+  | `replace`       | `line`, `hash`, optional `to:{line,hash}`, `body` | replace a line or `line..to` range |
+  | `insert_before` | `line`, `hash`, `body`                            | insert before the anchored line |
+  | `insert_after`  | `line`, `hash`, `body`                            | insert after the anchored line |
+  | `insert_head`   | `body`                                            | prepend to the file |
+  | `insert_tail`   | `body`                                            | append to the file |
+  | `delete`        | `line`, `hash`, optional `to:{line,hash}`         | delete a line or `line..to` range |
+
+- `/hashline` command — toggles the extension on/off; state persists across restarts. When off, the tools defer the model to the built-in `read`/`edit`.
+
+## Limitations and Technical details
+
+- Off by default; enable with `/hashline`.
+- The hash is the first 3 hex chars of the SHA-1 of the exact (LF-normalized, BOM-stripped) line text. Whitespace is significant — a trailing-space change changes the hash.
+- `body` is an array of lines with no trailing newlines. All operations address **original** line numbers (not applied incrementally); overlapping operations are rejected. Any stale anchor rejects the whole edit with ±2 lines of current context (with real hashes) in the error.
+- Output is written with LF endings, preserving the file's original trailing-newline state.
+- Statistics: every read/edit-class tool result — built-in **and** hashline — is recorded to `~/.pi/agent/hashline-stats.json` (atomic temp-file + rename; corrupt/missing file tolerated), even while hashline is off. Events land in the `active` bucket when hashline was on at the time, `inactive` otherwise, so the native-edit baseline accumulates for comparison. Each bucket counts `edit_calls`, `edit_successes`, `edit_failures`, `hash_mismatch_rejections`, `read_calls` plus `firstSeen`/`lastUpdated`; a `recent` list keeps the last 500 events (`ts`, `tool`, `path`, `isError`, `kind: "edit" | "read" | "hash_mismatch"`).
