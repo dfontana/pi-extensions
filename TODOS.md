@@ -1,2 +1,1 @@
 - Could use general purpose tools or skills for managing kitty splits / zmx sessions. This could also be how subagents get implemented for example.
-- General purpose intelligence selection, favoring subscription routes instead of paid for (openrouter). Can we limit the number of openrouter methods by default?
