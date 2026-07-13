@@ -1,7 +1,8 @@
 /**
  * web-access — gives the agent `web_search` and `web_fetch` tools backed by a
- * configured model provider (`web_search`: OpenAI-style Responses API;
- * `web_fetch`: Anthropic Messages API or OpenRouter chat/completions).
+ * configured model provider (`web_search`: OpenAI-style Responses API, incl.
+ * the openai-codex ChatGPT OAuth backend; `web_fetch`: Anthropic Messages API
+ * or OpenRouter chat/completions).
  *
  * The provider/model and any provider-specific params are read from
  * `web-access.json` (global ~/.pi/agent + project ./.pi override). On session
@@ -22,7 +23,7 @@ import { Type, StringEnum } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, type ExtensionAPI, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { loadConfig, type FetchToolConfig, type SearchToolConfig } from "./config.ts";
-import { getAdapter, parseResponse } from "./providers.ts";
+import { getAdapter, parseResponse, readSseResponse } from "./providers.ts";
 import { getFetchAdapter, type FetchResult } from "./web-fetch.ts";
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -83,6 +84,10 @@ type ToolUpdate = { content: Array<{ type: "text"; text: string }>; details: und
  * POST a JSON body, animating a spinner through onUpdate while the request is
  * in flight (the partial content re-renders the result row — see the tools'
  * renderResult). Shared by web_search and web_fetch. Throws on non-2xx.
+ *
+ * With `sse` set the endpoint replies with an event stream instead of a JSON
+ * body (openai-codex is SSE-only); the final response object is reassembled
+ * from the stream by `readSseResponse`.
  */
 async function postJsonWithThrobber(opts: {
   toolName: string;
@@ -92,6 +97,7 @@ async function postJsonWithThrobber(opts: {
   signal: AbortSignal | undefined;
   onUpdate: ((update: ToolUpdate) => void) | undefined;
   workingText: string;
+  sse?: boolean;
 }): Promise<unknown> {
   let frame = 0;
   const throbber = setInterval(() => {
@@ -110,6 +116,10 @@ async function postJsonWithThrobber(opts: {
     });
     if (!res.ok) {
       throw new Error(`${opts.toolName} request failed (${res.status}): ${await res.text()}`);
+    }
+    if (opts.sse) {
+      if (!res.body) throw new Error(`${opts.toolName}: response has no body`);
+      return await readSseResponse(res.body as unknown as AsyncIterable<Uint8Array>);
     }
     return await res.json();
   } finally {
@@ -228,12 +238,13 @@ function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
 
       const json = await postJsonWithThrobber({
         toolName: "web_search",
-        url: `${model.baseUrl.replace(/\/$/, "")}/responses`,
-        headers: { Authorization: `Bearer ${apiKey}`, ...headers },
+        url: adapter.endpoint(model.baseUrl),
+        headers: { ...adapter.headers(apiKey), ...headers },
         body,
         signal: signal ?? ctx.signal,
         onUpdate,
         workingText: "Searching the web…",
+        sse: adapter.stream,
       });
 
       const { text, annotations } = parseResponse(json);

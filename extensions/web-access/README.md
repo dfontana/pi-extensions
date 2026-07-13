@@ -41,7 +41,7 @@ The minimum configuration is one section with `provider` and `model`:
 
 ### Configuration Details
 
-- `provider`/`model` — non-empty strings; must exist in pi's model registry (with a `baseUrl`). Known search providers: `openai`, `openrouter` (any other id gets the OpenAI request shape). Known fetch providers: `anthropic`, `openrouter` (any other id gets the Anthropic shape).
+- `provider`/`model` — non-empty strings; must exist in pi's model registry (with a `baseUrl`). Supported search providers: `openai`, `openrouter`, `openai-codex`. Supported fetch providers: `anthropic`, `openrouter`. Any other id is rejected at load time — an unsupported provider's endpoint doesn't implement these request shapes and would only fail at request time with an opaque error (e.g. a Cloudflare 403 from the ChatGPT backend).
 - Common params sit flat in the section and are honored by every provider. Search common params act as defaults for the agent's per-call arguments (`search_context_size`/`allowed_domains` in a tool call win).
 - `providerParams` is keyed by provider; only the **active** provider's block is applied, so you can keep several providers configured and switch `provider` freely — the wrong provider's params are never sent. Unknown provider keys are tolerated; unknown fields in known blocks are ignored.
 - `searchContextSize` must be one of `low|medium|high`; `maxUses`/`maxContentTokens` must be positive integers; domain lists must be string arrays.
@@ -57,6 +57,16 @@ The minimum configuration is one section with `provider` and `model`:
 ## Special Setup Instructions
 
 Credentials come from pi's model registry for the configured provider — no API keys in this config. Credentials are re-resolved on every call, so mid-session key changes are picked up.
+
+### Search via ChatGPT OAuth (`openai-codex`)
+
+`search.provider: "openai-codex"` serves `web_search` from the ChatGPT/Codex backend (`https://chatgpt.com/backend-api/codex/responses`) using a ChatGPT Plus/Pro OAuth login instead of a metered API key — usage counts against the plan's rate limits. Details:
+
+- The backend is SSE-only and demands codex-client identification; the adapter sends the required headers (`chatgpt-account-id` decoded from the OAuth token, `originator`, `OpenAI-Beta: responses=experimental`) and reassembles the response from the event stream (its `response.completed` event carries an empty `output`). The reference for this transport is pi-ai's `api/openai-codex-responses.js` — if OpenAI changes the contract, pi-ai tracks it.
+- `search_context_size` and `allowed_domains` are accepted by the backend.
+- The backend emits no `url_citation` annotations (with or without domain filters), so the tool's Sources list is empty; any citations appear inline in the answer text.
+- The model must exist upstream, which is a stricter check than pi's registry: registry ids can 404 on the backend (e.g. `gpt-5.6-luna` at the time of writing; `gpt-5.5`, `gpt-5.4`, `gpt-5.6-sol` work).
+- `fetch.provider: "openai-codex"` is rejected — the backend has no web-fetch capability. Use `anthropic` or `openrouter` for `web_fetch`, or omit the `fetch` section.
 
 ## Limitations and Technical details
 

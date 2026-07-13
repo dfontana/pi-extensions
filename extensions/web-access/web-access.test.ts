@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
 import { loadConfig } from "./config.ts";
-import { getAdapter, parseResponse } from "./providers.ts";
+import { extractChatGptAccountId, getAdapter, parseResponse, readSseResponse } from "./providers.ts";
+import { getFetchAdapter } from "./web-fetch.ts";
 
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 after(() => {
@@ -63,10 +64,85 @@ describe("web-access web-access", () => {
         assert.deepEqual(getAdapter(provider).buildBody(model, args, params), expected, provider);
       }
 
+      assert.throws(() => getAdapter("future-provider"), /unsupported web_search provider/);
+      assert.throws(() => getFetchAdapter("openai-codex"), /unsupported web_fetch provider/);
+    });
+
+    it("targets the openai-codex OAuth backend with its SSE-only request contract", () => {
+      const adapter = getAdapter("openai-codex");
+
       assert.deepEqual(
-        getAdapter("future-provider").buildBody("m", { query: "q", maxResults: 1 }, {}),
-        getAdapter("openai").buildBody("m", { query: "q", maxResults: 1 }, {}),
+        adapter.buildBody(
+          "gpt-5.5",
+          { query: "bitcoin price", maxResults: 5, searchContextSize: "high", allowedDomains: ["openai.com"] },
+          {},
+        ),
+        {
+          model: "gpt-5.5",
+          store: false,
+          stream: true,
+          instructions:
+            "You are a web search assistant. Use the web_search tool to answer the user's query, then give a concise answer citing your sources.",
+          input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "bitcoin price" }] }],
+          tools: [{ type: "web_search", search_context_size: "high", filters: { allowed_domains: ["openai.com"] } }],
+          tool_choice: "auto",
+        },
       );
+
+      // The codex path lives under /codex/responses, unlike plain providers.
+      assert.equal(adapter.stream, true);
+      assert.equal(
+        adapter.endpoint("https://chatgpt.com/backend-api"),
+        "https://chatgpt.com/backend-api/codex/responses",
+      );
+      assert.equal(getAdapter("openai").endpoint("https://api.openai.com/v1/"), "https://api.openai.com/v1/responses");
+
+      // The account id is routed from a claim inside the OAuth JWT itself.
+      const payload = Buffer.from(
+        JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-123" } }),
+      ).toString("base64url");
+      const token = `x.${payload}.y`;
+      const headers = adapter.headers(token);
+      assert.equal(headers["chatgpt-account-id"], "acct-123");
+      assert.equal(headers.Authorization, `Bearer ${token}`);
+      assert.equal(headers["OpenAI-Beta"], "responses=experimental");
+      assert.equal(headers.accept, "text/event-stream");
+
+      assert.throws(() => extractChatGptAccountId("sk-plain-api-key"), /not a ChatGPT OAuth token/);
+    });
+
+    it("reassembles the final response from an SSE stream whose completed event has empty output", async () => {
+      const message = {
+        type: "message",
+        content: [{ type: "output_text", text: "Bitcoin is up.", annotations: [{ url: "https://example.com" }] }],
+      };
+      const events = [
+        `data: {"type":"response.created"}\n\n`,
+        `data: {"type":"response.output_item.done","item":{"type":"web_search_call"}}\n\n`,
+        // Split one event across chunks to exercise buffering.
+        `data: {"type":"response.output_item.done","item":${JSON.stringify(message).slice(0, 40)}`,
+        `${JSON.stringify(message).slice(40)}}\n\n`,
+        `data: {"type":"response.completed","response":{"id":"resp_1","output":[]}}\n\n`,
+      ];
+      const body = (async function* () {
+        for (const e of events) yield new TextEncoder().encode(e);
+      })();
+
+      const response = await readSseResponse(body);
+      assert.deepEqual(parseResponse(response), {
+        text: "Bitcoin is up.",
+        annotations: [{ url: "https://example.com" }],
+      });
+
+      for (const [failure, pattern] of [
+        [`data: {"type":"response.failed","response":{"error":{"message":"quota"}}}\n\n`, /provider error: quota/],
+        [`data: {"type":"response.created"}\n\n`, /without response\.completed/],
+      ] as const) {
+        const stream = (async function* () {
+          yield new TextEncoder().encode(failure);
+        })();
+        await assert.rejects(readSseResponse(stream), pattern);
+      }
     });
 
     it("normalizes search responses and reports unusable provider responses", () => {
@@ -158,6 +234,8 @@ describe("web-access web-access", () => {
     it("rejects invalid or obsolete configuration with actionable errors", () => {
       const cases = [
         [{ search: { provider: "openai" } }, /search\.model/],
+        [{ search: { provider: "some-proxy", model: "m" } }, /search\.provider "some-proxy" is not supported.*openai-codex/],
+        [{ fetch: { provider: "openai-codex", model: "m" } }, /fetch\.provider "openai-codex" is not supported — the ChatGPT\/Codex OAuth backend has no web-fetch capability/],
         [{ search: { provider: "openai", model: "m", searchContextSize: "huge" } }, /searchContextSize/],
         [{ fetch: { provider: "openrouter", model: "m", providerParams: { openrouter: { engine: "auto" } } } }, /providerParams\.openrouter\.engine/],
         [{ provider: "openai", model: "gpt-5.5" }, /'provider' is no longer supported/],

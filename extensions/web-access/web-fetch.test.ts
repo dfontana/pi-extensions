@@ -72,7 +72,7 @@ describe("web-access web-fetch", () => {
       });
       assert.equal(anthropic.toToolSpec({ dynamicFiltering: true }).type, "web_fetch_20260209");
       assert.deepEqual(openrouter.toToolSpec({}), { type: "openrouter:web_fetch", parameters: { engine: "openrouter" } });
-      assert.equal(getFetchAdapter("future-provider"), anthropic);
+      assert.throws(() => getFetchAdapter("future-provider"), /unsupported web_fetch provider/);
     });
 
     it("builds requests that give each provider the URL and routes to its API", () => {

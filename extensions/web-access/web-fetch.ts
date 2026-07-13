@@ -349,16 +349,21 @@ const openrouterAdapter: WebFetchAdapter = {
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
+/** Providers `web_fetch` supports; anything else is rejected at config time. */
+export const FETCH_PROVIDERS = ["anthropic", "openrouter"] as const;
+
 const FETCH_ADAPTERS: Record<string, WebFetchAdapter> = {
   anthropic: anthropicAdapter,
   openrouter: openrouterAdapter,
 };
 
-/**
- * Resolve a web_fetch adapter. Unknown providers fall back to the Anthropic
- * shape — the spec a third-party provider would implement (mirrors web_search,
- * where unknown providers get the OpenAI shape).
- */
+/** Resolve a web_fetch adapter. Config validation rejects unknown providers up front. */
 export function getFetchAdapter(provider: string): WebFetchAdapter {
-  return FETCH_ADAPTERS[provider] ?? anthropicAdapter;
+  const adapter = FETCH_ADAPTERS[provider];
+  if (!adapter) {
+    throw new Error(
+      `unsupported web_fetch provider "${provider}" (supported: ${FETCH_PROVIDERS.join(", ")})`,
+    );
+  }
+  return adapter;
 }

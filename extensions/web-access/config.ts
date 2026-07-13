@@ -16,9 +16,10 @@
  * can keep params for several providers on hand and switch `provider` freely
  * without reconfiguring (and the wrong provider's params are never sent).
  *
- * Known providers — search: openai, openrouter (unknown providers get the
- * OpenAI request shape, the spec others implement); fetch: anthropic,
- * openrouter (unknown providers get the Anthropic shape).
+ * Supported providers — search: openai, openrouter, openai-codex; fetch:
+ * anthropic, openrouter. Anything else is rejected at load time (an
+ * unsupported provider's endpoint doesn't implement these request shapes and
+ * would only fail at request time, e.g. with an opaque 403).
  *
  * Config schema
  * ─────────────
@@ -55,7 +56,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { SEARCH_PROVIDERS } from "./providers.ts";
 import {
+  FETCH_PROVIDERS,
   isRecord,
   OPENROUTER_FETCH_ENGINES,
   type OpenRouterFetchEngine,
@@ -148,13 +151,27 @@ function mergeRaw(
 function validateProviderModel(
   raw: Record<string, unknown>,
   where: string,
+  supported: readonly string[],
 ): { ok: true; provider: string; model: string } | { ok: false; error: string } {
   for (const key of ["provider", "model"] as const) {
     if (typeof raw[key] !== "string" || (raw[key] as string).trim() === "") {
       return { ok: false, error: `config: ${where}.${key} must be a non-empty string` };
     }
   }
-  return { ok: true, provider: raw.provider as string, model: raw.model as string };
+  const provider = raw.provider as string;
+  if (!supported.includes(provider)) {
+    // A misconfigured provider used to slip through to a runtime 403 (e.g. the
+    // ChatGPT OAuth backend has no fetch endpoint at all) — fail at load instead.
+    const hint =
+      where === "fetch" && provider === "openai-codex"
+        ? " — the ChatGPT/Codex OAuth backend has no web-fetch capability"
+        : "";
+    return {
+      ok: false,
+      error: `config: ${where}.provider "${provider}" is not supported${hint} (supported: ${supported.join(", ")})`,
+    };
+  }
+  return { ok: true, provider, model: raw.model as string };
 }
 
 function validateProviderParams(
@@ -288,7 +305,7 @@ function validateConfig(raw: Record<string, unknown>): LoadResult {
   let search: SearchToolConfig | undefined;
   if (raw.search !== undefined) {
     if (!isRecord(raw.search)) return { ok: false, error: "config: 'search' must be an object" };
-    const pm = validateProviderModel(raw.search, "search");
+    const pm = validateProviderModel(raw.search, "search", SEARCH_PROVIDERS);
     if (!pm.ok) return pm;
     const common = validateSearchCommon(raw.search);
     if (!common.ok) return common;
@@ -308,7 +325,7 @@ function validateConfig(raw: Record<string, unknown>): LoadResult {
   let fetch: FetchToolConfig | undefined;
   if (raw.fetch !== undefined) {
     if (!isRecord(raw.fetch)) return { ok: false, error: "config: 'fetch' must be an object" };
-    const pm = validateProviderModel(raw.fetch, "fetch");
+    const pm = validateProviderModel(raw.fetch, "fetch", FETCH_PROVIDERS);
     if (!pm.ok) return pm;
     const core = validateFetchCore(raw.fetch);
     if (!core.ok) return core;
