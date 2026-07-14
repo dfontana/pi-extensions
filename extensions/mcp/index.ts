@@ -26,8 +26,10 @@ import { authComplete, authInteractive, authStart } from "./auth.ts";
 import { loadServers } from "./config.ts";
 import { Manager, type ServerState } from "./manager.ts";
 
-const manager = new Manager();
-let ui: ExtensionUIContext | undefined;
+interface Runtime {
+  manager: Manager;
+  ui?: ExtensionUIContext;
+}
 
 // ---- compact single-line rendering for the mcp tool -----------------------
 
@@ -135,17 +137,21 @@ function qualify(server: string, tool: string): string {
   return `${server}_${tool}`;
 }
 
-function updateFooter(): void {
-  if (!ui) return;
-  const total = manager.servers.size;
-  ui.setStatus("mcp", total ? ui.theme.fg("muted", `mcp ${manager.enabled.size}/${total}`) : undefined);
+function updateFooter(runtime: Runtime): void {
+  if (!runtime.ui) return;
+  const total = runtime.manager.servers.size;
+  runtime.ui.setStatus(
+    "mcp",
+    total ? runtime.ui.theme.fg("muted", `mcp ${runtime.manager.enabled.size}/${total}`) : undefined,
+  );
 }
 
 /** Resolve a tool reference (bare or `server_tool`) across enabled servers. */
 async function resolve(
+  runtime: Runtime,
   arg: string,
 ): Promise<{ server: string; tool: string } | "none" | { ambiguous: string[] }> {
-  const all = await manager.enabledMetadata();
+  const all = await runtime.manager.enabledMetadata();
   const matches = new Map<string, { server: string; tool: string }>();
   for (const [server, tools] of all) {
     for (const t of tools) {
@@ -162,7 +168,8 @@ async function resolve(
 
 // ---- proxy tool modes (return plain text) ----------------------------------
 
-function statusText(): string {
+function statusText(runtime: Runtime): string {
+  const { manager } = runtime;
   const names = manager.list();
   if (!names.length) {
     return "No MCP servers configured. Add them to ./.mcp.json or ~/.config/mcp/mcp.json.";
@@ -183,7 +190,8 @@ function statusText(): string {
   return `MCP servers (${manager.enabled.size}/${names.length} enabled):\n${rows.join("\n")}\n\n${hint}`;
 }
 
-async function listServerText(server: string): Promise<string> {
+async function listServerText(runtime: Runtime, server: string): Promise<string> {
+  const { manager } = runtime;
   const def = manager.servers.get(server);
   if (!def) return `Unknown server "${server}". Configured: ${manager.list().join(", ") || "none"}.`;
   if (!manager.enabled.has(server)) return `Server "${server}" is off — enable it from the /mcp panel.`;
@@ -195,8 +203,8 @@ async function listServerText(server: string): Promise<string> {
   );
 }
 
-async function searchText(query: string, regex?: boolean): Promise<string> {
-  const all = await manager.enabledMetadata();
+async function searchText(runtime: Runtime, query: string, regex?: boolean): Promise<string> {
+  const all = await runtime.manager.enabledMetadata();
   if (!all.size) return "No enabled servers to search. Enable servers from the /mcp panel.";
   let test: (s: string) => boolean;
   if (regex) {
@@ -232,8 +240,9 @@ async function searchText(query: string, regex?: boolean): Promise<string> {
   );
 }
 
-async function describeText(arg: string): Promise<string> {
-  const r = await resolve(arg);
+async function describeText(runtime: Runtime, arg: string): Promise<string> {
+  const { manager } = runtime;
+  const r = await resolve(runtime, arg);
   if (r === "none") return `Tool "${arg}" not found. Try mcp({search:'${arg}'}).`;
   if ("ambiguous" in r) return `"${arg}" is ambiguous: ${r.ambiguous.join(", ")}. Use a qualified name.`;
   const t = (await manager.metadata(r.server)).find((x) => x.name === r.tool)!;
@@ -248,12 +257,13 @@ async function describeText(arg: string): Promise<string> {
   ].join("\n");
 }
 
-async function connectText(server: string): Promise<string> {
+async function connectText(runtime: Runtime, server: string): Promise<string> {
+  const { manager } = runtime;
   const def = manager.servers.get(server);
   if (!def) return `Unknown server "${server}". Configured: ${manager.list().join(", ") || "none"}.`;
   manager.enabled.add(server); // enable the server (and connect) even if it was off
   const tools = await manager.connect(server);
-  updateFooter();
+  updateFooter(runtime);
   return `Connected "${server}" — ${tools.length} tools:\n` + tools.map((t) => `  ${qualify(server, t.name)}`).join("\n");
 }
 
@@ -268,15 +278,16 @@ interface ProxyArgs {
   action?: "auth-start" | "auth-complete";
 }
 
-async function callToolResult(p: ProxyArgs, signal?: AbortSignal) {
+async function callToolResult(runtime: Runtime, p: ProxyArgs, signal?: AbortSignal) {
+  const { manager } = runtime;
   const args = parseArgs(p.args);
-  const r = await resolve(p.tool!);
+  const r = await resolve(runtime, p.tool!);
   if (r === "none") {
     throw new Error(`Tool "${p.tool}" not found. Use mcp({search:'…'}) to discover tools, or enable its server from /mcp.`);
   }
   if ("ambiguous" in r) throw new Error(`Tool "${p.tool}" is ambiguous: ${r.ambiguous.join(", ")}.`);
   const out = await manager.callTool(r.server, r.tool, args, signal);
-  updateFooter();
+  updateFooter(runtime);
   if (out.isError) throw new Error(out.text);
   const t = truncateHead(out.text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
   const body = t.truncated
@@ -285,7 +296,8 @@ async function callToolResult(p: ProxyArgs, signal?: AbortSignal) {
   return { content: [{ type: "text" as const, text: body }], details: { server: r.server, tool: r.tool } };
 }
 
-async function actionResult(p: ProxyArgs) {
+async function actionResult(runtime: Runtime, p: ProxyArgs) {
+  const { manager } = runtime;
   const server = p.server;
   if (!server) throw new Error(`${p.action} requires "server".`);
   const def = manager.servers.get(server);
@@ -307,7 +319,7 @@ async function actionResult(p: ProxyArgs) {
   await authComplete(def, extra.redirectUrl);
   manager.enabled.add(server);
   await manager.connect(server).catch(() => {});
-  updateFooter();
+  updateFooter(runtime);
   return asText(`"${server}" authenticated ✓`);
 }
 
@@ -315,7 +327,8 @@ async function actionResult(p: ProxyArgs) {
 
 const HELP = "↑↓ move · space toggle · r reconnect · a auth · esc close";
 
-async function openPanel(ctx: ExtensionCommandContext): Promise<void> {
+async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promise<void> {
+  const { manager } = runtime;
   const names = manager.list();
   if (!names.length) {
     ctx.ui.notify("No MCP servers configured (./.mcp.json or ~/.config/mcp/mcp.json).", "warning");
@@ -373,7 +386,7 @@ async function openPanel(ctx: ExtensionCommandContext): Promise<void> {
         setTimeout(() => (busy.delete(name), tui.requestRender()), 4000);
       } finally {
         busy.delete(name);
-        updateFooter();
+        updateFooter(runtime);
         tui.requestRender();
       }
     };
@@ -389,7 +402,7 @@ async function openPanel(ctx: ExtensionCommandContext): Promise<void> {
         else if (matchesKey(data, "space") || matchesKey(data, "return")) {
           if (manager.enabled.has(name)) manager.enabled.delete(name);
           else manager.enabled.add(name);
-          updateFooter();
+          updateFooter(runtime);
         } else if (matchesKey(data, "r")) void reconnect(name);
         else if (matchesKey(data, "a")) return done({ auth: name });
         tui.requestRender();
@@ -397,10 +410,11 @@ async function openPanel(ctx: ExtensionCommandContext): Promise<void> {
     };
   });
 
-  if (result?.auth) await runAuth(ctx, result.auth);
+  if (result?.auth) await runAuth(runtime, ctx, result.auth);
 }
 
-async function runAuth(ctx: ExtensionCommandContext, name: string): Promise<void> {
+async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: string): Promise<void> {
+  const { manager } = runtime;
   const def = manager.servers.get(name);
   if (!def?.url) {
     ctx.ui.notify(`"${name}" is not an HTTP/OAuth server.`, "warning");
@@ -417,7 +431,7 @@ async function runAuth(ctx: ExtensionCommandContext, name: string): Promise<void
   if (ok) {
     manager.enabled.add(name);
     await manager.connect(name).catch(() => {});
-    updateFooter();
+    updateFooter(runtime);
     ctx.ui.notify(`"${name}" authenticated ✓`, "info");
   }
 }
@@ -425,6 +439,10 @@ async function runAuth(ctx: ExtensionCommandContext, name: string): Promise<void
 // ---- registration ----------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+  // Pi calls each extension factory for each bound AgentSession. Keep all
+  // mutable runtime state here so an in-process child cannot reset its parent.
+  const runtime: Runtime = { manager: new Manager() };
+
   pi.registerTool({
     name: "mcp",
     label: "MCP",
@@ -540,33 +558,34 @@ export default function (pi: ExtensionAPI) {
     },
 
     async execute(_id, p: ProxyArgs, signal, _onUpdate, ctx) {
-      ui = ctx.ui;
-      if (p.action) return actionResult(p);
-      if (p.tool) return callToolResult(p, signal ?? ctx.signal);
-      if (p.connect) return asText(await connectText(p.connect));
-      if (p.describe) return asText(await describeText(p.describe));
-      if (p.search) return asText(await searchText(p.search, p.regex));
-      if (p.server) return asText(await listServerText(p.server));
-      return asText(statusText());
+      runtime.ui = ctx.ui;
+      if (p.action) return actionResult(runtime, p);
+      if (p.tool) return callToolResult(runtime, p, signal ?? ctx.signal);
+      if (p.connect) return asText(await connectText(runtime, p.connect));
+      if (p.describe) return asText(await describeText(runtime, p.describe));
+      if (p.search) return asText(await searchText(runtime, p.search, p.regex));
+      if (p.server) return asText(await listServerText(runtime, p.server));
+      return asText(statusText(runtime));
     },
   });
 
   pi.registerCommand("mcp", {
     description: "Open the MCP server panel (enable/disable · reconnect · authenticate)",
     handler: async (_argStr, ctx) => {
-      ui = ctx.ui;
-      await openPanel(ctx);
+      runtime.ui = ctx.ui;
+      await openPanel(runtime, ctx);
     },
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    ui = ctx.ui;
-    manager.load(loadServers(ctx.cwd));
-    manager.enabled = new Set(); // servers default off — curate per session via /mcp
-    updateFooter();
+    runtime.ui = ctx.ui;
+    await runtime.manager.initialize(loadServers(ctx.cwd));
+    updateFooter(runtime);
   });
 
   pi.on("session_shutdown", async () => {
-    await manager.shutdown();
+    runtime.ui?.setStatus("mcp", undefined);
+    runtime.ui = undefined;
+    await runtime.manager.shutdown();
   });
 }

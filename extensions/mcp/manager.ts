@@ -59,20 +59,51 @@ interface Conn {
   idle?: NodeJS.Timeout;
 }
 
+// OAuth credentials are deliberately shared across session-local managers. Keep
+// only the credential-sensitive connection establishment serialized, keyed by
+// the server URL; stdio and bearer-token servers remain fully parallel.
+const oauthConnectLocks = new Map<string, Promise<void>>();
+
+async function withOAuthConnectLock<T>(url: string, work: () => Promise<T>): Promise<T> {
+  const previous = oauthConnectLocks.get(url) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  oauthConnectLocks.set(url, tail);
+
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (oauthConnectLocks.get(url) === tail) oauthConnectLocks.delete(url);
+  }
+}
+
 export class Manager {
   servers = new Map<string, ServerDef>();
   enabled = new Set<string>();
 
   private conns = new Map<string, Conn>();
+  private connecting = new Map<string, Promise<ToolMeta[]>>();
   private meta = new Map<string, ToolMeta[]>();
   private fails = new Map<string, Failure>();
   private cacheFile?: Cache;
 
-  load(servers: Map<string, ServerDef>): void {
+  /** Reset this session-local manager for a new extension session. */
+  async initialize(servers: Map<string, ServerDef>): Promise<void> {
+    // Let an existing establishment finish before closing it, so it cannot add
+    // a stale connection after this reset has completed.
+    await Promise.allSettled([...this.connecting.values()]);
+    await this.shutdown();
     this.servers = servers;
+    this.enabled.clear();
     this.meta.clear();
     this.fails.clear();
     this.cacheFile = undefined; // re-read cache.json next access (another session may have written it)
+    this.connecting.clear();
   }
 
   list(): string[] {
@@ -125,42 +156,58 @@ export class Manager {
   }
 
   async connect(name: string): Promise<ToolMeta[]> {
+    const inFlight = this.connecting.get(name);
+    if (inFlight) return inFlight;
+
+    const attempt = this.connectNow(name).finally(() => this.connecting.delete(name));
+    this.connecting.set(name, attempt);
+    return attempt;
+  }
+
+  private async connectNow(name: string): Promise<ToolMeta[]> {
     const def = this.servers.get(name);
     if (!def) throw new Error(`unknown server "${name}"`);
     const kind = transportKind(def);
     if (kind === "invalid") throw new Error(`server "${name}" has neither "command" nor "url"`);
 
-    await this.disconnect(name);
-    const client = new Client({ name: "pi-mcp", version: "1.0.0" });
-    const transport = this.transport(def, kind);
-    // Drop a dead connection so `connected` stays truthful and the next call reconnects.
-    transport.onclose = () => void this.disconnect(name);
-    try {
-      await client.connect(transport);
-    } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        const message = needsAuthMessage(name);
-        this.fails.set(name, { kind: "needs-auth", message, at: Date.now() });
+    const establish = async (): Promise<ToolMeta[]> => {
+      await this.disconnect(name);
+      const client = new Client({ name: "pi-mcp", version: "1.0.0" });
+      const transport = this.transport(def, kind);
+      const conn: Conn = { client };
+      // A delayed close from an old transport must not disconnect a newer one.
+      transport.onclose = () => {
+        if (this.conns.get(name) === conn) void this.disconnect(name, conn);
+      };
+      try {
+        await client.connect(transport);
+        const { tools } = await client.listTools();
+        const meta = tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
+        this.fails.delete(name);
+        this.meta.set(name, meta);
+        this.saveCache(def, meta);
+        this.conns.set(name, conn);
+        this.touch(name);
+        return meta;
+      } catch (e) {
+        await client.close().catch(() => {});
+        if (e instanceof UnauthorizedError) {
+          const message = needsAuthMessage(name);
+          this.fails.set(name, { kind: "needs-auth", message, at: Date.now() });
+          throw new Error(message);
+        }
+        const message = `"${name}" failed to connect: ${e instanceof Error ? e.message : String(e)}`;
+        this.fails.set(name, { kind: "error", message, at: Date.now() });
         throw new Error(message);
       }
-      const message = `"${name}" failed to connect: ${e instanceof Error ? e.message : String(e)}`;
-      this.fails.set(name, { kind: "error", message, at: Date.now() });
-      throw new Error(message);
-    }
+    };
 
-    this.fails.delete(name);
-    const { tools } = await client.listTools();
-    const meta = tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
-    this.meta.set(name, meta);
-    this.saveCache(def, meta);
-    this.conns.set(name, { client });
-    this.touch(name);
-    return meta;
+    return kind === "http" && def.auth === "oauth" ? withOAuthConnectLock(def.url!, establish) : establish();
   }
 
-  async disconnect(name: string): Promise<void> {
+  async disconnect(name: string, expected?: Conn): Promise<void> {
     const conn = this.conns.get(name);
-    if (!conn) return;
+    if (!conn || (expected && conn !== expected)) return;
     if (conn.idle) clearTimeout(conn.idle);
     this.conns.delete(name);
     await conn.client.close().catch(() => {});

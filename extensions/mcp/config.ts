@@ -10,7 +10,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -42,6 +42,7 @@ export interface ServerDef {
 const HOME = homedir();
 // Honors the PI_AGENT_DIR override (same resolution the sibling extensions use).
 export const STATE_DIR = join(getAgentDir(), "mcp");
+let stateWriteSequence = 0;
 
 // ---- env / path interpolation ----------------------------------------------
 
@@ -132,5 +133,8 @@ export function readState<T>(file: string, fallback: T): T {
 
 export function writeState(file: string, data: unknown): void {
   mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(join(STATE_DIR, file), JSON.stringify(data, null, 2));
+  const path = join(STATE_DIR, file);
+  const temporary = join(STATE_DIR, `.${file}.${process.pid}.${Date.now()}.${stateWriteSequence++}.tmp`);
+  writeFileSync(temporary, JSON.stringify(data, null, 2));
+  renameSync(temporary, path);
 }
