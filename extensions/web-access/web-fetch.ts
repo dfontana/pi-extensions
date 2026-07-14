@@ -349,21 +349,12 @@ const openrouterAdapter: WebFetchAdapter = {
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
-/** Providers `web_fetch` supports; anything else is rejected at config time. */
-export const FETCH_PROVIDERS = ["anthropic", "openrouter"] as const;
-
 const FETCH_ADAPTERS: Record<string, WebFetchAdapter> = {
   anthropic: anthropicAdapter,
   openrouter: openrouterAdapter,
 };
 
-/** Resolve a web_fetch adapter. Config validation rejects unknown providers up front. */
+/** Resolve a named adapter, or use the generic Anthropic adapter for custom gateways. */
 export function getFetchAdapter(provider: string): WebFetchAdapter {
-  const adapter = FETCH_ADAPTERS[provider];
-  if (!adapter) {
-    throw new Error(
-      `unsupported web_fetch provider "${provider}" (supported: ${FETCH_PROVIDERS.join(", ")})`,
-    );
-  }
-  return adapter;
+  return FETCH_ADAPTERS[provider] ?? anthropicAdapter;
 }

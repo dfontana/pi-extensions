@@ -19,8 +19,9 @@
  * Search supports custom OpenAI-compatible provider IDs registered in pi:
  * unknown IDs use the ordinary OpenAI Responses request shape. The named
  * `openrouter` and `openai-codex` IDs select their respective special adapters.
- * Fetch is limited to anthropic and openrouter because its request shapes are
- * provider-specific.
+ * Fetch supports custom Anthropic-compatible provider IDs registered in pi:
+ * unknown IDs use the ordinary Anthropic Messages request shape. `openrouter`
+ * selects its specialized adapter.
  *
  * Config schema
  * ─────────────
@@ -58,7 +59,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
-  FETCH_PROVIDERS,
   isRecord,
   OPENROUTER_FETCH_ENGINES,
   type OpenRouterFetchEngine,
@@ -325,8 +325,14 @@ function validateConfig(raw: Record<string, unknown>): LoadResult {
   let fetch: FetchToolConfig | undefined;
   if (raw.fetch !== undefined) {
     if (!isRecord(raw.fetch)) return { ok: false, error: "config: 'fetch' must be an object" };
-    const pm = validateProviderModel(raw.fetch, "fetch", FETCH_PROVIDERS);
+    const pm = validateProviderModel(raw.fetch, "fetch");
     if (!pm.ok) return pm;
+    if (pm.provider === "openai-codex") {
+      return {
+        ok: false,
+        error: "config: fetch.provider \"openai-codex\" is not supported — the ChatGPT/Codex OAuth backend has no web-fetch capability",
+      };
+    }
     const core = validateFetchCore(raw.fetch);
     if (!core.ok) return core;
     const keyed = validateProviderParams(raw.fetch.providerParams, "fetch.providerParams");

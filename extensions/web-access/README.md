@@ -41,7 +41,7 @@ The minimum configuration is one section with `provider` and `model`:
 
 ### Configuration Details
 
-- `provider`/`model` — non-empty strings; must exist in pi's model registry (with a `baseUrl`). Search accepts custom OpenAI-compatible provider IDs and uses the standard Responses request shape for them; `openrouter` and `openai-codex` use their specialized adapters. Fetch supports only `anthropic` and `openrouter`, whose distinct request shapes are implemented by the extension.
+- `provider`/`model` — non-empty strings; must exist in pi's model registry (with a `baseUrl`). Search accepts custom OpenAI-compatible provider IDs and uses the standard Responses request shape for them; `openrouter` and `openai-codex` use specialized adapters. Fetch accepts custom Anthropic-compatible provider IDs and uses the standard Messages request shape for them; `openrouter` uses its specialized adapter. `openai-codex` is not supported for fetch because its backend has no web-fetch capability.
 - Common params sit flat in the section and are honored by every provider. Search common params act as defaults for the agent's per-call arguments (`search_context_size`/`allowed_domains` in a tool call win).
 - `providerParams` is keyed by provider; only the **active** provider's block is applied, so you can keep several providers configured and switch `provider` freely — the wrong provider's params are never sent. Unknown provider keys are tolerated; unknown fields in known blocks are ignored.
 - `searchContextSize` must be one of `low|medium|high`; `maxUses`/`maxContentTokens` must be positive integers; domain lists must be string arrays.

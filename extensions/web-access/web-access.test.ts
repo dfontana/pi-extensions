@@ -6,7 +6,6 @@ import { after, describe, it } from "node:test";
 
 import { loadConfig } from "./config.ts";
 import { extractChatGptAccountId, getAdapter, parseResponse, readSseResponse } from "./providers.ts";
-import { getFetchAdapter } from "./web-fetch.ts";
 
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 after(() => {
@@ -68,7 +67,6 @@ describe("web-access web-access", () => {
         getAdapter("acme-gateway").buildBody("m", { query: "q", maxResults: 1 }, {}),
         getAdapter("openai").buildBody("m", { query: "q", maxResults: 1 }, {}),
       );
-      assert.throws(() => getFetchAdapter("openai-codex"), /unsupported web_fetch provider/);
     });
 
     it("targets the openai-codex OAuth backend with its SSE-only request contract", () => {
@@ -225,6 +223,14 @@ describe("web-access web-access", () => {
           expected: {
             search: { provider: "openrouter", model: "openai/gpt-5.5", params: {}, providerParams: { engine: "exa" } },
             fetch: undefined,
+          },
+        },
+        {
+          name: "custom Anthropic-compatible fetch gateway",
+          raw: { fetch: { provider: "acme-anthropic", model: "acme-claude" } },
+          expected: {
+            search: undefined,
+            fetch: { provider: "acme-anthropic", model: "acme-claude", params: { maxUses: 5, maxContentTokens: 100_000 } },
           },
         },
         {
