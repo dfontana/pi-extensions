@@ -155,7 +155,7 @@ const anthropicAdapter: WebFetchAdapter = {
 
   endpoint(baseUrl) {
     const base = baseUrl.replace(/\/$/, "");
-    // baseUrl may or may not include /v1 (e.g. Datadog's AI gateway omits it for
+    // baseUrl may or may not include /v1 (some gateways omit it for
     // Anthropic-shaped providers; a standard Anthropic setup may include it).
     // Always produce /v1/messages, but don't double-add the prefix.
     return base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;

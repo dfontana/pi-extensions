@@ -16,10 +16,11 @@
  * can keep params for several providers on hand and switch `provider` freely
  * without reconfiguring (and the wrong provider's params are never sent).
  *
- * Supported providers — search: openai, openrouter, openai-codex; fetch:
- * anthropic, openrouter. Anything else is rejected at load time (an
- * unsupported provider's endpoint doesn't implement these request shapes and
- * would only fail at request time, e.g. with an opaque 403).
+ * Search supports custom OpenAI-compatible provider IDs registered in pi:
+ * unknown IDs use the ordinary OpenAI Responses request shape. The named
+ * `openrouter` and `openai-codex` IDs select their respective special adapters.
+ * Fetch is limited to anthropic and openrouter because its request shapes are
+ * provider-specific.
  *
  * Config schema
  * ─────────────
@@ -56,7 +57,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { SEARCH_PROVIDERS } from "./providers.ts";
 import {
   FETCH_PROVIDERS,
   isRecord,
@@ -151,7 +151,7 @@ function mergeRaw(
 function validateProviderModel(
   raw: Record<string, unknown>,
   where: string,
-  supported: readonly string[],
+  supported?: readonly string[],
 ): { ok: true; provider: string; model: string } | { ok: false; error: string } {
   for (const key of ["provider", "model"] as const) {
     if (typeof raw[key] !== "string" || (raw[key] as string).trim() === "") {
@@ -159,7 +159,7 @@ function validateProviderModel(
     }
   }
   const provider = raw.provider as string;
-  if (!supported.includes(provider)) {
+  if (supported && !supported.includes(provider)) {
     // A misconfigured provider used to slip through to a runtime 403 (e.g. the
     // ChatGPT OAuth backend has no fetch endpoint at all) — fail at load instead.
     const hint =
@@ -305,7 +305,7 @@ function validateConfig(raw: Record<string, unknown>): LoadResult {
   let search: SearchToolConfig | undefined;
   if (raw.search !== undefined) {
     if (!isRecord(raw.search)) return { ok: false, error: "config: 'search' must be an object" };
-    const pm = validateProviderModel(raw.search, "search", SEARCH_PROVIDERS);
+    const pm = validateProviderModel(raw.search, "search");
     if (!pm.ok) return pm;
     const common = validateSearchCommon(raw.search);
     if (!common.ok) return common;

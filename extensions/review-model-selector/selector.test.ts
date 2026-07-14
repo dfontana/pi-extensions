@@ -28,12 +28,12 @@ describe("review-model-selector selector", () => {
     } as Model<Api>;
   }
 
-  const sol = model("ai-gw-openai", "openai/gpt-5.6-sol");
-  const terra = model("ai-gw-openai", "openai/gpt-5.6-terra");
-  const luna = model("ai-gw-openai", "openai/gpt-5.6-luna");
-  const opus200k = model("ai-gw-anthropic-200k", "anthropic/claude-opus-4-8", { contextWindow: 200_000 });
-  const opus1m = model("ai-gw-anthropic-1m", "anthropic/claude-opus-4-8", { contextWindow: 1_000_000 });
-  const sonnet = model("ai-gw-anthropic-1m", "anthropic/claude-sonnet-4-6", { contextWindow: 1_000_000 });
+  const sol = model("acme-gateway-openai", "openai/gpt-5.6-sol");
+  const terra = model("acme-gateway-openai", "openai/gpt-5.6-terra");
+  const luna = model("acme-gateway-openai", "openai/gpt-5.6-luna");
+  const opus200k = model("acme-gateway-anthropic-200k", "anthropic/claude-opus-4-8", { contextWindow: 200_000 });
+  const opus1m = model("acme-gateway-anthropic-1m", "anthropic/claude-opus-4-8", { contextWindow: 1_000_000 });
+  const sonnet = model("acme-gateway-anthropic-1m", "anthropic/claude-sonnet-4-6", { contextWindow: 1_000_000 });
 
   function select(
     current: Model<Api>,
@@ -68,8 +68,8 @@ describe("review-model-selector selector", () => {
   });
 
   test("uses stable tie-breakers without sacrificing reviewer diversity", () => {
-    const newer = model("ai-gw-anthropic-1m", "anthropic/claude-opus-4-7", { contextWindow: 1_000_000 });
-    const dated = model("ai-gw-anthropic-1m", "anthropic/claude-opus-4-20250514", { contextWindow: 1_000_000 });
+    const newer = model("acme-gateway-anthropic-1m", "anthropic/claude-opus-4-7", { contextWindow: 1_000_000 });
+    const dated = model("acme-gateway-anthropic-1m", "anthropic/claude-opus-4-20250514", { contextWindow: 1_000_000 });
     const versionResult = select(sol, [sol, dated, newer, opus1m]);
     assert.equal(canonicalModel(versionResult.selected), canonicalModel(opus1m));
 

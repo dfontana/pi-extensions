@@ -39,7 +39,7 @@ Do not implement the plan in the coordinating session.
 
 ## 2. Resolve and delegate the implementation model
 
-The default implementation model is `ai-gw-anthropic-1m/anthropic/claude-sonnet-4-6` (a 1M-context Claude Sonnet route). Use this exact route unless the user supplies an `implementation_model` override. If the default route is not available in the session's model registry, stop and ask the user which model to use rather than silently substituting another. `implementation_minimum_context_window` (default `1000000`) is the minimum context window required; confirm the resolved route meets it before proceeding.
+The default implementation model is `anthropic/claude-sonnet-4-6` (a 1M-context Claude Sonnet route). Use this exact route unless the user supplies an `implementation_model` override. If the default route is not available in the session's model registry, stop and ask the user which model to use rather than silently substituting another. `implementation_minimum_context_window` (default `1000000`) is the minimum context window required; confirm the resolved route meets it before proceeding.
 
 Launch one persistent general-purpose implementing agent with the exact selected model and `run_in_background=true`. Its prompt must contain:
 

@@ -20,9 +20,6 @@
 
 import os from "node:os";
 
-/** Providers `web_search` supports; anything else is rejected at config time. */
-export const SEARCH_PROVIDERS = ["openai", "openrouter", "openai-codex"] as const;
-
 export interface SearchArgs {
   query: string;
   /** Agent-requested result cap (1–10). Only some providers expose a knob for this. */
@@ -167,15 +164,9 @@ const ADAPTERS: Record<string, ProviderAdapter> = {
   "openai-codex": openaiCodexAdapter,
 };
 
-/** Resolve an adapter. Config validation rejects unknown providers up front. */
+/** Resolve a named adapter, or use the generic OpenAI adapter for custom gateways. */
 export function getAdapter(provider: string): ProviderAdapter {
-  const adapter = ADAPTERS[provider];
-  if (!adapter) {
-    throw new Error(
-      `unsupported web_search provider "${provider}" (supported: ${SEARCH_PROVIDERS.join(", ")})`,
-    );
-  }
-  return adapter;
+  return ADAPTERS[provider] ?? openaiAdapter;
 }
 
 // ── SSE transport ────────────────────────────────────────────────────────────

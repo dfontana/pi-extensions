@@ -64,7 +64,10 @@ describe("web-access web-access", () => {
         assert.deepEqual(getAdapter(provider).buildBody(model, args, params), expected, provider);
       }
 
-      assert.throws(() => getAdapter("future-provider"), /unsupported web_search provider/);
+      assert.deepEqual(
+        getAdapter("acme-gateway").buildBody("m", { query: "q", maxResults: 1 }, {}),
+        getAdapter("openai").buildBody("m", { query: "q", maxResults: 1 }, {}),
+      );
       assert.throws(() => getFetchAdapter("openai-codex"), /unsupported web_fetch provider/);
     });
 
@@ -209,6 +212,14 @@ describe("web-access web-access", () => {
     it("enables either tool independently and supplies fetch defaults", () => {
       const cases = [
         {
+          name: "custom OpenAI-compatible search gateway",
+          raw: { search: { provider: "acme-gateway", model: "gpt-5.5", providerParams: { "acme-gateway": { user: "pi" } } } },
+          expected: {
+            search: { provider: "acme-gateway", model: "gpt-5.5", params: {}, providerParams: { user: "pi" } },
+            fetch: undefined,
+          },
+        },
+        {
           name: "search only",
           raw: { search: { provider: "openrouter", model: "openai/gpt-5.5", providerParams: { openai: { ignored: true }, openrouter: { engine: "exa" } } } },
           expected: {
@@ -234,7 +245,6 @@ describe("web-access web-access", () => {
     it("rejects invalid or obsolete configuration with actionable errors", () => {
       const cases = [
         [{ search: { provider: "openai" } }, /search\.model/],
-        [{ search: { provider: "some-proxy", model: "m" } }, /search\.provider "some-proxy" is not supported.*openai-codex/],
         [{ fetch: { provider: "openai-codex", model: "m" } }, /fetch\.provider "openai-codex" is not supported — the ChatGPT\/Codex OAuth backend has no web-fetch capability/],
         [{ search: { provider: "openai", model: "m", searchContextSize: "huge" } }, /searchContextSize/],
         [{ fetch: { provider: "openrouter", model: "m", providerParams: { openrouter: { engine: "auto" } } } }, /providerParams\.openrouter\.engine/],
