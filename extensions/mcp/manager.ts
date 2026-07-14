@@ -37,6 +37,23 @@ type Failure = { kind: "needs-auth" | "error"; message: string; at: number };
 
 const needsAuthMessage = (name: string) => `"${name}" needs authentication — authenticate it from the /mcp panel`;
 
+/**
+ * Preserve the caller's environment for trusted, locally configured MCPs.
+ *
+ * The MCP SDK otherwise replaces it with a small safe-variable allowlist,
+ * which breaks local tools that rely on an SSH agent, GPG, or a credential
+ * store. Keep its protection against shell-function environment values, then
+ * let an explicit server configuration take precedence.
+ */
+export function stdioEnvironment(overrides?: Record<string, string>): Record<string, string> {
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined && !entry[1].startsWith("()"),
+    ),
+  );
+  return { ...inherited, ...overrides };
+}
+
 interface Conn {
   client: Client;
   idle?: NodeJS.Timeout;
@@ -92,12 +109,11 @@ export class Manager {
 
   private transport(def: ServerDef, kind: "stdio" | "http") {
     if (kind === "stdio") {
-      // StdioClientTransport already merges getDefaultEnvironment() under def.env.
       return new StdioClientTransport({
         command: def.command!,
         args: def.args,
         cwd: def.cwd,
-        env: def.env,
+        env: stdioEnvironment(def.env),
         stderr: "ignore",
       });
     }

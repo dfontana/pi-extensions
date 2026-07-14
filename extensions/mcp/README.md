@@ -44,6 +44,7 @@ The minimum configuration is one server with either `command` (stdio) or `url` (
 - `command`/`args`/`env`/`cwd` — launch a local stdio server. A server with neither `command` nor `url` is invalid.
 - `url` — StreamableHTTP endpoint (SSE fallback handled by the SDK).
 - Env expansion recognizes `${VAR}` and `$env:VAR` (unknown vars become `""`); bare `$VAR` is left alone so literal `$` in tokens survives.
+- A local stdio server inherits Pi's environment, except values beginning with `()` (exported shell functions, which are excluded as a security precaution). Its configured `env` values overlay inherited values.
 - `auth` — explicit value wins; otherwise inferred: `bearer` if a token is set, else `oauth` for any `url`, else `none`.
 - `bearerTokenEnv` overrides `bearerToken` when both are set.
 - `oauth.grantType: "client_credentials"` with `clientId`/`clientSecret` enables browserless machine auth.
