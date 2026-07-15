@@ -7,25 +7,29 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import mcpExtension from "./index.ts";
 
 interface Binding {
-  tool: { execute: (...args: any[]) => Promise<{ content: Array<{ text: string }> }> };
+  tool: {
+    promptSnippet?: string;
+    execute: (...args: any[]) => Promise<{ content: Array<{ text: string }> }>;
+  };
   events: Map<string, (...args: any[]) => Promise<void>>;
 }
 
 function bind(): Binding {
-  let tool: Binding["tool"] | undefined;
-  const events = new Map<string, (...args: any[]) => Promise<void>>();
+  const binding: Partial<Binding> = {
+    events: new Map<string, (...args: any[]) => Promise<void>>(),
+  };
   const api = {
     registerTool(value: Binding["tool"]) {
-      tool = value;
+      binding.tool = value;
     },
     registerCommand() {},
     on(event: string, handler: (...args: any[]) => Promise<void>) {
-      events.set(event, handler);
+      binding.events!.set(event, handler);
     },
   } as unknown as ExtensionAPI;
   mcpExtension(api);
-  assert.ok(tool, "the extension registers its MCP tool");
-  return { tool, events };
+  assert.ok(binding.tool, "the extension registers its MCP tool");
+  return binding as Binding;
 }
 
 const ui = {
@@ -38,6 +42,22 @@ function context(cwd: string) {
 }
 
 describe("mcp index", () => {
+  it("seeds the tool prompt with configured server names", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "mcp-prompt-"));
+    const server = "prompt server (raw)";
+    writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { [server]: {} } }));
+
+    const binding = bind();
+    const sessionStart = binding.events.get("session_start");
+    assert.ok(sessionStart);
+
+    await sessionStart({}, context(cwd));
+
+    const promptSnippet = binding.tool.promptSnippet ?? "";
+    assert.match(promptSnippet, /Configured MCP servers:/);
+    assert.ok(promptSnippet.includes(server));
+  });
+
   it("keeps enabled servers isolated between extension factory bindings", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "mcp-session-"));
     const server = "session-isolation-test";
