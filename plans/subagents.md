@@ -1,30 +1,31 @@
 # Durable Process-Based Subagents
 
-Status: exploration specification
+Status: exploration specification (simplified)
 
 ## 1. Summary
 
-Build a small Pi extension that combines the process boundary of [`elpapi42/pi-fork`](https://github.com/elpapi42/pi-fork) with the delegation UX and orchestration concepts of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents).
+Build a small Pi extension that combines the process boundary of [`elpapi42/pi-fork`](https://github.com/elpapi42/pi-fork) with the delegation UX of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents).
 
-This is a synthesis, not a direct merge: use pi-fork as the mechanical ancestor, tintinweb as the UX/configuration donor, and add a durable RPC ownership layer that neither project currently has.
+This is a synthesis, not a direct merge: use pi-fork as the mechanical ancestor, tintinweb as the UX/configuration donor, and add a durable RPC ownership layer that neither project currently has. The guiding constraint is **dumb-simple reliability**: fewer subsystems, fewer states, and maximum reuse of what Pi already exports.
 
 Each subagent runs as a separate `pi --mode rpc` process with a normal persisted Pi session. The child process is owned by the parent Pi process and may be stopped when the parent closes. Durability means that accepted messages, tool results, usage, and session metadata are stored on disk and can be inspected or resumed after interruption; it does **not** mean that children must survive the parent process.
 
-The extension keeps the familiar tools:
+The extension keeps a small tool surface:
 
 - `Agent` — start a foreground or background subagent
 - `get_subagent_result` — fetch status or the final result by agent ID
 - `resume_subagent` — continue a persisted subagent session
-- `steer_subagent` — redirect a currently running child
 - `stop_subagent` — abort a running child
 
 The TUI remains compact:
 
 - one-line inline tool cards
 - an above-editor widget for active agents
-- a footer status containing active/queued counts
+- a footer status containing the active count
 - a selectable agent list
-- no embedded conversation viewer; completed sessions open in a real Pi process in a kitty, Zellij, or tmux split
+- an **embedded read-only session viewer** built from Pi's own exported message components, so a subagent transcript reads exactly like a normal Pi session (minus editor, footer, and slash commands)
+
+There is no terminal-split subsystem. Pi exports the exact components its interactive mode uses to render sessions (`AssistantMessageComponent`, `UserMessageComponent`, `ToolExecutionComponent`, and the rest), plus `SessionManager`/`parseSessionEntries` for loading a child JSONL and `ctx.ui.custom()` for showing a focused full-screen component. Because the viewer is read-only, it works on **running** agents too — no ownership handoff, no multiplexer adapters, no takeover state machine. For users who want to drive a child session interactively, the extension stops the child and prints a copyable `pi --session <file>` command.
 
 ## 2. Goals
 
@@ -32,11 +33,10 @@ The TUI remains compact:
 2. Make agent IDs, session IDs, session files, status, and result-consumption state recoverable when the parent session is resumed.
 3. Resume interrupted work by starting a new Pi process against the existing child session.
 4. Obtain cumulative token and monetary cost from Pi's session statistics rather than maintaining a parallel approximation.
-5. Preserve thinking-level, tool, MCP, and custom-agent selection while choosing models dynamically by intelligence tier.
-6. Support an exact model override for users or callers that require a specific provider/model.
-7. Show enough live state to understand what agents are doing without a large permanent UI.
-8. Prevent subagents from recursively spawning more subagents.
-9. Avoid turn limits; rely on cancellation, idle detection, context handling, and explicit resume instead.
+5. Preserve thinking-level, tool, MCP, and custom-agent selection, with exact model references resolved through Pi's own model resolver.
+6. Show enough live state to understand what agents are doing without a large permanent UI, including an on-demand transcript view of any agent — running or finished.
+7. Prevent subagents from recursively spawning more subagents.
+8. Avoid turn limits; rely on cancellation, context handling, and explicit resume instead.
 
 ## 3. Non-goals
 
@@ -49,12 +49,15 @@ The first version will not provide:
 - scheduling
 - persistent agent memory beyond the Pi session itself
 - cross-extension spawning RPC
-- grouped completion batching
+- a background queue or grouped completion batching (over-cap starts fail with a clear error instead)
+- a `steer_subagent` tool (stop + resume covers redirection; Pi's RPC `steer` command makes this easy to add later)
+- intelligence-tier inference from model family tables (a user-edited alias map covers the convenience case)
+- terminal-split viewers or multiplexer adapters (Zellij/tmux/kitty)
+- a reimplementation of Pi's transcript rendering (the embedded viewer reuses Pi's exported components verbatim)
 - automatic worktree creation or merging
-- an embedded clone of Pi's conversation TUI
 - automatic retries that can mutate the repository without parent approval
 
-Worktree isolation may be added later, but mutating agents initially share the parent's working directory and are subject to the concurrency policy in section 13.
+Worktree isolation may be added later, but mutating agents initially share the parent's working directory and are subject to the mutating lock in section 13.
 
 ## 4. Combining pi-fork and tintinweb/pi-subagents
 
@@ -66,11 +69,11 @@ The two projects are complementary, but their implementations cannot simply be m
 | Initial context | Exact header + active branch snapshot | Fresh, system-prompt append, or conversation-as-text | Per-agent policy; exact snapshot only when inheritance is requested |
 | Child session | Temporary JSONL, deleted after run | In-memory by default; optionally persisted | Normal Pi session, always persisted |
 | Public agent record | None | In-memory manager record | Persisted transition record in parent session |
-| Background queue | None | Manager, queue, grouping | Adapt manager/queue concepts to RPC records |
-| Resume/steer | None | Live object only | New process against saved session; RPC steer/abort |
+| Background handling | None | Manager, queue, grouping | Simple caps; over-cap starts fail with a clear error |
+| Resume/steer | None | Live object only | New process against saved session; RPC stop/resume |
 | Process isolation | Strong | Shared extension process | Strong; explicit child extensions/tools |
-| UX | Strong foreground card and cost status | Widget, footer, FleetView, transcript overlay, menus | Compact cards/widget/footer/list; external Pi split for transcript |
-| Cost | Live provider usage and nested-fork aggregation | Lifetime token accumulator | Child `get_session_stats`, cumulative and per-run delta |
+| Transcript view | None | Custom transcript overlay | Read-only viewer built from Pi's exported session components |
+| Cost | Live provider usage and nested-fork aggregation | Lifetime token accumulator | Child `get_session_stats` at settlement |
 | Worktrees/schedules/memory | None | Implemented | Deferred |
 
 ### What can be adapted
@@ -84,23 +87,27 @@ From pi-fork:
 From tintinweb:
 
 - agent discovery/frontmatter precedence and built-in agent definitions
-- tool/extension exclusion policy, manager/queue semantics, completion-notification deduplication, and settings merging
+- tool/extension exclusion policy, completion-notification deduplication, and settings merging
 - inline renderer, bounded widget, footer status, selectable fleet/list, and command/menu scaffolding
 
-These are donors rather than drop-in modules. pi-fork's parser targets JSON print mode and deletes its session; tintinweb's UI and manager directly retain `AgentSession` objects. Both need adapters around durable records and RPC state.
+From Pi itself (the biggest donor for the viewer):
+
+- `AssistantMessageComponent`, `UserMessageComponent`, `ToolExecutionComponent`, `BashExecutionComponent`, `CustomMessageComponent`, `BranchSummaryMessageComponent`, `CompactionSummaryMessageComponent`, `SkillInvocationMessageComponent`
+- `Theme`, `getMarkdownTheme`, `initTheme` for identical styling
+- `SessionManager`, `parseSessionEntries`, `sessionEntryToContextMessages` for loading child sessions
+- `resolveCliModel` / `ModelRegistry` for model resolution
+- `ctx.ui.custom()` and pi-tui `Container`/overlay primitives for hosting the viewer
 
 ### Net-new work
 
-The material difference this extension makes across both projects is concentrated in six subsystems:
+The material difference this extension makes is concentrated in four subsystems:
 
 1. an RPC client with command correlation, LF-only JSONL framing, handshake validation, event dispatch, and `agent_settled` completion
 2. a versioned, branch-aware parent registry reconstructed from custom session entries
 3. durable recovery, resume, result consumption, and single-writer ownership reconciliation
-4. read-only versus mutating concurrency locks and idle-state reporting
-5. safe external split handoff and Zellij/tmux/kitty adapters
-6. shared intelligence-tier model selection, exact model validation, trust checks, and extension-path allowlisting
+4. a read-only session viewer: an entries-to-components loop (~150–250 lines) over Pi's exported renderers, hosted in `ctx.ui.custom()` with scroll handling
 
-Relative to pi-fork, almost all background orchestration, durability, and fleet UX is new. Relative to tintinweb, most visible UX concepts remain, but the runner, manager storage, resume path, completion path, model resolver, and session-coupled UI plumbing are replaced. The result is therefore closer to **pi-fork mechanically** and **tintinweb experientially**, with the durable registry/RPC layer being the principal net-new contribution.
+Relative to pi-fork, the durability, registry, and fleet UX are new. Relative to tintinweb, most visible UX concepts remain, but the runner, manager storage, resume path, completion path, and session-coupled UI plumbing are replaced. The result is closer to **pi-fork mechanically** and **tintinweb experientially**, with the durable registry/RPC layer being the principal net-new contribution.
 
 ## 5. High-level architecture
 
@@ -108,13 +115,10 @@ Relative to pi-fork, almost all background orchestration, durability, and fleet 
 Parent Pi session
   └─ subagents extension
        ├─ Agent registry (memory, reconstructed from parent session)
-       ├─ concurrency queue
        ├─ one RPC client per running child
+       ├─ mutating-agent lock (per cwd)
        ├─ compact widget and agent-list UI
-       └─ terminal split adapter
-             ├─ kitty
-             ├─ zellij
-             └─ tmux
+       └─ read-only session viewer (Pi's exported components in ctx.ui.custom)
 
 Child Pi process
   ├─ exact cwd/model/thinking/tool configuration
@@ -132,20 +136,22 @@ The extension generates both IDs before spawning:
 - `agentId`: short stable identifier exposed to the parent model and UI
 - `sessionId`: UUID passed to Pi with `--session-id`
 
-Conceptual invocation:
+Model, thinking level, tools, and extensions are all passed as CLI flags at spawn time — Pi's CLI accepts `--provider`, `--model`, `--thinking`, `--session-id`, `--tools`, `--no-extensions`, and `--extensions`, so no post-spawn RPC mutation is needed:
 
 ```text
 pi
   --mode rpc
   --session-id <session-id>
   --name "subagent:<type>:<description>"
+  --provider <provider>
+  --model <model-id>
   --thinking <level>
   --tools <allowlist>
   --no-extensions
-  -e <approved-extension-path> ...
+  --extensions <approved-extension-path> ...
 ```
 
-After startup, the parent sends exact RPC `set_model(provider, modelId)` and `set_thinking_level` commands, then verifies the resulting values with `get_state`. The initial task is sent with the RPC `prompt` command only after that state and the session ID/file are confirmed. A background `Agent` call does not return success until this handshake completes, ensuring the parent immediately receives a valid durable session reference.
+After startup, the parent performs a single `get_state` sanity check to confirm the model, thinking level, and session ID/file. The initial task is sent with the RPC `prompt` command only after that check passes. A background `Agent` call does not return success until this handshake completes, ensuring the parent immediately receives a valid durable session reference.
 
 The child inherits the parent environment and cwd unless the invocation explicitly supplies another absolute cwd.
 
@@ -166,10 +172,9 @@ Reload may preserve child handles through a process-global registry in a later v
 Discover Markdown definitions from:
 
 1. `<cwd>/.pi/agents/<name>.md`
-2. `<cwd>/.agents/agents/<name>.md`
-3. `$PI_CODING_AGENT_DIR/agents/<name>.md`, normally `~/.pi/agent/agents/<name>.md`
+2. `$PI_CODING_AGENT_DIR/agents/<name>.md`, normally `~/.pi/agent/agents/<name>.md`
 
-Higher entries override lower entries. Project-controlled definitions load only for trusted projects.
+Higher entries override lower entries. Project-controlled definitions load only for trusted projects. (`.agents/agents/` compatibility is deliberately omitted.)
 
 Suggested frontmatter:
 
@@ -177,12 +182,11 @@ Suggested frontmatter:
 ---
 description: Fast read-only exploration
 display_name: Explore
-intelligence: haiku/luna
+model: fast            # settings alias or exact provider/model-id; omit to use the parent's model
 thinking: low
 tools: read, grep, find, ls, bash
 extensions: [mcp]
 run_in_background: true
-max_concurrency_group: readonly
 ---
 
 You are a fast codebase exploration agent...
@@ -192,8 +196,7 @@ Supported fields for the MVP:
 
 - `description`
 - `display_name`
-- `intelligence`
-- `model` (optional exact override)
+- `model` (settings alias or exact reference; defaults to the parent's current model)
 - `thinking`
 - `tools`
 - `extensions`
@@ -204,76 +207,49 @@ The body is the agent-specific system prompt. Prompt behavior defaults to replac
 
 Built-in definitions:
 
-- `General` — general coding work, `sonnet/terra` by default
-- `Explore` — fast read-only repository exploration, `haiku/luna` by default
-- `Research` — read-only research with approved MCP/web tools, `sonnet/terra` by default
-- `Plan` — read-only implementation planning, `sonnet/terra` by default
+- `General` — general coding work; parent's model by default
+- `Explore` — fast read-only repository exploration; `fast` alias when configured, else parent's model
+- `Research` — read-only research with approved MCP/web tools; parent's model by default
+- `Plan` — read-only implementation planning; parent's model by default
 
-Agent definitions select an intelligence tier rather than hardcoding a provider model. A definition may still set `model` when its behavior depends on one exact model.
+## 8. Model selection
 
-## 8. Intelligence-tier model selection
+Model selection happens in the parent and produces an exact canonical `provider/model-id` before the child starts. The child must never independently fuzzy-resolve a model. There are no tier tables, family heuristics, or compatibility version syntax — resolution reuses Pi's own exported `resolveCliModel`/`ModelRegistry` and a small user-edited alias map.
 
-Model selection happens in the parent and produces an exact canonical `provider/model-id` before the child starts. The child must never independently fuzzy-resolve a model.
+### Request shape and precedence
 
-### Public request shape and precedence
+An `Agent` call may pass an optional `model` string. Resolution precedence is:
 
-An `Agent` call may request either `intelligence` or `model`, not both:
+1. call-site `model`
+2. definition `model`
+3. the parent session's current model
 
-```ts
-type IntelligenceTier = "haiku/luna" | "sonnet/terra" | "opus/sol";
+A `model` value is resolved as:
 
-type ModelRequest =
-  | { model: string; intelligence?: never }
-  | { intelligence: IntelligenceTier; model?: never }
-  | {};
+1. if it matches a key in the `modelAliases` settings map, substitute the alias target first
+2. resolve the (substituted) reference with Pi's `resolveCliModel` against `ctx.modelRegistry.getAvailable()`, so unavailable credentials are excluded
+
+Missing, ambiguous, or unauthenticated references fail with a clear error before spawning. There is no silent substitution and no fallthrough to a "close enough" model.
+
+The alias map is plain configuration, not inference:
+
+```json
+{
+  "modelAliases": {
+    "fast": "some-provider/some-cheap-model",
+    "smart": "some-provider/some-strong-model"
+  }
+}
 ```
-
-Resolution precedence is:
-
-1. call-site `model` exact override
-2. call-site `intelligence`
-3. definition `model` exact override
-4. definition `intelligence`
-5. built-in agent's default tier
-
-`model` accepts an exact `provider/model-id`, a bare exact model ID only when it uniquely identifies one available model, or strict compatibility syntax containing an explicit family and version such as `sonnet 4.5`. Version syntax may normalize punctuation and known release suffixes, but it must resolve to that requested version; it never falls through to a newer or different version. Missing, ambiguous, or unauthenticated specific requests fail clearly. This preserves convenient specific-model requests without allowing silent substitution.
-
-`intelligence` describes a capability tier rather than a vendor:
-
-| Tier | Recognized families | Typical use |
-|---|---|---|
-| `haiku/luna` | Haiku-family, Luna-family, and explicitly mapped peers | cheap/fast exploration and mechanical lookups |
-| `sonnet/terra` | Sonnet-family, Terra-family, and explicitly mapped peers | normal implementation, research, and planning |
-| `opus/sol` | Opus-family, Sol-family, and explicitly mapped peers | difficult architecture, synthesis, and review |
-
-Do not infer tiers from loose substrings in arbitrary model names. Keep an explicit, tested family-to-tier table with optional configuration for additional providers.
-
-### Shared intelligence selector
-
-Refactor `extensions/review-model-selector` so its tier table and deterministic candidate ordering live in a reusable module. The subagents extension calls that programmatic API directly; it does not ask the parent LLM to invoke `select_review_model` and does not expose the selector tool to children.
-
-The shared selector must add target-tier selection because the current review selector is relative to the parent model (`same` or `higher`) and cannot ask for a lower Explore tier. It must also support Pi's full thinking-level range rather than the review tool's current `medium | high | xhigh` subset. Keep `selectReviewModel()` as a review-specific adapter over the shared selector.
-
-For a tier request:
-
-1. start with `ctx.modelRegistry.getAvailable()` so unavailable credentials are excluded
-2. retain models explicitly mapped to the requested tier
-3. require support for the requested thinking level
-4. apply `minimumContextWindow` or a parsed context constraint
-5. rank deterministically by configured provider preference, family/version freshness, and context fit
-6. return the exact canonical route
-
-A context suffix such as `sonnet 1m` is compatibility syntax for a tier/family constraint plus `minimumContextWindow`; it does not alter a model's context window. It is dynamic within that constrained family/tier, unlike an explicit-version request such as `sonnet 4.5`, which must never resolve to a different version. New code should prefer `intelligence` plus `minimumContextWindow`, or `model` for a specific version.
 
 Persist both intent and outcome:
 
 ```ts
-modelRequest: { kind: "tier"; tier: IntelligenceTier; minimumContextWindow?: number }
-  | { kind: "exact"; reference: string };
+modelRequest: { reference?: string; source: "call" | "definition" | "parent" };
 resolvedModel: { provider: string; id: string };
 ```
 
-Pass the exact provider and ID through RPC `set_model` (or equivalent exact CLI arguments), set thinking explicitly, then verify both in `get_state` during the startup handshake. A resume reuses the persisted exact route for reproducibility unless the caller explicitly requests reselection or a new exact model. Dynamic reselection is therefore per new task/run, not an accidental model change midway through a run.
+The exact provider and ID are passed as CLI flags at spawn (section 6) and confirmed by the single `get_state` check. A resume reuses the persisted exact route for reproducibility unless the caller explicitly passes a new `model`. Task-sensitive automatic tier recommendation and richer selection logic (e.g. a shared selector with `extensions/review-model-selector`) are explicitly deferred.
 
 ## 9. Tool and extension isolation
 
@@ -307,9 +283,7 @@ type SubagentRecord = {
   description: string;
   prompt: string;
   cwd: string;
-  modelRequest:
-    | { kind: "tier"; tier: IntelligenceTier; minimumContextWindow?: number }
-    | { kind: "exact"; reference: string };
+  modelRequest: { reference?: string; source: "call" | "definition" | "parent" };
   resolvedModel: { provider: string; id: string };
   thinking: string;
   status: AgentStatus;
@@ -337,7 +311,6 @@ Persist only meaningful transitions, not every token or spinner frame:
 - completed/failed/aborted
 - result consumed
 - resumed
-- external session handoff
 
 On `session_start`, reconstruct from `ctx.sessionManager.getBranch()` so `/tree` rewinds produce branch-correct agent membership and consumption state. Do not reconstruct from every append-only entry irrespective of the active branch.
 
@@ -348,14 +321,12 @@ The parent model receives `agentId`, `childSessionId`, and a concise status in t
 Statuses:
 
 ```text
-queued
 starting
 running
 completed
 failed
 aborted
 interrupted
-external
 ```
 
 Definitions:
@@ -364,7 +335,6 @@ Definitions:
 - `failed`: terminal model/process error with no automatic continuation pending
 - `aborted`: explicitly stopped by user or parent
 - `interrupted`: child ownership was lost or parent shut down before normal settlement
-- `external`: writable ownership was handed to a user-opened Pi split
 
 Startup reconciliation for every nonterminal record:
 
@@ -412,22 +382,20 @@ Use an entry ID cursor rather than message counts for incremental reads because 
 
 ## 13. Concurrency, hangs, and cancellation
 
-Default concurrency:
+There is no background queue. Simple caps, enforced at start time:
 
-- maximum four read-only/background agents
-- maximum one mutating agent in the shared working tree
-- foreground agents bypass the background queue only when doing so does not violate the mutating-agent lock
+- maximum four concurrent read-only agents (configurable); starting a fifth fails with a clear, actionable error the parent model can react to
+- maximum one mutating agent in the shared working tree, enforced with a single per-cwd lock; a second mutating start fails with a clear error
 
 Determine mutating status from enabled tools (`edit`, `write`, and unrestricted `bash` are potentially mutating). Since separate processes do not share Pi's in-process file mutation queue, two mutating children must not run concurrently in one cwd unless a future worktree mode isolates them.
 
 Hanging policy:
 
-- no maximum turn count
+- no maximum turn count and no hard timeout
 - track last RPC event and last session-entry timestamp
 - show `idle 2m` in the UI rather than silently treating it as progress
-- configurable warning threshold, default two minutes
-- configurable hard timeout disabled by default
-- user can steer, stop, or resume from the agent list
+- the on-demand viewer (section 16) is the primary diagnostic: open the agent and read what it is actually doing
+- user can stop or resume from the agent list
 - transient provider failures remain visible through Pi's retry events
 - do not automatically retry mutating work after an ambiguous process failure
 
@@ -440,26 +408,10 @@ Store:
 - cumulative child-session cost
 - cumulative input/output/cache-read/cache-write tokens
 - context-window usage
-- optional run delta calculated from the baseline captured before resume
 
-Caveats must be represented honestly:
+Known caveats (documented, not modeled in the MVP): an interrupted streaming response may not contain final provider usage; compaction helper calls may not have separately persisted usage; provider pricing metadata may be absent; subscription pricing may not correspond to nominal per-token cost.
 
-- an interrupted streaming response may not contain final provider usage
-- compaction or branch-summary helper calls may not have separately persisted usage
-- provider usage or pricing metadata may be absent
-- subscription pricing may not correspond to nominal per-token cost
-
-The extension should expose `costSource` and `costComplete` when these cases can be detected.
-
-Emit lifecycle events for integration with `extensions/improved-footer`:
-
-```text
-process-subagents:started
-process-subagents:completed
-process-subagents:cost
-```
-
-The cost event should carry `agentId`, child session identifiers, cumulative cost, run delta, and the parent entry ID used to anchor the cost. Improved Footer can then persist branch-accurate spend without depending on tintinweb's in-process manager symbol.
+Per-run deltas, `costSource`/`costComplete` flags, and lifecycle/cost events for `extensions/improved-footer` are deferred to the hardening phase.
 
 ## 15. TUI specification
 
@@ -479,18 +431,18 @@ Format:
 {status} {Agent}[{ModelShortName} {ContextShort}] {description} · {activity/result}
 ```
 
-Use Pi's normal tool expansion key for details. Expanded output shows identifiers, prompt, final result preview, token usage, cost, and child session path. It does not render the full conversation.
+Use Pi's normal tool expansion key for details. Expanded output shows identifiers, prompt, final result preview, token usage, cost, and child session path. It does not render the full conversation — that is the viewer's job.
 
 ### Above-editor widget
 
-Show active and queued agents only, one line each. Remove terminal agents after a short linger period. Keep the widget bounded; if more agents exist, show `… +N more`.
+Show active agents only, one line each. Remove terminal agents after a short linger period. Keep the widget bounded; if more agents exist, show `… +N more`.
 
 ### Footer
 
 Publish a normal extension status rather than replacing the footer:
 
 ```text
-agents: 2 running, 1 queued
+agents: 2 running
 ```
 
 This composes with Improved Footer and other status-producing extensions.
@@ -500,9 +452,8 @@ This composes with Improved Footer and other status-producing extensions.
 Register `/agents` and a configurable shortcut. The list includes agents associated with the active parent-session branch and supports:
 
 - arrows: select
-- Enter: open/take over session in a split
+- Enter: open the read-only session viewer
 - `r`: resume interrupted/completed session with a prompt
-- `s`: steer running agent
 - `x`: stop running agent with confirmation
 - `f`: fetch/mark result consumed
 - `c`: copy child session ID/path
@@ -510,73 +461,35 @@ Register `/agents` and a configurable shortcut. The list includes agents associa
 
 The list displays type, description, state, model, elapsed time, context usage, cost, and short ID.
 
-## 16. External split session viewer
+## 16. Embedded read-only session viewer
 
-The external viewer deliberately uses Pi's real interactive session UI instead of reimplementing transcript rendering.
+The viewer renders a child session inside the parent TUI using Pi's real session-rendering components, so it reads exactly like a normal Pi session without the editor, footer, or slash commands. It never writes to the child session, so it is safe for any agent state — including running agents — and the single-writer rule is satisfied by construction.
 
-### Safety rule
+### Building blocks (all exported by `@earendil-works/pi-coding-agent` / `@earendil-works/pi-tui`)
 
-A Pi session must have only one writable owner. The extension must never launch `pi --session <child>` while the RPC child is still writing that session.
+- message components: `AssistantMessageComponent`, `UserMessageComponent`, `ToolExecutionComponent`, `BashExecutionComponent`, `CustomMessageComponent`, `BranchSummaryMessageComponent`, `CompactionSummaryMessageComponent`, `SkillInvocationMessageComponent`
+- theming: `Theme`, `getMarkdownTheme`, `initTheme`
+- session loading: `SessionManager`, `parseSessionEntries`, `sessionEntryToContextMessages`
+- hosting: `ctx.ui.custom()` (focused full-screen component) and pi-tui `Container`
 
-Behavior:
+Pi's own replay function (`rebuildChatFromMessages` in `InteractiveMode`) is private, so the extension implements its own entries-to-components loop — a small switch over entry/message types (~150–250 lines), cribbing the construction patterns from Pi's interactive mode.
 
-- `completed`, `failed`, `aborted`, or `interrupted`: open the child session directly
-- `running`: Enter presents a choice:
-  1. **Take over in split** — abort and settle the RPC child, mark the record `external`, then open the same session in Pi
-  2. **Cancel** — leave the child running
+### Behavior
 
-A future read-only viewer could avoid handoff, but Pi currently has no built-in read-only interactive session mode. Opening a second writable Pi process against an active JSONL file is explicitly unsupported.
+- Enter on any agent in the list opens the viewer immediately; no confirmation, no state change to the agent
+- terminal agents: parse the child session file once and render the active branch
+- running agents: render live; refresh via RPC `get_entries` with the last entry-ID cursor (or by re-parsing the appended JSONL file on change), appending new components as they arrive
+- scrolling: the viewer owns a scroll offset over rendered lines; PgUp/PgDn/arrows/Home/End; opens scrolled to the bottom and follows output while at the bottom
+- Escape closes the viewer and returns to the agent list
 
-Conceptual launched command:
+### Interactive takeover escape hatch
 
-```text
-pi --session <absolute-session-file>
-```
+Pi has no read-only interactive session mode, and a Pi session must have only one writable owner. When the user wants to *drive* a child session interactively:
 
-The new Pi process uses the child session's cwd. It may load the user's normal Pi configuration. Set an environment marker such as `PI_SUBAGENT_EXTERNAL=1` so this extension can suppress redundant parent-agent UI if it is discovered in the external process.
+1. stop the RPC child (if running) and wait for settlement
+2. print a copyable command: `pi --session <absolute-session-file>`
 
-When the split process exits, the parent:
-
-1. reparses the child session
-2. refreshes cumulative cost/result/leaf ID
-3. marks the record completed or interrupted based on the latest session state
-4. does not automatically restart autonomous work
-
-The user may explicitly resume it afterward.
-
-### Split adapters
-
-Auto-detection priority is configurable; default:
-
-1. Zellij when `$ZELLIJ` is set
-2. tmux when `$TMUX` is set
-3. kitty when `$KITTY_WINDOW_ID` is set and remote control works
-4. configured command template
-5. error notification containing a copyable `pi --session ...` command
-
-Adapters use argument arrays, never interpolated shell strings.
-
-Representative commands:
-
-```text
-zellij action new-pane --cwd <cwd> -- pi --session <file>
-tmux split-window -h -c <cwd> pi --session <file>
-kitty @ launch --type=window --location=hsplit --cwd <cwd> pi --session <file>
-```
-
-Exact kitty behavior depends on the user's remote-control configuration. The adapter must probe support and fail cleanly rather than assuming it is enabled.
-
-Configuration:
-
-```json
-{
-  "viewer": {
-    "backend": "auto",
-    "splitDirection": "horizontal",
-    "customCommand": null
-  }
-}
-```
+The user runs it wherever they like — their own splits, tabs, or windows. The extension does not manage terminal multiplexers.
 
 ## 17. Settings
 
@@ -585,21 +498,12 @@ Suggested global/project-merged settings:
 ```json
 {
   "maxConcurrentReadOnly": 4,
-  "maxConcurrentMutating": 1,
   "idleWarningMs": 120000,
-  "hardTimeoutMs": null,
   "widgetMaxRows": 4,
   "completedLingerMs": 5000,
   "defaultBackground": false,
   "projectAgents": "trusted-only",
-  "modelSelection": {
-    "providerPreference": [],
-    "additionalTierMappings": {}
-  },
-  "viewer": {
-    "backend": "auto",
-    "splitDirection": "horizontal"
-  }
+  "modelAliases": {}
 }
 ```
 
@@ -610,15 +514,15 @@ Agent frontmatter controls agent defaults; tool-call parameters control per-run 
 Curated errors are required for:
 
 - unknown agent type
-- unavailable model or requested context size
+- unknown, ambiguous, or unauthenticated model reference or alias
 - missing model credentials
 - invalid cwd
 - untrusted project agent or extension
 - unavailable requested tool/extension
+- concurrency cap or mutating lock rejection (actionable: tells the parent model what is running and what to do)
 - child startup or RPC framing failure
 - session file not created during handshake
 - duplicate writable session ownership
-- split backend unavailable
 - process exit before `agent_settled`
 - stale or invalid agent/session ID
 
@@ -629,13 +533,13 @@ A process exit before normal settlement produces `interrupted` unless a persiste
 ### Phase 1: durable core
 
 - custom-agent discovery
-- shared intelligence-tier selector and exact model override resolution
+- alias + exact model resolution via Pi's `resolveCliModel`
 - RPC process client
 - persistent child sessions
 - parent registry entries and reconstruction
 - foreground/background `Agent`
-- `get_subagent_result`, resume, steer, and stop
-- basic concurrency and shutdown
+- `get_subagent_result`, resume, and stop
+- concurrency caps, mutating lock, and shutdown
 - session-stat cost capture
 
 ### Phase 2: compact UI
@@ -644,27 +548,18 @@ A process exit before normal settlement produces `interrupted` unless a persiste
 - active-agent widget
 - footer status
 - selectable `/agents` list
+- read-only session viewer (terminal and live agents)
 - idle indicators and completion deduplication
 
-### Phase 3: split handoff
+### Phase 3: integration and hardening
 
-- Zellij adapter
-- tmux adapter
-- kitty adapter
-- safe running-agent takeover
-- exit reconciliation
-- manual command fallback
-
-### Phase 4: integration and hardening
-
-- Improved Footer lifecycle/cost events
 - MCP allowlisting
 - project trust checks
 - malformed RPC/session recovery tests
-- tier, thinking-level, context-window, exact-version, ambiguity, and resume-model tests
-- context-aware compatibility aliases such as `sonnet 1m`
-- optional task-sensitive automatic tier recommendation beyond definition/caller defaults
+- model alias, ambiguity, and resume-model tests
+- Improved Footer lifecycle/cost events and per-run cost deltas
 - optional worktree isolation
+- optional `steer_subagent` via RPC `steer`
 
 ## 20. Acceptance criteria
 
@@ -677,22 +572,21 @@ A process exit before normal settlement produces `interrupted` unless a persiste
 7. No child can call this extension's subagent tools.
 8. MCP tools are available only when explicitly allowed by the agent definition.
 9. The default inline card occupies one line, the widget is bounded, and footer status composes with Improved Footer.
-10. Opening a running agent in an external split first transfers writable ownership; two Pi processes never write the same child session concurrently.
-11. Zellij, tmux, and kitty failures produce a usable fallback command rather than losing the session.
-12. Two mutating agents cannot run concurrently in the same cwd without explicit future isolation support.
-13. A tier request dynamically selects an available model from the correct Haiku/Luna, Sonnet/Terra, or Opus/Sol tier and persists the exact route used.
-14. An exact model override either launches that exact available provider/model or fails without substitution.
-15. Resuming uses the persisted exact model unless the caller explicitly requests reselection.
+10. The viewer renders a child transcript using Pi's exported components so it is visually identical to the same session opened in Pi, and it opens for running agents without disturbing them.
+11. No second writable Pi process is ever launched against an active child session; the takeover escape hatch stops the child first and only prints a command.
+12. Two mutating agents cannot run concurrently in the same cwd; the second start fails with an actionable error.
+13. A model reference or alias either launches that exact available provider/model or fails without substitution.
+14. Resuming uses the persisted exact model unless the caller explicitly passes a new one.
+15. Starting an agent beyond the read-only cap fails with a clear error rather than queueing silently.
 
 ## 21. Deferred decisions
 
 Before implementation, confirm:
 
-1. Whether `Enter` on a running agent should immediately perform safe takeover or first show the two-option confirmation.
-2. Whether `.agents/agents/` compatibility belongs in the MVP or only `.pi/agents/` plus global agents.
-3. Whether `General` should inherit the full parent system prompt or use a standalone prompt.
-4. Which MCP extension names/paths should be approved by default.
-5. Whether external Pi sessions should load all normal user extensions or a reduced explicit set.
-6. Whether `/reload` should abort children in the MVP or preserve process handles through a global registry.
-7. Whether user configuration may extend only provider preference within the three tiers or also add new family-to-tier mappings.
-8. Whether omission of both `model` and `intelligence` should always use the agent definition default or permit a future task classifier to recommend a tier.
+1. Whether `General` should inherit the full parent system prompt or use a standalone prompt.
+2. Which MCP extension names/paths should be approved by default.
+3. Whether `/reload` should abort children in the MVP or preserve process handles through a global registry.
+4. How the live viewer refreshes for running agents: RPC `get_entries` polling, session-file watching, or both.
+5. Whether the viewer should honor Pi's tool-expansion toggle per component or render everything collapsed by default.
+
+Deliberately deferred features (not open questions): `steer_subagent`, background queueing, intelligence tiers/shared model selector, terminal-split adapters, worktree isolation.
