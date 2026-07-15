@@ -2,7 +2,7 @@
 name: run-review
 description: >
   Run an adversarial code review and bounded fix/re-review loop over working changes, a branch, files, revisions, or another explicit target. Use when the user asks to review implementation work, audit changes from multiple angles, or independently verify a completed task. Defaults to current working changes, a deterministically selected reviewer model, high thinking, and fixes by the coordinating session.
-compatibility: Requires Pi 0.80.3+ and the @tintinweb/pi-subagents Agent tools.
+compatibility: Requires Pi subagent start, result, and resume capabilities.
 ---
 
 # Run Review
@@ -36,13 +36,7 @@ These internal fields are workflow context, not required user-facing syntax.
 
 ## 1. Preflight and resolve the target
 
-Confirm that `Agent`, `get_subagent_result`, and `steer_subagent` are available. If any are missing, stop with this installation guidance and do not degrade to a single-agent review:
-
-```bash
-pi install npm:@tintinweb/pi-subagents
-```
-
-Then tell the user to run `/reload` and invoke the skill again.
+Confirm that `Agent` and `get_subagent_result` are available, plus either the dedicated `resume_subagent` tool or a compatible `Agent` tool with a `resume` input. If start, result, or resume capability is missing, stop and identify the missing capability; do not degrade to a single-agent review.
 
 Restate the exact review target. Resolve it with repository-appropriate commands and include untracked files.
 
@@ -67,7 +61,7 @@ The selector is mandatory because it reads the live session model and configured
 
 ## 3. Run one review round
 
-For each review round, the coordinating session—not a child reviewer—owns the parallel fan-out. `@tintinweb/pi-subagents` intentionally prevents nested Agent calls.
+For each review round, the coordinating session—not a child reviewer—owns the parallel fan-out. Do not ask a child reviewer to launch nested agents.
 
 ### Parallel angle investigation
 
@@ -99,7 +93,7 @@ There are at most three reviews. The third review is report-only.
    - If `CLEAN`, stop.
    - Otherwise deliver every validated finding to the fixer.
    - With `fixer=coordinator`, apply the fixes in this session.
-   - With `fixer=agent:<id>`, resume that exact ID synchronously and consume the returned result directly. `pi-subagents` does not background resumed agents or return a new ID; retain the original ID. If the completed session has expired and resume returns `Agent not found`, stop and report the unresolved findings rather than creating a replacement.
+   - With `fixer=agent:<id>`, resume that exact ID synchronously using `resume_subagent` when available. Otherwise use the compatible provider's `Agent` resume input. Consume the terminal result directly and retain the original agent ID even though the resume creates a new run. If the child session is unavailable or cannot be resumed, stop and report the unresolved findings rather than creating a replacement.
    - Run focused tests/checks for the fixes. Do not claim success if they fail.
 2. **Review 2**
    - Recompute the target, run a new four-agent parallel investigation, then launch a fresh synthesis reviewer.

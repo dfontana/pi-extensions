@@ -29,6 +29,7 @@ Each extension has its own README covering configuration, provided tools/command
 | [no-git-for-jj](extensions/no-git-for-jj/README.md) | Blocks `git` commands in jj repos, suggesting the `jj` equivalent |
 | [notify](extensions/notify/README.md) | Bell, desktop notification, and Zellij tab dot when Pi is ready for input |
 | [pane-control](extensions/pane-control/README.md) | Multiplexing tools for opening, driving, reading, and closing Kitty or Zellij panes |
+| [process-subagents](extensions/process-subagents/README.md) | Durable foreground/background subagents backed by persisted Pi RPC sessions |
 | [prompt-stash](extensions/prompt-stash/README.md) | Stash/restore the prompt editor with `Alt+Shift+S` |
 | [rainbow-spinner](extensions/rainbow-spinner/README.md) | Theme-colored spinner with a random whimsical phrase each turn |
 | [review-model-selector](extensions/review-model-selector/README.md) | `select_review_model` tool: deterministic adversarial-reviewer selection |
@@ -41,7 +42,7 @@ Each extension has its own README covering configuration, provided tools/command
 
 A repo-local **web-access-smoke-test** skill (in `.pi/skills/`, not shipped with the package) provides an end-to-end check of the web-access tools after code changes.
 
-`run-review` and `run-plan` require the separately installed `@tintinweb/pi-subagents` package; they preflight the `Agent` tools and return installation guidance rather than silently degrading.
+`run-review` and `run-plan` use capability-based subagent start/result/resume tools. They prefer this package's dedicated `resume_subagent` tool and retain a compatible `Agent`-resume fallback for other providers.
 
 ```text
 /skill:run-review
@@ -55,7 +56,6 @@ A repo-local **web-access-smoke-test** skill (in `.pi/skills/`, not shipped with
 
 ## Installed Packages
 
-- npm:@tintinweb/pi-subagents
 - npm:@juicesharp/rpiv-ask-user-question
 - npm:@tintinweb/pi-tasks
 - npm:@plannotator/pi-extension
