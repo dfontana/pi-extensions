@@ -438,11 +438,7 @@ async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: str
 
 // ---- registration ----------------------------------------------------------
 
-export default function (pi: ExtensionAPI) {
-  // Pi calls each extension factory for each bound AgentSession. Keep all
-  // mutable runtime state here so an in-process child cannot reset its parent.
-  const runtime: Runtime = { manager: new Manager() };
-
+function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: string[] = []): void {
   pi.registerTool({
     name: "mcp",
     label: "MCP",
@@ -451,7 +447,9 @@ export default function (pi: ExtensionAPI) {
       "mcp({server}) → list a server's tools; mcp({search}) → find tools across enabled servers; " +
       "mcp({describe}) → a tool's schema; mcp({tool, args}) → call a tool (args is a JSON object string); " +
       "mcp({connect}) → force connect + refresh; mcp({action}) → OAuth helpers.",
-    promptSnippet: "Reach MCP servers: status mcp({}), search, describe, and call tools via mcp({tool, args})",
+    promptSnippet:
+      "Reach MCP servers: status mcp({}), search, describe, and call tools via mcp({tool, args})" +
+      (configuredServers.length ? `. Configured MCP servers: ${configuredServers.join(", ")}.` : ""),
     promptGuidelines: [
       "Use mcp to reach MCP servers: mcp({}) for status, mcp({search:'…'}) to find tools, mcp({describe:'…'}) for a tool's schema, then mcp({tool:'…', args:'{…}'}) to call it. Only enabled servers are reachable — if a needed server is off, ask the user to enable it from the /mcp panel.",
     ],
@@ -568,6 +566,14 @@ export default function (pi: ExtensionAPI) {
       return asText(statusText(runtime));
     },
   });
+}
+
+export default function (pi: ExtensionAPI) {
+  // Pi calls each extension factory for each bound AgentSession. Keep all
+  // mutable runtime state here so an in-process child cannot reset its parent.
+  const runtime: Runtime = { manager: new Manager() };
+
+  registerMcpTool(pi, runtime);
 
   pi.registerCommand("mcp", {
     description: "Open the MCP server panel (enable/disable · reconnect · authenticate)",
@@ -580,6 +586,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     runtime.ui = ctx.ui;
     await runtime.manager.initialize(loadServers(ctx.cwd));
+    registerMcpTool(pi, runtime, runtime.manager.list());
     updateFooter(runtime);
   });
 
