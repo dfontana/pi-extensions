@@ -67,6 +67,9 @@ async function resolveModelAuth(
   | { ok: true; model: Model<Api>; apiKey: string; headers?: Record<string, string> }
   | { ok: false; error: string }
 > {
+  // Since pi 0.80.8 model loading is async and find() reads a snapshot; refresh
+  // reloads models.json so a mid-session registry change is actually observed.
+  await modelRegistry.refresh();
   const model = modelRegistry.find(provider, modelId);
   if (!model) {
     return { ok: false, error: `model ${provider}/${modelId} is not in the model registry` };
@@ -385,6 +388,11 @@ export default function (pi: ExtensionAPI) {
     // sourced from env vars that pi populates after session_start fires, so
     // calling getApiKeyAndHeaders() here would produce a false-negative failure
     // even though the credentials resolve correctly at request time.
+    //
+    // Since pi 0.80.8 model loading is async; refresh() must be awaited before
+    // synchronous registry reads like find(), or the checks below can race the
+    // initial model load and produce false "not in the model registry" errors.
+    await ctx.modelRegistry.refresh();
     const searchCheck = search && checkModelExists(ctx.modelRegistry, search.provider, search.model);
     const fetchCheck = fetch && checkModelExists(ctx.modelRegistry, fetch.provider, fetch.model);
 

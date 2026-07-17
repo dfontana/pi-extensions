@@ -138,18 +138,8 @@ function formatRate(perToken: number): string {
   return `$${perM.toFixed(2)}`;
 }
 
-function getOpenRouterApiKey(ctx: ExtensionContext): string | null {
-  try {
-    const providers = (ctx.modelRegistry as any).getProviders?.() ?? [];
-    for (const p of providers) {
-      if (p.id === "openrouter" || p.name === "openrouter") {
-        return p.apiKey ?? null;
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
+async function getOpenRouterApiKey(ctx: ExtensionContext): Promise<string | null> {
+  return (await ctx.modelRegistry.getApiKeyForProvider("openrouter")) ?? null;
 }
 
 // ─── Extension ────────────────────────────────────────────────────────────
@@ -190,15 +180,16 @@ export default function (pi: ExtensionAPI) {
   function ensureOpenRouterPricing(ctx: ExtensionContext) {
     if (openRouterPricing || pricingFetchStarted) return;
     pricingFetchStarted = true;
-    if (!openRouterApiKey) openRouterApiKey = getOpenRouterApiKey(ctx);
-    void fetchOpenRouterPricing(openRouterApiKey).then((map) => {
+    void (async () => {
+      if (!openRouterApiKey) openRouterApiKey = await getOpenRouterApiKey(ctx);
+      const map = await fetchOpenRouterPricing(openRouterApiKey);
       if (map) {
         openRouterPricing = map;
         requestRender();
       } else {
         pricingFetchStarted = false; // allow a later retry
       }
-    });
+    })();
   }
 
   function refreshJjBookmark() {
@@ -247,7 +238,7 @@ export default function (pi: ExtensionAPI) {
       costState.seenIds.add(responseId);
 
       if (!openRouterApiKey) {
-        openRouterApiKey = getOpenRouterApiKey(ctx);
+        openRouterApiKey = await getOpenRouterApiKey(ctx);
       }
       if (!openRouterApiKey) return;
 

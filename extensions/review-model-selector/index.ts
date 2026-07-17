@@ -31,6 +31,9 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      // Since pi 0.80.8 model loading is async and getAvailable() reads a
+      // snapshot; refresh so the selection sees the current registry state.
+      await ctx.modelRegistry.refresh();
       const selection = selectReviewModel({
         current: ctx.model,
         available: ctx.modelRegistry.getAvailable(),
