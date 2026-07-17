@@ -3,19 +3,20 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { stringify } from "yaml";
 import { loadScopedTools } from "./config.ts";
 
 function fixture(global?: unknown, project?: unknown) {
   const agentDir = mkdtempSync(join(tmpdir(), "scoped-tools-agent-"));
   const cwd = mkdtempSync(join(tmpdir(), "scoped-tools-cwd-"));
   if (global !== undefined) {
-    const body = typeof global === "string" ? global : JSON.stringify(global);
-    writeFileSync(join(agentDir, "scoped-tools.json"), body);
+    const body = typeof global === "string" ? global : stringify(global);
+    writeFileSync(join(agentDir, "scoped-tools.yaml"), body);
   }
   if (project !== undefined) {
     mkdirSync(join(cwd, ".pi"));
-    const body = typeof project === "string" ? project : JSON.stringify(project);
-    writeFileSync(join(cwd, ".pi", "scoped-tools.json"), body);
+    const body = typeof project === "string" ? project : stringify(project);
+    writeFileSync(join(cwd, ".pi", "scoped-tools.yaml"), body);
   }
   return loadScopedTools(cwd, agentDir);
 }
@@ -79,9 +80,24 @@ describe("scoped-tools config", () => {
   });
 
   it("reports unparseable files but still loads the other file", () => {
-    const { tools, errors } = fixture("{not json", { solo: tool("echo hi") });
+    const { tools, errors } = fixture("{not yaml", { solo: tool("echo hi") });
     assert.equal(tools.length, 1);
     assert.equal(tools[0].name, "solo");
     assert.equal(errors.length, 1);
+  });
+
+  it("parses YAML block scalars for multi-line command templates", () => {
+    const { tools, errors } = fixture(undefined, `report:
+  description: Run a readable pipeline
+  commandTemplate: |
+    printf '%s\\n' "$VALUE" |
+      tr '[:lower:]' '[:upper:]'
+  parameters:
+    value:
+      type: string
+      description: Input to transform
+`);
+    assert.deepEqual(errors, []);
+    assert.equal(tools[0].commandTemplate, "printf '%s\\n' \"$VALUE\" |\n  tr '[:lower:]' '[:upper:]'\n");
   });
 });

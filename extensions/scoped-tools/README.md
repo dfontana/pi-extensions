@@ -1,43 +1,38 @@
 # scoped-tools
 
-Registers JSON-specified bash commands as first-class agent tools. Because each command is wrapped as a tool and run in a subprocess, the agent never sees the command template, validation commands, or hidden parameter values — only the tool's name, description, parameter schema, and the final stdout/stderr. Predefined structure and validation make calls more reliable than ad-hoc bash.
+Registers YAML-specified bash commands as first-class agent tools. Because each command is wrapped as a tool and run in a subprocess, the agent never sees the command template, validation commands, or hidden parameter values — only the tool's name, description, parameter schema, and the final stdout/stderr. Predefined structure and validation make calls more reliable than ad-hoc bash.
 
 ## Configuration
 
 Tool specs are read from two files, merged with the project file replacing same-named global tools:
 
-1. `~/.pi/agent/scoped-tools.json` (global; honors `PI_AGENT_DIR`)
-2. `.pi/scoped-tools.json` (project)
+1. `~/.pi/agent/scoped-tools.yaml` (global; honors `PI_AGENT_DIR`)
+2. `.pi/scoped-tools.yaml` (project)
 
-Both files map tool names to definitions:
+Both files map tool names to definitions. YAML block scalars (`|`) are useful for readable multi-line commands and pipelines:
 
-```json
-{
-  "deploy_service": {
-    "description": "Deploy a service to an environment (dry-run).",
-    "parameters": {
-      "service": {
-        "type": "string",
-        "description": "Service name to deploy",
-        "validationCmd": "list-services | grep -qxF \"$1\""
-      },
-      "env": {
-        "type": "string",
-        "description": "Target environment: dev or prod",
-        "validationCmd": "echo \"$1\" | grep -qxE 'dev|prod'"
-      },
-      "extra_flags": {
-        "type": "string",
-        "description": "Additional flags passed through to the deploy command"
-      }
-    },
-    "hiddenParameters": {
-      "auth_token": { "valueFromCmd": "get-token --env $ENV" }
-    },
-    "commandTemplate": "deploy --dry-run --service $SERVICE --auth $AUTH_TOKEN $EXTRA_FLAGS",
-    "timeout": 300
-  }
-}
+```yaml
+deploy_service:
+  description: Deploy a service to an environment (dry-run).
+  parameters:
+    service:
+      type: string
+      description: Service name to deploy
+      validationCmd: list-services | grep -qxF "$1"
+    env:
+      type: string
+      description: "Target environment: dev or prod"
+      validationCmd: echo "$1" | grep -qxE 'dev|prod'
+    extra_flags:
+      type: string
+      description: Additional flags passed through to the deploy command
+  hiddenParameters:
+    auth_token:
+      valueFromCmd: get-token --env $ENV
+  commandTemplate: |
+    deploy --dry-run --service $SERVICE --auth $AUTH_TOKEN \
+      $EXTRA_FLAGS
+  timeout: 300
 ```
 
 Fields per tool:
@@ -46,11 +41,11 @@ Fields per tool:
 |---|---|---|
 | `description` | yes | Surfaced to the LLM as the tool description. |
 | `commandTemplate` | yes | The command to run, with `$UPPER_SNAKE` placeholders. |
-| `parameters` | no | Agent-visible parameters. `type` is `"string"` or `"number"`; `validationCmd` optionally guards the value. All declared parameters are required. |
+| `parameters` | no | Agent-visible parameters. `type` is `string` or `number`; `validationCmd` optionally guards the value. All declared parameters are required. |
 | `hiddenParameters` | no | Values computed at call time via `valueFromCmd`; never visible to the agent. |
 | `timeout` | no | Per-subprocess timeout in seconds (default 120). |
 
-Config is read once, on the first session start. Edit the JSON, then reload Pi to pick up changes.
+Config is read once, on the first session start. Edit the YAML, then reload Pi to pick up changes.
 
 ## Call pipeline
 

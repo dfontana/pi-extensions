@@ -1,5 +1,5 @@
 /**
- * scoped-tools — registers JSON-specified bash commands as first-class agent
+ * scoped-tools — registers YAML-specified bash commands as first-class agent
  * tools. Each spec defines typed parameters (optionally checked by a
  * validationCmd), hidden parameters computed by shell commands at call time,
  * and a command template the values are substituted into. The agent only ever

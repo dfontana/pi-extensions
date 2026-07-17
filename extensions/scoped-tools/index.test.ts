@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { stringify } from "yaml";
 import scopedTools, { substitute } from "./index.ts";
 
 interface RegisteredTool {
@@ -29,7 +30,7 @@ async function start(spec: Record<string, unknown>) {
   const agentDir = mkdtempSync(join(tmpdir(), "scoped-tools-agent-"));
   const cwd = mkdtempSync(join(tmpdir(), "scoped-tools-cwd-"));
   mkdirSync(join(cwd, ".pi"));
-  writeFileSync(join(cwd, ".pi", "scoped-tools.json"), JSON.stringify(spec));
+  writeFileSync(join(cwd, ".pi", "scoped-tools.yaml"), stringify(spec));
   process.env.PI_AGENT_DIR = agentDir;
 
   const tools = new Map<string, RegisteredTool>();
