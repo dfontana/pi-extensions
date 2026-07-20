@@ -40,7 +40,7 @@ export interface ServerDef {
 }
 
 const HOME = homedir();
-// Honors the PI_AGENT_DIR override (same resolution the sibling extensions use).
+// Honors the PI_CODING_AGENT_DIR override (same resolution as pi itself).
 export const STATE_DIR = join(getAgentDir(), "mcp");
 let stateWriteSequence = 0;
 

@@ -210,6 +210,16 @@ export function oauthProvider(def: ServerDef): OAuthClientProvider {
   return new FileProvider(def.url!, def.oauth?.redirectUri ?? MANUAL_REDIRECT, def);
 }
 
+/**
+ * Forget all locally persisted OAuth state for this server, including its DCR
+ * registration. The next authorization attempt must therefore obtain fresh
+ * credentials rather than silently refreshing the previous token.
+ */
+export function clearOAuthCredentials(def: ServerDef): void {
+  if (!def.url) return;
+  new FileProvider(def.url, def.oauth?.redirectUri ?? MANUAL_REDIRECT, def).invalidateCredentials("all");
+}
+
 /** Interactive browser flow used by the `/mcp` panel (press `a`). */
 export async function authInteractive(def: ServerDef, signal?: AbortSignal): Promise<void> {
   const url = def.url!;

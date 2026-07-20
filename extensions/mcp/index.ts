@@ -22,7 +22,7 @@ import {
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { authComplete, authInteractive, authStart } from "./auth.ts";
+import { authComplete, authInteractive, authStart, clearOAuthCredentials } from "./auth.ts";
 import { loadServers } from "./config.ts";
 import { Manager, type ServerState } from "./manager.ts";
 
@@ -325,7 +325,7 @@ async function actionResult(runtime: Runtime, p: ProxyArgs) {
 
 // ---- /mcp management panel -------------------------------------------------
 
-const HELP = "↑↓ move · space toggle · r reconnect · a auth · esc close";
+const HELP = "↑↓ move · space toggle · r restart · a re-auth · esc close";
 
 async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promise<void> {
   const { manager } = runtime;
@@ -375,7 +375,7 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
       return lines;
     };
 
-    const reconnect = async (name: string) => {
+    const restart = async (name: string) => {
       manager.enabled.add(name);
       busy.set(name, "connecting…");
       tui.requestRender();
@@ -403,7 +403,7 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
           if (manager.enabled.has(name)) manager.enabled.delete(name);
           else manager.enabled.add(name);
           updateFooter(runtime);
-        } else if (matchesKey(data, "r")) void reconnect(name);
+        } else if (matchesKey(data, "r")) void restart(name);
         else if (matchesKey(data, "a")) return done({ auth: name });
         tui.requestRender();
       },
@@ -420,8 +420,12 @@ async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: str
     ctx.ui.notify(`"${name}" is not an HTTP/OAuth server.`, "warning");
     return;
   }
+  // `a` deliberately means *re*-authenticate: a normal restart keeps the
+  // stored refresh token, whereas this action must request fresh consent.
+  await manager.disconnect(name);
+  clearOAuthCredentials(def);
   const ok = await ctx.ui.custom<boolean>((tui, theme, _kb, done) => {
-    const loader = new BorderedLoader(tui, theme, `Authorizing "${name}" — a browser window should open…`);
+    const loader = new BorderedLoader(tui, theme, `Re-authorizing "${name}" — a browser window should open…`);
     loader.onAbort = () => done(false);
     authInteractive(def, loader.signal)
       .then(() => done(true))
@@ -576,7 +580,7 @@ export default function (pi: ExtensionAPI) {
   registerMcpTool(pi, runtime);
 
   pi.registerCommand("mcp", {
-    description: "Open the MCP server panel (enable/disable · reconnect · authenticate)",
+    description: "Open the MCP server panel (enable/disable · restart · authenticate)",
     handler: async (_argStr, ctx) => {
       runtime.ui = ctx.ui;
       await openPanel(runtime, ctx);
