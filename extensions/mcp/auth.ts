@@ -220,7 +220,7 @@ export function clearOAuthCredentials(def: ServerDef): void {
   new FileProvider(def.url, def.oauth?.redirectUri ?? MANUAL_REDIRECT, def).invalidateCredentials("all");
 }
 
-/** Interactive browser flow used by the `/mcp` panel (press `a`). */
+/** Interactive browser flow used by the `/mcp` panel (press Shift+A). */
 export async function authInteractive(def: ServerDef, signal?: AbortSignal): Promise<void> {
   const url = def.url!;
   if (def.oauth?.grantType === "client_credentials") {

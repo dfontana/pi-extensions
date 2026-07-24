@@ -21,7 +21,7 @@ import {
   type ThemeColor,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { authComplete, authInteractive, authStart, clearOAuthCredentials } from "./auth.ts";
 import { loadServers } from "./config.ts";
 import { Manager, type ServerState } from "./manager.ts";
@@ -325,7 +325,18 @@ async function actionResult(runtime: Runtime, p: ProxyArgs) {
 
 // ---- /mcp management panel -------------------------------------------------
 
-const HELP = "↑↓ move · space toggle · r restart · a re-auth · esc close";
+const HELP = "type filter · ↑↓ · space toggle · R restart · A re-auth · esc";
+
+/**
+ * Get printable text from both classic terminal input and Pi's Kitty
+ * keyboard protocol. Special key handling must run first: space toggles the
+ * selected server, and shifted R/A are panel actions rather than text.
+ */
+function printableInput(data: string): string | undefined {
+  const decoded = decodeKittyPrintable(data);
+  if (decoded) return decoded;
+  return [...data].length === 1 && !/[\u0000-\u001F\u007F-\u009F]/u.test(data) ? data : undefined;
+}
 
 async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promise<void> {
   const { manager } = runtime;
@@ -336,10 +347,26 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
   }
 
   const result = await ctx.ui.custom<{ auth: string } | undefined>((tui, theme, _kb, done) => {
-    let focus = 0;
+    let filter = "";
+    let focusedName: string | undefined = names[0];
     const busy = new Map<string, string>();
 
     const border = (s: string) => theme.fg("dim", s);
+    const visibleNames = () => {
+      const query = filter.toLowerCase();
+      return names.filter((name) => name.toLowerCase().includes(query));
+    };
+    const selectedName = () => {
+      const visible = visibleNames();
+      return focusedName && visible.includes(focusedName) ? focusedName : visible[0];
+    };
+    const moveFocus = (offset: number) => {
+      const visible = visibleNames();
+      if (!visible.length) return;
+      const current = selectedName();
+      const index = current ? visible.indexOf(current) : 0;
+      focusedName = visible[Math.max(0, Math.min(index + offset, visible.length - 1))];
+    };
 
     const contentRow = (inner: number, left: string, right: string): string => {
       const rw = visibleWidth(right);
@@ -365,10 +392,17 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
     const render = (width: number): string[] => {
       const w = Math.min(Math.max(width, 44), 78);
       const inner = w - 4;
+      const visible = visibleNames();
+      const selected = selectedName();
       const title = theme.fg("accent", theme.bold("MCP servers"));
       const used = visibleWidth("╭─ MCP servers ");
       const lines = [border("╭─ ") + title + " " + border("─".repeat(Math.max(0, w - used - 1)) + "╮")];
-      for (let i = 0; i < names.length; i++) lines.push(serverRow(names[i], inner, i === focus));
+      lines.push(contentRow(inner, theme.fg("muted", `filter: ${filter}█`), theme.fg("dim", `${visible.length}/${names.length}`)));
+      if (visible.length) {
+        for (const name of visible) lines.push(serverRow(name, inner, name === selected));
+      } else {
+        lines.push(contentRow(inner, theme.fg("dim", "No matching MCP servers."), ""));
+      }
       lines.push(border("├" + "─".repeat(w - 2) + "┤"));
       lines.push(contentRow(inner, theme.fg("dim", HELP), ""));
       lines.push(border("╰" + "─".repeat(w - 2) + "╯"));
@@ -395,16 +429,27 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
       render,
       invalidate() {},
       handleInput(data: string) {
-        const name = names[focus];
-        if (matchesKey(data, "down") || matchesKey(data, "j")) focus = Math.min(focus + 1, names.length - 1);
-        else if (matchesKey(data, "up") || matchesKey(data, "k")) focus = Math.max(focus - 1, 0);
-        else if (matchesKey(data, "escape") || matchesKey(data, "q")) return done(undefined);
-        else if (matchesKey(data, "space") || matchesKey(data, "return")) {
-          if (manager.enabled.has(name)) manager.enabled.delete(name);
-          else manager.enabled.add(name);
-          updateFooter(runtime);
-        } else if (matchesKey(data, "r")) void restart(name);
-        else if (matchesKey(data, "a")) return done({ auth: name });
+        if (matchesKey(data, Key.escape)) return done(undefined);
+        if (matchesKey(data, Key.down)) moveFocus(1);
+        else if (matchesKey(data, Key.up)) moveFocus(-1);
+        else if (matchesKey(data, Key.backspace)) filter = [...filter].slice(0, -1).join("");
+        else if (matchesKey(data, Key.space) || matchesKey(data, Key.enter)) {
+          const name = selectedName();
+          if (name) {
+            if (manager.enabled.has(name)) manager.enabled.delete(name);
+            else manager.enabled.add(name);
+            updateFooter(runtime);
+          }
+        } else if (matchesKey(data, Key.shift("r"))) {
+          const name = selectedName();
+          if (name) void restart(name);
+        } else if (matchesKey(data, Key.shift("a"))) {
+          const name = selectedName();
+          if (name) return done({ auth: name });
+        } else {
+          const text = printableInput(data);
+          if (text) filter += text;
+        }
         tui.requestRender();
       },
     };
@@ -420,7 +465,7 @@ async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: str
     ctx.ui.notify(`"${name}" is not an HTTP/OAuth server.`, "warning");
     return;
   }
-  // `a` deliberately means *re*-authenticate: a normal restart keeps the
+  // Shift+A deliberately means *re*-authenticate: a normal restart keeps the
   // stored refresh token, whereas this action must request fresh consent.
   await manager.disconnect(name);
   clearOAuthCredentials(def);
@@ -580,7 +625,7 @@ export default function (pi: ExtensionAPI) {
   registerMcpTool(pi, runtime);
 
   pi.registerCommand("mcp", {
-    description: "Open the MCP server panel (enable/disable · restart · authenticate)",
+    description: "Open the searchable MCP server panel (enable/disable · restart · authenticate)",
     handler: async (_argStr, ctx) => {
       runtime.ui = ctx.ui;
       await openPanel(runtime, ctx);

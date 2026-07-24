@@ -65,7 +65,7 @@ The minimum configuration is one server with either `command` (stdio) or `url` (
 
   Tools are advertised as `server_tool`; ambiguous bare names report the candidates.
 
-- `/mcp` command — server panel: `↑↓`/`jk` move · `space`/`enter` enable/disable · `r` restart · `a` force re-authentication (clears the server's locally saved OAuth state, then uses the interactive localhost callback + browser flow) · `esc`/`q` close.
+- `/mcp` command — searchable server panel: type to filter server names case-insensitively · `↑↓` move · `backspace` erase filter text · `space`/`enter` enable/disable the selected server · `R` (Shift+R) restart · `A` (Shift+A) force re-authentication (clears the server's locally saved OAuth state, then uses the interactive localhost callback + browser flow) · `esc` close.
 
 ## Special Setup Instructions
 
@@ -74,5 +74,5 @@ Servers default to **off** every session — curate the active set from the `/mc
 ## Limitations and Technical details
 
 - State on disk under `~/.pi/agent/mcp/`: `auth.json` (OAuth credentials, keyed by server URL — never written to `.mcp.json` or the session) and `cache.json` (tool metadata keyed by a server-identity hash, 7-day TTL). The cache lets status/list/search/describe work without a live connection; actual tool calls trigger a lazy connect. Cache is an optimization, never the source of truth.
-- Enable/disable controls whether the current session exposes a server to the agent; it does not connect or disconnect it. Restart (`r`) enables the server, replaces any live transport, and refreshes its tool metadata, while retaining OAuth credentials. Re-authenticate (`a`) also clears all locally saved OAuth state first, so the next connection must obtain fresh credentials.
+- Enable/disable controls whether the current session exposes a server to the agent; it does not connect or disconnect it. Restart (`R`, Shift+R) enables the server, replaces any live transport, and refreshes its tool metadata, while retaining OAuth credentials. Re-authenticate (`A`, Shift+A) also clears all locally saved OAuth state first, so the next connection must obtain fresh credentials.
 - Intentionally out of scope: direct-tool promotion, MCP UI/Glimpse, host-config imports (Cursor/Claude/VS Code/…), setup wizards, sampling, elicitation, and an `npx` binary resolver. This is a single-proxy MCP client, nothing more.

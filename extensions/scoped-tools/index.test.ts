@@ -31,7 +31,7 @@ async function start(spec: Record<string, unknown>) {
   const cwd = mkdtempSync(join(tmpdir(), "scoped-tools-cwd-"));
   mkdirSync(join(cwd, ".pi"));
   writeFileSync(join(cwd, ".pi", "scoped-tools.yaml"), stringify(spec));
-  process.env.PI_AGENT_DIR = agentDir;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
 
   const tools = new Map<string, RegisteredTool>();
   const events = new Map<string, (...args: any[]) => unknown>();
