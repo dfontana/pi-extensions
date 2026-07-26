@@ -38,15 +38,17 @@ Each extension has its own README covering configuration, provided tools/command
 
 ## Skills
 
-- **run-review** — adversarial review/fix workflow over working changes, a branch, files, or revisions: parallel investigations, an independent high-thinking reviewer, and a bounded fix/re-review loop.
-- **run-plan** — consolidates review feedback, delegates implementation to a persistent large-context agent, then invokes `run-review` with that implementer as the fixer.
+- **quick-review** — lightweight review/fix workflow for small, routine, low-risk, or clearly scoped changes: one reviewer covers completeness, correctness, duplication, and simplicity in each bounded round. This is the default for ordinary review requests.
+- **run-review** — full adversarial review/fix workflow for explicitly deep, comprehensive, multi-agent, broad, or high-risk reviews: four parallel investigations, an independent synthesis reviewer, and a bounded fix/re-review loop.
+- **run-plan** — consolidates review feedback, delegates implementation to a persistent large-context agent, then invokes the full `run-review` workflow with that implementer as the fixer.
 
 A repo-local **web-access-smoke-test** skill (in `.pi/skills/`, not shipped with the package) provides an end-to-end check of the web-access tools after code changes.
 
-`run-review` and `run-plan` require the separately installed `@tintinweb/pi-subagents` package; they preflight the `Agent` tools and return installation guidance rather than silently degrading.
+`quick-review`, `run-review`, and `run-plan` require the separately installed `@tintinweb/pi-subagents` package; they preflight the `Agent` tools and return installation guidance rather than silently degrading.
 
 ```text
-/skill:run-review
+/skill:quick-review
+/skill:quick-review file=extensions/example.ts
 /skill:run-review scope=branch base=main thinking=xhigh
 /skill:run-plan <review feedback and optional instructions>
 ```

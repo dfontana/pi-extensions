@@ -1,15 +1,15 @@
 ---
-name: run-review
+name: quick-review
 description: >
-  Run a full multi-agent adversarial code review using four independent investigation angles, synthesis, and a bounded fix/re-review loop. Use only for explicitly deep, comprehensive, adversarial, multi-axis, or multi-agent reviews; broad or high-risk changes; or when invoked by run-plan. For ordinary small, routine, low-risk, or clearly scoped review requests, use quick-review instead.
+  Run a lightweight single-agent code review and bounded fix/re-review loop for small, routine, low-risk, or clearly scoped changes. Use by default for ordinary review requests that do not explicitly request a deep, comprehensive, adversarial, or multi-agent audit. One reviewer checks completeness, correctness, duplication, and simplicity together.
 compatibility: Requires Pi 0.80.3+ and the @tintinweb/pi-subagents Agent tools.
 ---
 
-# Run Review
+# Quick Review
 
-Coordinate a full adversarial review of a concrete code target. Use this workflow only when its full-review criteria apply. Ordinary small, routine, low-risk, or clearly scoped review requests belong to the sibling `quick-review` skill.
+Coordinate a focused review of a concrete code target. Preserve the target resolution, model selection, evidence standards, fix loop, and reporting of the full review workflow while using one reviewer per standard round.
 
-Explicit requests for deep, comprehensive, adversarial, multi-axis, or multi-agent review always use this workflow. Broad or high-risk targets also qualify; security boundaries, authorization, destructive migrations, concurrency-critical state, and public protocol changes are normally high-risk. `run-plan` always uses this full workflow.
+Use the sibling `run-review` skill instead when the user explicitly requests a deep, comprehensive, adversarial, multi-axis, or multi-agent review, or when the target is broad or high-risk. Security boundaries, authorization, destructive migrations, concurrency-critical state, and public protocol changes are normally high-risk. When uncertain and no full-review criterion clearly applies, prefer this quick workflow.
 
 ## Invocation contract
 
@@ -31,14 +31,14 @@ Reject thinking values outside `medium|high|xhigh`. Reject intelligence values o
 Internal callers may also supply:
 
 - `fixer=coordinator` — the current coordinating session applies fixes; this is the default.
-- `fixer=agent:<id>` — synchronously resume that implementing agent with findings. `run-plan` uses this mode.
+- `fixer=agent:<id>` — synchronously resume that implementing agent with findings.
 - `requirements=<text>` — the intended behavior, consolidated feedback, or implementation plan to check for completeness.
 
 These internal fields are workflow context, not required user-facing syntax.
 
 ## 1. Preflight and resolve the target
 
-Confirm that `Agent`, `get_subagent_result`, and `steer_subagent` are available. If any are missing, stop with this installation guidance and do not degrade to a single-agent review:
+Confirm that `Agent`, `get_subagent_result`, and `steer_subagent` are available. If any are missing, stop with this installation guidance:
 
 ```bash
 pi install npm:@tintinweb/pi-subagents
@@ -63,32 +63,24 @@ Call `select_review_model` once before the first review:
 select_review_model({ intelligence: <user value or "higher">, thinking: <user value or "high"> })
 ```
 
-Pass the tool's exact `selectedModel` and `thinking` values to every angle investigator and reviewer call. Tell the user which model was selected, why, and whether higher intelligence was unavailable (the tool's `notice` field).
+Pass the tool's exact `selectedModel` and `thinking` values to every reviewer call. Tell the user which model was selected, why, and whether higher intelligence was unavailable according to the tool's `notice` field.
 
-The selector is mandatory because it reads the live session model and configured model registry. If the tool is unavailable, stop and tell the user to enable/reload this package; do not guess from settings or model names in Markdown.
+The selector is mandatory because it reads the live session model and configured model registry. If the tool is unavailable, stop and tell the user to enable or reload this package; do not guess from settings or model names in Markdown.
 
 ## 3. Run one review round
 
-For each review round, the coordinating session—not a child reviewer—owns the parallel fan-out. `@tintinweb/pi-subagents` intentionally prevents nested Agent calls.
+Read [references/reviewer-prompt.md](references/reviewer-prompt.md) in full and fill every placeholder with the exact scope, base, requirements, and prior-round context.
 
-### Parallel angle investigation
+Launch exactly one fresh, read-only reviewer for the standard round as a background `Agent` call using the selected model and thinking level. Capture its ID and retrieve its complete result with `get_subagent_result(wait=true)` before continuing. Never synthesize from a completion notification or summary.
 
-In one message, launch exactly four background `Agent` calls with `run_in_background=true`, the selected model, and selected thinking level. Give every agent the exact scope, base, requirements, prior findings/fixes, and repository rules. Mark every agent read-only. The four prompts must independently cover:
+The reviewer must independently inspect the actual repository and cover all four angles in one pass:
 
 1. **Completeness** — omitted or partial requirements, plan steps, tests, docs, migrations, error paths, integrations, and user-visible behavior.
 2. **Correctness** — logic bugs, invalid assumptions, edge cases, regressions, unsafe behavior, security, concurrency/state, API contracts, and inadequate tests.
 3. **Duplication** — existing helpers, abstractions, behavior, and tests elsewhere in the repository that the change duplicates or should consolidate.
 4. **Simplicity** — unnecessary abstraction, indirection, branching, configuration, scope, or a materially simpler correct design; no subjective style feedback.
 
-Every angle prompt must say: assume the code is wrong; inspect the actual repository; return only evidence-backed findings with file/line references or `NO FINDINGS`; do not modify files.
-
-Capture all four returned IDs. Retrieve all four complete results with `get_subagent_result(wait=true)` before continuing. Never synthesize from completion notifications or summaries.
-
-### Adversarial synthesis
-
-Read [references/reviewer-prompt.md](references/reviewer-prompt.md) in full. Fill every placeholder, including the four complete angle reports.
-
-Launch a fresh synthesis reviewer for every round as a background agent with the selected model and thinking. Capture its ID and retrieve its complete result with `get_subagent_result(wait=true)`. Fresh reviewers avoid anchoring and do not depend on the subagent package's short completed-session retention window. Each reviewer remains read-only, assumes the code is wrong, independently verifies every angle report, and returns only validated findings or exactly `CLEAN`.
+Do not launch separate angle investigators or a synthesis reviewer. The single reviewer must assume the code is wrong, verify findings directly, and return only evidence-backed findings with file/line references or exactly `CLEAN`.
 
 If a reviewer response violates the `CLEAN`/`CHANGES_REQUIRED` contract, allow one fresh corrective reviewer for that round with the same complete context. If it is still invalid, stop and report the protocol failure. Never retry without a bound.
 
@@ -97,18 +89,18 @@ If a reviewer response violates the `CLEAN`/`CHANGES_REQUIRED` contract, allow o
 There are at most three reviews. The third review is report-only.
 
 1. **Review 1**
-   - Run the complete parallel investigation and synthesis above.
+   - Run the single-reviewer round above.
    - If `CLEAN`, stop.
    - Otherwise deliver every validated finding to the fixer.
    - With `fixer=coordinator`, apply the fixes in this session.
    - With `fixer=agent:<id>`, resume that exact ID synchronously and consume the returned result directly. `pi-subagents` does not background resumed agents or return a new ID; retain the original ID. If the completed session has expired and resume returns `Agent not found`, stop and report the unresolved findings rather than creating a replacement.
    - Run focused tests/checks for the fixes. Do not claim success if they fail.
 2. **Review 2**
-   - Recompute the target, run a new four-agent parallel investigation, then launch a fresh synthesis reviewer.
+   - Recompute the target and launch one fresh reviewer.
    - If `CLEAN`, stop.
    - Otherwise use the same fixer, then run focused tests/checks again.
 3. **Review 3 — final verification**
-   - Recompute the target, run the four parallel angles, and launch a fresh synthesis reviewer.
+   - Recompute the target and launch one fresh reviewer.
    - Do not apply another fix round.
    - Return any remaining validated findings clearly as unresolved.
 
