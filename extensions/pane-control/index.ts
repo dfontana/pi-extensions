@@ -228,19 +228,39 @@ export default function (pi: ExtensionAPI) {
   // and never block session startup on the probes (up to 3s each): pi awaits
   // every session_start handler serially, so detection runs detached and
   // registers the tools (pi refreshes the tool list) or warns when it resolves.
+  //
+  // A detached probe can outlive print mode or a session reload. Discard its
+  // result when the owning extension runtime shuts down; otherwise its captured
+  // pi would try to register tools on a stale runtime. The probes already have
+  // a three-second timeout, so leaving an in-flight child alone also avoids
+  // extending shutdown with pi.exec's force-kill timer.
   let detection: Promise<DetectResult> | undefined;
   let handled = false;
+  let active = true;
+
+  pi.on("session_shutdown", () => {
+    active = false;
+  });
+
   pi.on("session_start", (_event, ctx) => {
+    if (!active) return;
     const run: Run = (cmd, args, options) => pi.exec(cmd, args, options);
     detection ??= detectBackend(process.env, run);
-    void detection.then((result) => {
-      if (handled) return;
-      handled = true;
-      if (result.backend) {
-        registerPaneTools(pi, result.backend);
-      } else {
-        ctx.ui.notify(`pane-control disabled: ${result.reason}`, "warning");
-      }
-    });
+    void detection
+      .then((result) => {
+        if (!active || handled) return;
+        handled = true;
+        if (result.backend) {
+          registerPaneTools(pi, result.backend);
+        } else {
+          ctx.ui.notify(`pane-control disabled: ${result.reason}`, "warning");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!active || handled) return;
+        handled = true;
+        const detail = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`pane-control disabled: backend detection failed: ${detail}`, "warning");
+      });
   });
 }
