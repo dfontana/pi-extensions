@@ -33,6 +33,38 @@ describe("pane-control backends", () => {
     }
   });
 
+  test("launches Kitty panes from the invoking window and does not override Zellij cwd", async () => {
+    const kitty = fakeRun(() => ({ stdout: "7\n" }));
+    await new KittyBackend(kitty.run).open({ direction: "down", name: "TUI", command: "htop" });
+    assert.deepEqual(kitty.calls, [{
+      cmd: "kitten",
+      args: [
+        "@",
+        "launch",
+        "--type=window",
+        "--location=hsplit",
+        "--keep-focus",
+        "--self",
+        "--source-window=state:self",
+        "--next-to=state:self",
+        "--cwd=current",
+        "--title=TUI",
+        "--hold",
+        "sh",
+        "-c",
+        "htop",
+      ],
+    }]);
+
+    const zellij = fakeRun(() => ({ stdout: "terminal_2\n" }));
+    await new ZellijBackend(zellij.run).open({ direction: "down", name: "TUI", command: "htop" });
+    assert.deepEqual(zellij.calls, [{
+      cmd: "zellij",
+      args: ["action", "new-pane", "-d", "down", "-n", "TUI", "--", "sh", "-c", "htop"],
+    }]);
+    assert.ok(!zellij.calls[0].args.some((arg) => arg.includes("cwd")));
+  });
+
   test("rejects an open operation when the backend does not return a pane id", async () => {
     const cases = [
       [new KittyBackend(fakeRun(() => ({ stdout: "not-a-window-id" })).run), /unexpected output/],

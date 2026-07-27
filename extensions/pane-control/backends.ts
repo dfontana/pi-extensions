@@ -21,7 +21,6 @@ export type Run = (cmd: string, args: string[], options?: ExecOptions) => Promis
 
 export interface OpenOptions {
   direction: "right" | "down";
-  cwd?: string;
   name?: string;
   command?: string;
 }
@@ -144,8 +143,11 @@ export class KittyBackend implements PaneBackend {
       "--type=window",
       `--location=${opts.direction === "down" ? "hsplit" : "vsplit"}`,
       "--keep-focus",
+      "--self",
+      "--source-window=state:self",
+      "--next-to=state:self",
+      "--cwd=current",
     ];
-    if (opts.cwd) rest.push(`--cwd=${opts.cwd}`);
     if (opts.name) rest.push(`--title=${opts.name}`);
     // --hold keeps the window open after the command exits so its final
     // output/exit state stays readable.
@@ -249,7 +251,6 @@ export class ZellijBackend implements PaneBackend {
   async open(opts: OpenOptions, signal?: AbortSignal): Promise<string> {
     const rest = ["new-pane", "-d", opts.direction];
     if (opts.name) rest.push("-n", opts.name);
-    if (opts.cwd) rest.push("--cwd", opts.cwd);
     if (opts.command) rest.push("--", "sh", "-c", opts.command);
     const out = (await this.exec("zellij action new-pane", rest, signal)).trim();
     const id = out.match(/(terminal|plugin)_\d+/)?.[0];

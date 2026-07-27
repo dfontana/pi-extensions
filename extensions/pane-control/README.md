@@ -16,7 +16,7 @@ The probes run asynchronously and are cached for the Pi process. If the terminal
 
 | Tool | Description |
 |---|---|
-| `pane_open` | Split a pane to the right or below, optionally setting its working directory, title, or `sh -c` command. Returns a `pane_id`. |
+| `pane_open` | Split a pane to the right or below in the invoking pane's current working directory, optionally setting its title or `sh -c` command. Returns a `pane_id`. |
 | `pane_send` | Type literal text, press Enter, or send named key presses such as `Ctrl+C`, `Shift+Up`, and `F5`. |
 | `pane_read` | Dump the rendered pane contents, with optional scrollback and ANSI escape sequences. |
 | `pane_close` | Close a pane and stop the process running in it. |
@@ -26,7 +26,7 @@ Pane operations are sequential: open a pane, wait for its prompt when necessary,
 
 ## Limitations and technical details
 
-- `pane_open` starts a fresh shell. It does not inherit Pi's environment variables; source any required environment files inside the pane.
+- `pane_open` starts a fresh shell in the invoking pane's current working directory. To use a different directory, `cd` after opening. It does not inherit Pi's environment variables; source any required environment files inside the pane.
 - Pane IDs are backend-specific. Use the ID returned by `pane_open` or discovered with `pane_list`.
 - Only control panes you created unless the user explicitly asks you to use an existing pane.
 - A plain pane dump does not show focus or selection colors. Use `ansi: true` to inspect styling escapes, or verify focus through behavior.

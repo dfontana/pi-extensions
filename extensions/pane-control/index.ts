@@ -48,8 +48,9 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
       `Open a new ${backend.name} terminal pane (split) next to the user's current one and return its pane_id. ` +
       "Use panes to run and observe interactive/TUI programs that cannot be driven through normal shell pipes: " +
       "open a pane, send input with pane_send, and read the rendered screen with pane_read. " +
-      "The pane starts a fresh shell (or runs `command` via sh -c) and does NOT inherit this session's " +
-      "environment variables — source env files inside the pane if the program needs them. " +
+      "The pane starts in the invoking pane's current working directory and starts a fresh shell " +
+      "(or runs `command` via sh -c). If you need a different directory, `cd` after opening. It does NOT " +
+      "inherit this session's environment variables — source env files inside the pane if the program needs them. " +
       "A fresh shell needs a moment to initialize: if pane_read shows your typed text garbled or missing, " +
       "re-send it once the prompt is visible. Close panes you opened with pane_close when done.",
     promptSnippet: "Open a terminal split pane to run/test interactive TUI programs",
@@ -59,7 +60,6 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
           description: "Where to split relative to the current pane (default right).",
         }),
       ),
-      cwd: Type.Optional(Type.String({ description: "Working directory for the pane." })),
       name: Type.Optional(Type.String({ description: "Title for the pane." })),
       command: Type.Optional(
         Type.String({
@@ -81,7 +81,6 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
       const paneId = await backend.open(
         {
           direction: params.direction ?? "right",
-          cwd: params.cwd,
           name: params.name,
           command: params.command,
         },
