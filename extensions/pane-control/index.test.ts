@@ -27,8 +27,11 @@ function setKittyEnvironment(): () => void {
   };
 }
 
-function context(notifications: string[]) {
+type Mode = "tui" | "print" | "json" | "rpc";
+
+function context(notifications: string[], mode: Mode = "tui") {
   return {
+    mode,
     ui: { notify: (message: string) => notifications.push(message) },
   };
 }
@@ -56,7 +59,7 @@ describe("pane-control index", () => {
       } as unknown as ExtensionAPI;
 
       paneControl(pi);
-      await handlers.get("session_start")!({}, context([]));
+      await handlers.get("session_start")!({}, context([], "tui"));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       const paneOpen = tools.get("pane_open");
@@ -65,6 +68,41 @@ describe("pane-control index", () => {
       assert.match(paneOpen.description, /invoking pane's current working directory/);
       assert.match(paneOpen.description, /`cd` after opening/);
       assert.match(paneOpen.description, /does NOT inherit this session's environment variables/);
+    } finally {
+      restoreEnvironment();
+    }
+  });
+
+  test("skips probe, tools, and notification for headless session starts", async () => {
+    const restoreEnvironment = setKittyEnvironment();
+    try {
+      for (const mode of ["print", "json", "rpc"] as const) {
+        const handlers = new Map<string, Handler>();
+        const registered: unknown[] = [];
+        const notifications: string[] = [];
+        let execCalls = 0;
+        const exec = async (): Promise<ExecResult> => {
+          execCalls++;
+          return { stdout: "[]", stderr: "", code: 0, killed: false };
+        };
+        const pi = {
+          on(event: string, handler: Handler) {
+            handlers.set(event, handler);
+          },
+          registerTool(tool: unknown) {
+            registered.push(tool);
+          },
+          exec,
+        } as unknown as ExtensionAPI;
+
+        paneControl(pi);
+        await handlers.get("session_start")!({}, context(notifications, mode));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        assert.equal(execCalls, 0, `${mode} should not probe a backend`);
+        assert.equal(registered.length, 0, `${mode} should not register tools`);
+        assert.deepEqual(notifications, [], `${mode} should not notify`);
+      }
     } finally {
       restoreEnvironment();
     }
@@ -92,7 +130,7 @@ describe("pane-control index", () => {
       } as unknown as ExtensionAPI;
 
       paneControl(pi);
-      await handlers.get("session_start")!({}, context(notifications));
+      await handlers.get("session_start")!({}, context(notifications, "tui"));
       await handlers.get("session_shutdown")!({});
       resolveExec({ stdout: "[]", stderr: "", code: 0, killed: false });
       await new Promise<void>((resolve) => setImmediate(resolve));

@@ -223,6 +223,10 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Pane tools are terminal/TUI-only. In-process subagent sessions inherit
+  // extensions but run headlessly, so skip them before detection to avoid
+  // competing with the active TUI for Kitty's controlling-TTY response stream.
+  //
   // Probe once per process — the terminal environment can't change under us —
   // and never block session startup on the probes (up to 3s each): pi awaits
   // every session_start handler serially, so detection runs detached and
@@ -242,7 +246,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", (_event, ctx) => {
-    if (!active) return;
+    if (!active || ctx.mode !== "tui") return;
     const run: Run = (cmd, args, options) => pi.exec(cmd, args, options);
     detection ??= detectBackend(process.env, run);
     void detection

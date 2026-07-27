@@ -4,7 +4,7 @@ Gives agents tools to open, drive, inspect, and close terminal panes, so they ca
 
 ## Configuration
 
-No configuration is required. At session start, the extension probes the active terminal environment and registers tools only when a supported backend responds:
+No configuration is required. At session start in an interactive TUI session, the extension probes the active terminal environment and registers tools only when a supported backend responds. Headless sessions skip pane initialization:
 
 1. **Kitty** — preferred when Kitty remote control is reachable. This works through `KITTY_LISTEN_ON` when set, or through Pi's controlling TTY (including an SSH/zmx session with Kitty remote-control authentication).
 2. **Zellij** — used when `ZELLIJ_SESSION_NAME` identifies a reachable Zellij session.
