@@ -3,10 +3,10 @@
  *
  * Reads standard `.mcp.json` (read-only), connects stdio + HTTP servers
  * lazily, caches tool metadata, and exposes every server through a single
- * `mcp` proxy tool (status / list / search / describe / call). Connection and
- * OAuth authentication are fully implicit: the agent never needs to connect or
- * authenticate manually. Required user recovery is through the /mcp panel
- * (Shift+R to restart, Shift+A to force re-authentication).
+ * `mcp` proxy tool. Connection and OAuth authentication are fully implicit:
+ * the agent never needs to connect or authenticate manually. Required user
+ * recovery is through the /mcp panel (Shift+R to restart, Shift+A to force
+ * re-authentication).
  *
  * Child agents spawned via pi-subagents inherit a validated point-in-time copy
  * of the parent's enabled server set through an MCP-owned process-local broker.
@@ -16,7 +16,7 @@
  * See README.md for config details.
  */
 
-import { Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
   DEFAULT_MAX_BYTES,
@@ -39,6 +39,103 @@ interface Runtime {
   manager: Manager;
   ui?: ExtensionUIContext;
 }
+
+// ---- action definitions ---------------------------------------------------
+
+export const MCP_ACTIONS = [
+  "status",
+  "list-tools",
+  "search-tools",
+  "describe-tool",
+  "invoke-tool",
+] as const;
+
+type McpArgs =
+  | { action: "status" }
+  | { action: "list-tools"; server: string }
+  | { action: "search-tools"; search: string; regex?: boolean }
+  | { action: "describe-tool"; tool: string }
+  | { action: "invoke-tool"; tool: string; args?: string };
+
+function assertNever(x: never): never {
+  throw new Error(`Unhandled MCP action: ${JSON.stringify((x as { action?: string }).action)}`);
+}
+
+// ---- hybrid provider-compatible schema ------------------------------------
+//
+// modelFacingRoot: a root Type.Object that Anthropic (and any adapter that
+// only forwards root properties/required) can present as a meaningful object
+// schema with required "action" and all argument descriptions.
+//
+// exactVariants: five exact Type.Object branches (each additionalProperties:
+// false) representing the precise valid call shapes.
+//
+// mcpParameters: Type.Unsafe combines the root object fields with the
+// anyOf union. Providers that forward the full schema get exact union
+// enforcement; Anthropic gets the root object projection; TypeBox's local
+// validator enforces anyOf for all providers.
+
+const modelFacingRoot = Type.Object(
+  {
+    action: StringEnum(MCP_ACTIONS, {
+      description: `MCP operation to perform. Choose exactly one action: ${MCP_ACTIONS.join(", ")}.`,
+    }),
+    server: Type.Optional(
+      Type.String({ description: "Required only for list-tools: the server name to list tools from." }),
+    ),
+    search: Type.Optional(
+      Type.String({ description: "Required only for search-tools: query string; space-separated terms are OR'd." }),
+    ),
+    regex: Type.Optional(
+      Type.Boolean({
+        description: "Optional only for search-tools: treat the query as a case-insensitive regex (default false).",
+      }),
+    ),
+    tool: Type.Optional(
+      Type.String({ description: "Required for describe-tool and invoke-tool: bare or server-prefixed tool name." }),
+    ),
+    args: Type.Optional(
+      Type.String({ description: "Optional only for invoke-tool: JSON object string of arguments for the tool." }),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const exactVariants = Type.Union([
+  Type.Object(
+    { action: StringEnum(["status"] as const) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: StringEnum(["list-tools"] as const), server: Type.String() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: StringEnum(["search-tools"] as const),
+      search: Type.String(),
+      regex: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { action: StringEnum(["describe-tool"] as const), tool: Type.String() },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      action: StringEnum(["invoke-tool"] as const),
+      tool: Type.String(),
+      args: Type.Optional(Type.String()),
+    },
+    { additionalProperties: false },
+  ),
+]);
+
+const mcpParameters = Type.Unsafe<McpArgs>({
+  ...modelFacingRoot,
+  anyOf: exactVariants.anyOf,
+});
 
 // ---- compact single-line rendering for the mcp tool -----------------------
 
@@ -80,13 +177,22 @@ class SingleLine {
 
 const EMPTY_COMPONENT = { render: (_w: number): string[] => [], invalidate: () => {} };
 
-function buildMcpLineParts(a: ProxyArgs | undefined): { mode: string; params: string } {
+function buildMcpLineParts(a: McpArgs | undefined): { mode: string; params: string } {
   if (!a) return { mode: "status", params: "" };
-  if (a.tool) return { mode: `call ${a.tool}`, params: a.args ?? "" };
-  if (a.search) return { mode: "search", params: `"${a.search}"` };
-  if (a.describe) return { mode: "describe", params: a.describe };
-  if (a.server) return { mode: "list", params: a.server };
-  return { mode: "status", params: "" };
+  switch (a.action) {
+    case "status":
+      return { mode: "status", params: "" };
+    case "list-tools":
+      return { mode: "list", params: a.server };
+    case "search-tools":
+      return { mode: "search", params: `"${a.search}"` };
+    case "describe-tool":
+      return { mode: "describe", params: a.tool };
+    case "invoke-tool":
+      return { mode: `call ${a.tool}`, params: a.args ?? "" };
+    default:
+      return assertNever(a);
+  }
 }
 
 function buildMcpLine(prefix: string, mode: string, params: string, theme: Theme): string {
@@ -181,8 +287,8 @@ function statusText(runtime: Runtime): string {
   });
   const hint =
     manager.enabled.size === 0
-      ? "All servers are off — enable them from the /mcp panel, then discover tools with mcp({search:'…'})."
-      : "Discover tools with mcp({search:'…'}) or mcp({server:'…'}); call with mcp({tool:'…', args:'{…}'}).";
+      ? `All servers are off — enable them from the /mcp panel, then discover tools with mcp({ action: "search-tools", search: "…" }).`
+      : `Discover tools with mcp({ action: "search-tools", search: "…" }) or mcp({ action: "list-tools", server: "…" }); call with mcp({ action: "invoke-tool", tool: "…", args: "{…}" }).`;
   return `MCP servers (${manager.enabled.size}/${names.length} enabled):\n${rows.join("\n")}\n\n${hint}`;
 }
 
@@ -270,11 +376,11 @@ async function describeText(runtime: Runtime, arg: string): Promise<string> {
     if (authFailures.size > 0) {
       const lines = [...authFailures.entries()].map(([s, m]) => `  "${s}": ${m}`);
       return (
-        `Tool "${arg}" not found in accessible servers. Try mcp({search:'${arg}'}).\n\n` +
+        `Tool "${arg}" not found in accessible servers. Try mcp({ action: "search-tools", search: "${arg}" }).\n\n` +
         `Enabled servers unavailable due to authentication failure:\n${lines.join("\n")}`
       );
     }
-    return `Tool "${arg}" not found. Try mcp({search:'${arg}'}).`;
+    return `Tool "${arg}" not found. Try mcp({ action: "search-tools", search: "${arg}" }).`;
   }
   if ("ambiguous" in r) return `"${arg}" is ambiguous: ${r.ambiguous.join(", ")}. Use a qualified name.`;
   const t = (await manager.metadata(r.server)).find((x) => x.name === r.tool)!;
@@ -289,19 +395,14 @@ async function describeText(runtime: Runtime, arg: string): Promise<string> {
   ].join("\n");
 }
 
-interface ProxyArgs {
-  server?: string;
-  search?: string;
-  describe?: string;
-  tool?: string;
-  args?: string;
-  regex?: boolean;
-}
-
-async function callToolResult(runtime: Runtime, p: ProxyArgs, signal?: AbortSignal) {
+async function callToolResult(
+  runtime: Runtime,
+  p: Extract<McpArgs, { action: "invoke-tool" }>,
+  signal?: AbortSignal,
+) {
   const { manager } = runtime;
   const args = parseArgs(p.args);
-  const r = await resolve(runtime, p.tool!);
+  const r = await resolve(runtime, p.tool);
   if (r === "none") {
     const authFailures = manager.getAuthFailures();
     if (authFailures.size > 0) {
@@ -310,7 +411,9 @@ async function callToolResult(runtime: Runtime, p: ProxyArgs, signal?: AbortSign
         `Tool "${p.tool}" not found in accessible servers. Enabled servers unavailable due to authentication failure: ${names}. Use /mcp (Shift+A) to re-authenticate.`,
       );
     }
-    throw new Error(`Tool "${p.tool}" not found. Use mcp({search:'…'}) to discover tools, or enable its server from /mcp.`);
+    throw new Error(
+      `Tool "${p.tool}" not found. Use mcp({ action: "search-tools", search: "…" }) to discover tools, or enable its server from /mcp.`,
+    );
   }
   if ("ambiguous" in r) throw new Error(`Tool "${p.tool}" is ambiguous: ${r.ambiguous.join(", ")}.`);
   try {
@@ -551,33 +654,40 @@ function consumeSnapshot(suffix: string): McpEnabledSnapshot | undefined {
 // ---- registration ----------------------------------------------------------
 
 function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: string[] = []): void {
+  const actionList = MCP_ACTIONS.join(", ");
   pi.registerTool({
     name: "mcp",
     label: "MCP",
     description:
-      "Proxy for configured MCP servers. Modes (pass exactly one): mcp({}) → server status; " +
-      "mcp({server}) → list a server's tools; mcp({search}) → find tools across enabled servers; " +
-      "mcp({describe}) → a tool's schema; mcp({tool, args}) → call a tool (args is a JSON object string). " +
+      "Proxy for configured MCP servers. " +
+      `Choose exactly one action: ${actionList}. ` +
+      'mcp({ action: "status" }) → server status; ' +
+      'mcp({ action: "list-tools", server: "…" }) → list a server\'s tools; ' +
+      'mcp({ action: "search-tools", search: "…" }) → find tools across enabled servers; ' +
+      'mcp({ action: "describe-tool", tool: "…" }) → a tool\'s schema; ' +
+      'mcp({ action: "invoke-tool", tool: "…", args: "{…}" }) → call a tool (args is a JSON object string). ' +
       "Connection and authentication are implicit — do not attempt to connect or authenticate manually. " +
       "If a server is unavailable due to authentication failure, escalate to the user to recover via " +
-      "the /mcp panel (Shift+R to restart, Shift+A to force re-authentication).",
+      "the /mcp panel (Shift+R to restart, Shift+A to force re-authentication). " +
+      "Only enabled servers are reachable — the user controls enablement through /mcp.",
     promptSnippet:
-      "Reach MCP servers: status mcp({}), search, describe, and call tools via mcp({tool, args})" +
+      `Reach MCP servers via the mcp tool with action: ${actionList}. ` +
+      'Status: mcp({ action: "status" }); ' +
+      'search: mcp({ action: "search-tools", search: "…" }); ' +
+      'describe: mcp({ action: "describe-tool", tool: "…" }); ' +
+      'call: mcp({ action: "invoke-tool", tool: "…", args: "{…}" })' +
       (configuredServers.length ? `. Configured MCP servers: ${configuredServers.join(", ")}.` : ""),
     promptGuidelines: [
-      "Use mcp to reach MCP servers: mcp({}) for status, mcp({search:'…'}) to find tools, mcp({describe:'…'}) for a tool's schema, then mcp({tool:'…', args:'{…}'}) to call it. Only enabled servers are reachable — if a needed server is off, ask the user to enable it from the /mcp panel.",
+      `Use mcp to reach MCP servers. Choose exactly one action: ${actionList}. ` +
+        'mcp({ action: "status" }) for server status; ' +
+        'mcp({ action: "list-tools", server: "…" }) to list a server\'s tools (cache or lazy connect); ' +
+        'mcp({ action: "search-tools", search: "…" }) to find tools across enabled servers (space-separated terms are OR\'d; regex: true for regex mode); ' +
+        'mcp({ action: "describe-tool", tool: "…" }) for one tool\'s server, description, and input schema; ' +
+        'mcp({ action: "invoke-tool", tool: "…", args: "{…}" }) to call a tool (args is a JSON object string; tool may be bare or server_tool). ' +
+        "Only enabled servers are reachable — if a needed server is off, ask the user to enable it from the /mcp panel.",
       "Connection and OAuth authentication are fully automatic — do not attempt to trigger a connection or authenticate manually. If authentication fails, tell the user and ask them to recover via /mcp (Shift+R to restart, Shift+A to re-authenticate). Do not retry authentication automatically.",
     ],
-    parameters: Type.Object({
-      server: Type.Optional(Type.String({ description: "List this server's tools (cache or lazy connect)." })),
-      search: Type.Optional(
-        Type.String({ description: "Search tool names/descriptions across enabled servers; space-separated terms are OR'd." }),
-      ),
-      describe: Type.Optional(Type.String({ description: "Show one tool's server, description, and input schema." })),
-      tool: Type.Optional(Type.String({ description: "Tool to call (bare name or server-prefixed)." })),
-      args: Type.Optional(Type.String({ description: "JSON object string of arguments for the tool." })),
-      regex: Type.Optional(Type.Boolean({ description: "Treat the search query as a case-insensitive regular expression." })),
-    }),
+    parameters: mcpParameters,
 
     renderCall(args, theme, context) {
       const state = context.state as McpRowState;
@@ -588,7 +698,7 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
       const comp = (context.lastComponent as SingleLine | undefined) ?? new SingleLine();
       state.invalidateFn = context.invalidate;
 
-      const a = args as ProxyArgs | undefined;
+      const a = args as McpArgs | undefined;
       const { mode, params } = buildMcpLineParts(a);
 
       if (!state.done) {
@@ -626,17 +736,30 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
 
       if (!expanded) return EMPTY_COMPONENT;
 
-      const a = context.args as ProxyArgs | undefined;
+      const a = context.args as McpArgs | undefined;
       const lines: string[] = [];
 
-      if (a?.tool && a.args && a.args !== "{}") {
-        lines.push(theme.fg("muted", "args: ") + theme.fg("dim", a.args));
-      } else if (a?.search) {
-        lines.push(theme.fg("muted", "query: ") + theme.fg("dim", a.search));
-      } else if (a?.describe) {
-        lines.push(theme.fg("muted", "tool: ") + theme.fg("dim", a.describe));
-      } else if (a?.server) {
-        lines.push(theme.fg("muted", "server: ") + theme.fg("dim", a.server));
+      if (a) {
+        switch (a.action) {
+          case "status":
+            break;
+          case "list-tools":
+            lines.push(theme.fg("muted", "server: ") + theme.fg("dim", a.server));
+            break;
+          case "search-tools":
+            lines.push(theme.fg("muted", "query: ") + theme.fg("dim", a.search));
+            break;
+          case "describe-tool":
+            lines.push(theme.fg("muted", "tool: ") + theme.fg("dim", a.tool));
+            break;
+          case "invoke-tool":
+            if (a.args && a.args !== "{}") {
+              lines.push(theme.fg("muted", "args: ") + theme.fg("dim", a.args));
+            }
+            break;
+          default:
+            assertNever(a);
+        }
       }
 
       const content = result.content[0];
@@ -648,13 +771,22 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
       return new Text(lines.join("\n"), 0, 0);
     },
 
-    async execute(_id, p: ProxyArgs, signal, _onUpdate, ctx) {
+    async execute(_id, p: McpArgs, signal, _onUpdate, ctx) {
       runtime.ui = ctx.ui;
-      if (p.tool) return callToolResult(runtime, p, signal ?? ctx.signal);
-      if (p.describe) return asText(await describeText(runtime, p.describe));
-      if (p.search) return asText(await searchText(runtime, p.search, p.regex));
-      if (p.server) return asText(await listServerText(runtime, p.server));
-      return asText(statusText(runtime));
+      switch (p.action) {
+        case "status":
+          return asText(statusText(runtime));
+        case "list-tools":
+          return asText(await listServerText(runtime, p.server));
+        case "search-tools":
+          return asText(await searchText(runtime, p.search, p.regex));
+        case "describe-tool":
+          return asText(await describeText(runtime, p.tool));
+        case "invoke-tool":
+          return callToolResult(runtime, p, signal ?? ctx.signal);
+        default:
+          return assertNever(p);
+      }
     },
   });
 }

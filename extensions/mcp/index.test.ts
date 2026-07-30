@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 
 const testAgentDir = mkdtempSync(join(tmpdir(), "mcp-agent-"));
 process.env.PI_CODING_AGENT_DIR = testAgentDir;
 process.on("exit", () => rmSync(testAgentDir, { recursive: true, force: true }));
 
-const { default: mcpExtension } = await import("./index.ts");
+const { default: mcpExtension, MCP_ACTIONS } = await import("./index.ts");
 
 interface Binding {
   tool: {
@@ -19,6 +20,8 @@ interface Binding {
     promptGuidelines?: string[];
     parameters: Record<string, unknown>;
     execute: (...args: any[]) => Promise<{ content: Array<{ text: string }> }>;
+    renderCall?: (args: any, theme: any, context: any) => { render(width: number): string[] };
+    renderResult?: (result: any, options: any, theme: any, context: any) => { render(width: number): string[] };
   };
   commands: Map<string, { handler: (argStr: string, ctx: any) => Promise<void> }>;
   events: Map<string, (...args: any[]) => Promise<void>>;
@@ -141,58 +144,275 @@ async function enableFirstServer(binding: Binding, cwd: string): Promise<void> {
 }
 
 async function assertEnabledCount(binding: Binding, cwd: string, count: number, message?: string): Promise<void> {
-  const status = await binding.tool.execute("id", {}, undefined, undefined, context(cwd));
+  const status = await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd));
   assert.match(status.content[0].text, new RegExp(`MCP servers \\(${count}/\\d+ enabled\\)`), message);
 }
 
+// ---- schema validation helper ---------------------------------------------
+
+function validate(binding: Binding, args: Record<string, unknown>) {
+  return validateToolArguments(
+    { name: "mcp", description: binding.tool.description, parameters: binding.tool.parameters } as any,
+    { type: "toolCall" as const, id: "1", name: "mcp", arguments: args },
+  );
+}
+
+function expectInvalid(binding: Binding, args: Record<string, unknown>, label: string) {
+  assert.throws(() => validate(binding, args), (e) => e instanceof Error, `should reject: ${label}`);
+}
+
 describe("mcp index", () => {
-  it("seeds the tool prompt with configured server names", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-prompt-"));
-    const server = "prompt server (raw)";
-    writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { [server]: {} } }));
+  // ---- schema contract tests -----------------------------------------------
 
-    const binding = bind();
-    const sessionStart = binding.events.get("session_start");
-    assert.ok(sessionStart);
+  describe("mcp schema", () => {
+    it("exposes the hybrid schema and compatible root projection", () => {
+      const binding = bind();
+      const schema = binding.tool.parameters as Record<string, unknown>;
+      const projection = {
+        type: schema.type,
+        properties: schema.properties,
+        required: schema.required,
+      };
+      const props = projection.properties as Record<string, unknown>;
 
-    await sessionStart({}, context(cwd));
+      assert.equal(projection.type, "object");
+      assert.deepEqual(projection.required, ["action"]);
+      assert.equal(schema.additionalProperties, false);
+      for (const key of ["action", "server", "search", "regex", "tool", "args"]) {
+        assert.ok(key in props, `root projection must contain "${key}"`);
+      }
+      assert.ok(!("connect" in props), "schema must not have 'connect' field");
 
-    const promptSnippet = binding.tool.promptSnippet ?? "";
-    assert.match(promptSnippet, /Configured MCP servers:/);
-    assert.ok(promptSnippet.includes(server));
+      const actionSchema = props.action as Record<string, unknown>;
+      assert.equal(actionSchema.type, "string");
+      assert.deepEqual(
+        [...(actionSchema.enum as string[])].sort(),
+        [...MCP_ACTIONS].sort(),
+        "action enum must match MCP_ACTIONS",
+      );
+
+      const anyOf = schema.anyOf as unknown[];
+      assert.ok(Array.isArray(anyOf));
+      assert.equal(anyOf.length, 5, "anyOf must have exactly 5 branches");
+    });
+
+    const validCases: Array<{ label: string; args: Record<string, unknown> }> = [
+      { label: "status", args: { action: "status" } },
+      { label: "list-tools", args: { action: "list-tools", server: "datadog" } },
+      { label: "search-tools without regex", args: { action: "search-tools", search: "monitor" } },
+      { label: "search-tools with regex:false", args: { action: "search-tools", search: "monitor", regex: false } },
+      { label: "search-tools with regex:true", args: { action: "search-tools", search: "^mon", regex: true } },
+      { label: "describe-tool", args: { action: "describe-tool", tool: "datadog_get_monitor" } },
+      { label: "invoke-tool without args", args: { action: "invoke-tool", tool: "datadog_get_monitor" } },
+      { label: "invoke-tool with args", args: { action: "invoke-tool", tool: "datadog_get_monitor", args: '{"id":123}' } },
+    ];
+
+    it("accepts valid canonical shapes", () => {
+      const binding = bind();
+      for (const { label, args } of validCases) {
+        assert.doesNotThrow(() => validate(binding, args), `should accept: ${label}`);
+      }
+    });
+
+    const invalidCases: Array<{ label: string; args: Record<string, unknown> }> = [
+      { label: "legacy mcp({})", args: {} },
+      { label: 'legacy mcp({server:"datadog"})', args: { server: "datadog" } },
+      { label: 'legacy mcp({tool:"…"})', args: { tool: "datadog_get_monitor" } },
+      { label: "unknown action: connect", args: { action: "connect" } },
+      { label: "unknown action: auth-start", args: { action: "auth-start" } },
+      { label: "unknown action: unknown", args: { action: "unknown" } },
+      { label: "extra property on status", args: { action: "status", unknownField: "xyz" } },
+      { label: "status + server", args: { action: "status", server: "datadog" } },
+      { label: "status + search", args: { action: "status", search: "monitor" } },
+      { label: "list-tools + search", args: { action: "list-tools", server: "datadog", search: "monitor" } },
+      { label: "search-tools + server", args: { action: "search-tools", search: "monitor", server: "datadog" } },
+      { label: "regex on invoke-tool", args: { action: "invoke-tool", tool: "datadog_get_monitor", regex: true } },
+      { label: "args on describe-tool", args: { action: "describe-tool", tool: "datadog_get_monitor", args: '{"x":1}' } },
+      { label: "args on search-tools", args: { action: "search-tools", search: "monitor", args: "{}" } },
+      { label: "list-tools without server", args: { action: "list-tools" } },
+      { label: "search-tools without search", args: { action: "search-tools" } },
+      { label: "describe-tool without tool", args: { action: "describe-tool" } },
+      { label: "invoke-tool without tool", args: { action: "invoke-tool" } },
+      { label: "args as object instead of string", args: { action: "invoke-tool", tool: "datadog_get_monitor", args: { id: 123 } as any } },
+    ];
+
+    it("rejects invalid, legacy, and cross-action shapes", () => {
+      const binding = bind();
+      for (const { label, args } of invalidCases) expectInvalid(binding, args, label);
+    });
   });
 
-  it("schema, description, and guidelines contain no connect or action lifecycle modes", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-schema-"));
+  // ---- prompt contract tests -----------------------------------------------
 
-    const binding = bind();
+  describe("mcp prompt", () => {
+    it("exposes canonical actions, configured servers, and recovery guidance", async () => {
+      const cwd = mkdtempSync(join(tmpdir(), "mcp-prompt-"));
+      const server = "prompt server (raw)";
+      writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { [server]: {} } }));
 
-    // Schema must not expose 'connect' or 'action' fields.
-    const schema = binding.tool.parameters as { properties?: Record<string, unknown> };
-    assert.ok(!("connect" in (schema.properties ?? {})), "schema must not have 'connect' field");
-    assert.ok(!("action" in (schema.properties ?? {})), "schema must not have 'action' field");
+      const binding = bind();
+      await sessionStart(cwd, binding, context(cwd));
 
-    // Description must not mention 'connect' or 'auth-start'/'auth-complete'.
-    const desc = binding.tool.description;
-    assert.doesNotMatch(desc, /mcp\(\{connect\}/, "description must not advertise connect mode");
-    assert.doesNotMatch(desc, /auth-start/, "description must not advertise auth-start");
-    assert.doesNotMatch(desc, /auth-complete/, "description must not advertise auth-complete");
+      const description = binding.tool.description;
+      const guidelines = (binding.tool.promptGuidelines ?? []).join("\n");
+      const snippet = binding.tool.promptSnippet ?? "";
+      const prompt = [description, guidelines, snippet].join("\n");
 
-    // Guidelines must not instruct the agent to connect or authenticate manually.
-    const guidelines = binding.tool.promptGuidelines ?? [];
-    const guideText = guidelines.join("\n");
-    assert.doesNotMatch(guideText, /mcp\(\{connect\}/, "guidelines must not reference connect mode");
-    assert.doesNotMatch(guideText, /auth-start/, "guidelines must not reference auth-start");
-    assert.doesNotMatch(guideText, /auth-complete/, "guidelines must not reference auth-complete");
-    // Guidelines should mention that authentication is automatic and recovery uses /mcp.
-    assert.match(guideText, /automatic|implicit/i, "guidelines should mention automatic auth");
-    assert.match(guideText, /\/mcp|Shift\+[AR]/i, "guidelines should reference /mcp panel recovery");
+      for (const action of MCP_ACTIONS) {
+        assert.ok(prompt.includes(action), `action "${action}" must appear in prompt surfaces`);
+      }
+      for (const form of [/action:\s*"status"/, /action:\s*"search-tools"/, /action:\s*"invoke-tool"/]) {
+        assert.match(prompt, form, "prompt must show canonical action calls");
+      }
+      for (const form of [/mcp\(\{connect/, /auth-start/, /auth-complete/]) {
+        assert.doesNotMatch(prompt, form, "prompt must not advertise lifecycle actions");
+      }
 
-    await sessionStart(cwd, binding, context(cwd));
-    const snippet = binding.tool.promptSnippet ?? "";
-    assert.doesNotMatch(snippet, /connect/, "prompt snippet must not mention connect");
-    assert.doesNotMatch(snippet, /auth-start/, "prompt snippet must not mention auth-start");
+      assert.match(guidelines, /automatic|implicit/i);
+      assert.match(guidelines, /\/mcp|Shift\+[AR]/i);
+      assert.match(snippet, /Configured MCP servers:/);
+      assert.ok(snippet.includes(server));
+      assert.doesNotMatch(snippet, /connect|auth-start|auth-complete/);
+    });
   });
+
+  // ---- dispatch / render tests ---------------------------------------------
+
+  describe("mcp dispatch", () => {
+    const dispatchCases: Array<{
+      label: string;
+      args: Record<string, unknown>;
+      expected: RegExp[];
+      rejects?: boolean;
+    }> = [
+      { label: "status returns server list", args: { action: "status" }, expected: [/MCP servers/] },
+      {
+        label: "search-tools reports no matches for disabled servers",
+        args: { action: "search-tools", search: "anything" },
+        expected: [/No enabled servers|No tools match/],
+      },
+      {
+        label: "list-tools reports an unknown server",
+        args: { action: "list-tools", server: "nonexistent" },
+        expected: [/Unknown server "nonexistent"/],
+      },
+      {
+        label: "describe-tool reports an unknown tool and search hint",
+        args: { action: "describe-tool", tool: "nonexistent_tool" },
+        expected: [/not found/, /action:\s*"search-tools"/],
+      },
+      {
+        label: "invoke-tool throws for an unknown tool with search hint",
+        args: { action: "invoke-tool", tool: "nonexistent_tool" },
+        expected: [/not found/, /search-tools/],
+        rejects: true,
+      },
+    ];
+
+    for (const { label, args, expected, rejects } of dispatchCases) {
+      it(label, async () => {
+        const cwd = mkdtempSync(join(tmpdir(), "mcp-dispatch-"));
+        writeServerConfig(cwd, ["some-server"]);
+        const binding = bind();
+        await sessionStart(cwd, binding, context(cwd));
+        const execute = () => binding.tool.execute("id", args, undefined, undefined, context(cwd));
+
+        if (rejects) {
+          await assert.rejects(execute, (e: Error) => {
+            for (const matcher of expected) assert.match(e.message, matcher);
+            return true;
+          });
+        } else {
+          const text = (await execute()).content[0].text;
+          for (const matcher of expected) assert.match(text, matcher);
+        }
+      });
+    }
+  });
+
+  // ---- render contract tests -----------------------------------------------
+  describe("mcp render", () => {
+    function makeRenderCtx(args: Record<string, unknown>): any {
+      return {
+        args,
+        toolCallId: "test-id",
+        invalidate: () => {},
+        lastComponent: undefined,
+        // done=false, spinnerTimer pre-set to a truthy sentinel so the
+        // production code skips creating a real setInterval (and avoids the
+        // keyHint call that requires the interactive theme to be initialized).
+        // clearInterval(1) is a safe no-op for an unknown timer id.
+        state: { done: false, isError: false, frameIdx: 0, spinnerTimer: 1 as any },
+        cwd: "/tmp",
+        executionStarted: true,
+        argsComplete: true,
+        isPartial: false,
+        expanded: true,
+        showImages: false,
+        isError: false,
+      };
+    }
+
+    function makeResult(text: string): any {
+      return { content: [{ type: "text", text }], details: undefined };
+    }
+
+    const renderCallCases: Array<[string, Record<string, unknown>, string[]]> = [
+      ["status", { action: "status" }, ["mcp", "status"]],
+      ["list-tools", { action: "list-tools", server: "myserver" }, ["mcp", "list", "myserver"]],
+      ["search-tools", { action: "search-tools", search: "monitor" }, ["mcp", "search", '"monitor"']],
+      ["describe-tool", { action: "describe-tool", tool: "svc_get_x" }, ["mcp", "describe", "svc_get_x"]],
+      ["invoke-tool with args", { action: "invoke-tool", tool: "svc_get_x", args: '{"n":1}' }, ["mcp", "call svc_get_x", '{"n":1}']],
+      ["invoke-tool without args", { action: "invoke-tool", tool: "svc_get_x" }, ["mcp", "call svc_get_x"]],
+    ];
+
+    for (const [label, args, wantInOutput] of renderCallCases) {
+      it(`renderCall summary: ${label}`, () => {
+        const binding = bind();
+        assert.ok(binding.tool.renderCall, "renderCall must be registered on the mcp tool");
+        const output = binding.tool.renderCall!(args, testTheme, makeRenderCtx(args)).render(160).join(" ");
+        for (const want of wantInOutput) assert.ok(output.includes(want), `"${label}" must include "${want}"`);
+      });
+    }
+
+    const renderResultCases: Array<[string, Record<string, unknown>, string, string | undefined, string | undefined]> = [
+      ["status — result text rendered, no context line", { action: "status" }, "servers ok", "servers ok", "server:"],
+      ["list-tools — shows server", { action: "list-tools", server: "myserver" }, "tool_a — does a", "server: myserver", undefined],
+      ["search-tools — shows query", { action: "search-tools", search: "monitor" }, '1 match for "monitor"', "query: monitor", undefined],
+      ["describe-tool — shows tool", { action: "describe-tool", tool: "svc_get_x" }, "input schema: {}", "tool: svc_get_x", undefined],
+      ["invoke-tool with args — shows args", { action: "invoke-tool", tool: "svc_get_x", args: '{"n":1}' }, "done", 'args: {"n":1}', undefined],
+      ["invoke-tool without args — no args line", { action: "invoke-tool", tool: "svc_get_x" }, "done", undefined, "args:"],
+    ];
+
+    for (const [label, args, resultText, wantLine, noLine] of renderResultCases) {
+      it(`renderResult expanded: ${label}`, () => {
+        const binding = bind();
+        assert.ok(binding.tool.renderResult, "renderResult must be registered on the mcp tool");
+        const output = binding.tool.renderResult!(
+          makeResult(resultText),
+          { expanded: true, isPartial: false },
+          testTheme,
+          makeRenderCtx(args),
+        ).render(200).join("\n");
+        if (wantLine) assert.ok(output.includes(wantLine), `"${label}" must include "${wantLine}"`);
+        if (noLine) assert.ok(!output.includes(noLine), `"${label}" must not include "${noLine}"`);
+      });
+    }
+
+    it("renderResult collapsed returns empty component", () => {
+      const binding = bind();
+      assert.ok(binding.tool.renderResult, "renderResult must be registered on the mcp tool");
+      const comp = binding.tool.renderResult!(
+        makeResult("some result"),
+        { expanded: false, isPartial: false },
+        testTheme,
+        makeRenderCtx({ action: "status" }),
+      );
+      assert.deepEqual(comp.render(120), [], "collapsed renderResult must render no lines");
+    });
+  });
+
+  // ---- lifecycle/broker tests (preserved from prior plan) -------------------
 
   it("keeps enabled servers isolated between extension factory bindings", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "mcp-session-"));
@@ -259,7 +479,7 @@ describe("mcp index", () => {
 
     harness.panel.handleInput("\x1b");
     await result;
-    const status = await binding.tool.execute("id", {}, undefined, undefined, context(cwd));
+    const status = await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd));
     assert.match(status.content[0].text, /MCP servers \(1\/\d+ enabled\)/);
   });
 
@@ -279,7 +499,7 @@ describe("mcp index", () => {
     assert.match(restartPanel.harness.panel.render(78).join("\n"), /connecting…/);
     restartPanel.harness.panel.handleInput("\x1b");
     await restartPanel.result;
-    const restartStatus = await restartBinding.tool.execute("id", {}, undefined, undefined, context(restartCwd));
+    const restartStatus = await restartBinding.tool.execute("id", { action: "status" }, undefined, undefined, context(restartCwd));
     assert.match(restartStatus.content[0].text, /MCP servers \(1\/\d+ enabled\)/);
 
     const authCwd = mkdtempSync(join(tmpdir(), "mcp-panel-auth-"));

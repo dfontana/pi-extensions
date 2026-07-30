@@ -51,15 +51,26 @@ The minimum configuration is one server with either `command` (stdio) or `url` (
 
 ## Provides
 
-- `mcp` tool — one proxy tool, several modes (pass exactly one):
+- `mcp` tool — one proxy tool, one required `action` field. Pass exactly one action:
 
-  | Call | Does |
-  |---|---|
-  | `mcp({})` | Status of every server (state + tool counts) |
-  | `mcp({ server })` | List a server's tools |
-  | `mcp({ search })` | Substring search across enabled servers; space-separated terms are OR'd; `regex: true` for regex |
-  | `mcp({ describe })` | One tool's server, description, and input schema |
-  | `mcp({ tool, args })` | Call a tool; `args` is a JSON object string; `tool` may be bare or `server_tool` |
+  | Action | Required fields | Optional fields | Does |
+  |---|---|---|---|
+  | `"status"` | — | — | Status of every configured server (state + tool counts) |
+  | `"list-tools"` | `server` | — | List all tools exposed by the named server |
+  | `"search-tools"` | `search` | `regex` | Substring search across all enabled servers; space-separated terms are OR'd; `regex: true` for regex |
+  | `"describe-tool"` | `tool` | — | One tool's server, description, and input schema |
+  | `"invoke-tool"` | `tool` | `args` | Call a tool; `args` is a JSON object string; `tool` may be bare or `server_tool` |
+
+  Canonical call shapes:
+
+  ```ts
+  mcp({ action: "status" })
+  mcp({ action: "list-tools", server: "datadog" })
+  mcp({ action: "search-tools", search: "monitor" })
+  mcp({ action: "search-tools", search: "^mon", regex: true })
+  mcp({ action: "describe-tool", tool: "datadog_get_monitor" })
+  mcp({ action: "invoke-tool", tool: "datadog_get_monitor", args: '{"id": 123}' })
+  ```
 
   Tools are advertised as `server_tool`; ambiguous bare names report the candidates.
 
