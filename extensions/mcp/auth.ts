@@ -6,12 +6,17 @@
  * by server URL. The SDK's `auth()` helper drives PKCE + dynamic client
  * registration + token exchange/refresh against that provider.
  *
- * Three entry points:
- *   - `authInteractive` — TUI flow: spins a localhost callback server, opens the
- *     browser, waits for the redirect, exchanges the code.
- *   - `authStart` / `authComplete` — headless flow: returns the URL to open, then
- *     completes from the pasted redirect URL (PKCE state survives via auth.json).
- *   - `clientCredentials` grant is non-interactive (no redirect).
+ * Two entry points for callers:
+ *   - `authImplicit` — coalesced implicit flow used by the manager when a lazy
+ *     connect returns UnauthorizedError. Opens a browser only once per URL even
+ *     with concurrent callers; respects a 120-second end-to-end deadline.
+ *   - `authInteractive` — explicit re-auth flow for the /mcp panel (Shift+A).
+ *     Always bypasses the coalescing cache so the user gets a fresh flow.
+ *   - `clientCredentials` grant is non-interactive (no redirect) in both paths.
+ *
+ * Both functions throw `AuthError` on failure with a named-server, do-not-retry
+ * message. The manager latches that error per session; subsequent automatic
+ * calls fail fast without opening another browser.
  */
 
 import { spawn } from "node:child_process";
@@ -26,13 +31,34 @@ import type {
 import { readState, type ServerDef, writeState } from "./config.ts";
 
 const AUTH_FILE = "auth.json";
-// Stable redirect for the headless flow (the page never loads — the user copies
-// the address-bar URL), so it must be identical across auth-start/auth-complete.
-const MANUAL_REDIRECT = "http://localhost:33418/callback";
+
+/** End-to-end deadline for a complete auth operation (discovery → browser → callback → token). */
+export const AUTH_DEADLINE_MS = 120_000;
 
 // OAuth servers can silently expire DCR registrations.  Re-register after this
 // period so stale client_ids never reach the authorization endpoint.
 const CLIENT_REGISTRATION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 h
+
+// ---- AuthError -------------------------------------------------------------
+
+/**
+ * Thrown when MCP OAuth authentication fails, times out, or is cancelled.
+ * The message names the server and tells the agent not to retry automatically.
+ * The manager latches this error per session.
+ */
+export class AuthError extends Error {
+  readonly serverName: string;
+  /** Marks this as an explicit do-not-retry auth failure. */
+  readonly isAuthError = true as const;
+
+  constructor(message: string, serverName: string) {
+    super(message);
+    this.name = "AuthError";
+    this.serverName = serverName;
+  }
+}
+
+// ---- Storage ---------------------------------------------------------------
 
 interface AuthRecord {
   client?: OAuthClientInformationFull;
@@ -70,8 +96,6 @@ class FileProvider implements OAuthClientProvider {
       redirect_uris: this.redirectUrl ? [this.redirectUrl] : [],
       grant_types: cc ? ["client_credentials"] : ["authorization_code", "refresh_token"],
       response_types: ["code"],
-      // Public PKCE clients authenticate with "none"; only advertise a secret
-      // method when a secret is actually in play (client_credentials / configured).
       token_endpoint_auth_method: confidential ? "client_secret_post" : "none",
       scope: this.def.oauth?.scope,
     };
@@ -118,17 +142,30 @@ class FileProvider implements OAuthClientProvider {
   }
 }
 
-// ---- helpers ---------------------------------------------------------------
+// ---- Helpers ---------------------------------------------------------------
 
-function openBrowser(url: string): void {
+/**
+ * Spawn the platform browser launcher and resolve when it exits successfully.
+ * Rejects if the launcher cannot be spawned or exits nonzero.
+ */
+async function openBrowser(url: string): Promise<void> {
   const win = process.platform === "win32";
   const cmd = process.platform === "darwin" ? "open" : win ? "cmd" : "xdg-open";
   const args = win ? ["/c", "start", "", url] : [url];
-  try {
-    spawn(cmd, args, { detached: true, stdio: "ignore" }).unref();
-  } catch {
-    /* best effort */
-  }
+  await new Promise<void>((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cmd, args, { stdio: "ignore" });
+    } catch (e) {
+      return reject(new Error(`Cannot spawn browser launcher "${cmd}": ${(e as Error).message}`));
+    }
+    child.once("error", (e) => reject(new Error(`Browser launcher "${cmd}" failed: ${e.message}`)));
+    child.once("close", (code) => {
+      child.unref();
+      if (code === 0 || code === null) resolve();
+      else reject(new Error(`Browser launcher "${cmd}" exited with code ${code}`));
+    });
+  });
 }
 
 const RESULT_PAGE = (ok: boolean, detail: string) =>
@@ -176,30 +213,153 @@ async function startCallback(redirectUri?: string): Promise<{
 function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return p;
   return new Promise<T>((res, rej) => {
-    if (signal.aborted) return rej(new Error("cancelled"));
+    // Always attach fulfillment/rejection handlers to p so its eventual
+    // settlement is observed regardless of which side wins the race.
+    // This prevents unhandled-rejection noise after cancellation.
+    if (signal.aborted) {
+      p.then(undefined, () => { /* observed; signal already won */ });
+      return rej(new Error("cancelled"));
+    }
     const onAbort = () => rej(new Error("cancelled"));
     signal.addEventListener("abort", onAbort, { once: true });
-    const done = () => signal.removeEventListener("abort", onAbort);
-    p.then((v) => (done(), res(v)), (e) => (done(), rej(e)));
+    p.then(
+      (v) => { signal.removeEventListener("abort", onAbort); res(v); },
+      (e) => { signal.removeEventListener("abort", onAbort); rej(e); },
+    );
   });
 }
 
-// ---- public API ------------------------------------------------------------
+// ---- DCR staleness ---------------------------------------------------------
 
 /**
- * Returns true when the stored DCR client for `serverUrl` is absent, has no
- * `registeredAt` timestamp (written by older versions), or is older than
- * CLIENT_REGISTRATION_MAX_AGE_MS.  In those cases the caller should invalidate
- * the stored client before starting a new authorization flow so that fresh DCR
- * runs and the authorization URL uses a valid client_id.
+ * Returns true when the stored DCR client for `serverUrl` is absent (no-op),
+ * lacks a `registeredAt` timestamp (old record), or is older than
+ * CLIENT_REGISTRATION_MAX_AGE_MS. Callers should invalidate the stored client
+ * before starting a new authorization flow so fresh DCR runs.
  */
 function isDcrStale(serverUrl: string): boolean {
   const store = readState<Record<string, AuthRecord>>(AUTH_FILE, {});
   const rec = store[serverUrl];
-  if (!rec?.client) return false; // nothing stored — DCR will run naturally
-  if (!rec.registeredAt) return true; // old record with no timestamp — treat as stale
+  if (!rec?.client) return false;
+  if (!rec.registeredAt) return true;
   return Date.now() - rec.registeredAt > CLIENT_REGISTRATION_MAX_AGE_MS;
 }
+
+// ---- Coalesced auth flows --------------------------------------------------
+
+/**
+ * One active auth flow per server URL. Concurrent callers wait for the same
+ * flow rather than each opening a browser. If the flow succeeds, waiters
+ * return normally (and the caller re-attempts the connection). If it fails,
+ * waiters receive the same error and each latch their own session independently.
+ */
+const activeAuthFlows = new Map<string, Promise<void>>();
+
+// ---- Core auth flow --------------------------------------------------------
+
+/** Options accepted by both authImplicit and authInteractive. */
+export interface AuthFlowOptions {
+  signal?: AbortSignal;
+  /** End-to-end deadline in ms. Default: AUTH_DEADLINE_MS (120 s). */
+  deadlineMs?: number;
+  /**
+   * Injectable browser launcher for testing. Production code uses the
+   * platform opener (open / xdg-open / start).
+   */
+  openBrowserFn?: (url: string) => Promise<void>;
+}
+
+/**
+ * Execute one complete OAuth flow for `def`.
+ *
+ * For `client_credentials` grants: calls the token endpoint directly (no
+ * browser). For `authorization_code` grants: starts a localhost callback,
+ * opens the browser, awaits the redirect, and exchanges the code.
+ *
+ * The entire flow is bounded by `deadlineMs` (default 120 s), composed with
+ * any caller `signal`. Every code path (success, failure, timeout, browser
+ * error, cancellation) closes the callback server. Throws `AuthError` on any
+ * failure with a named-server do-not-retry message.
+ */
+async function runOAuthFlow(def: ServerDef, options: AuthFlowOptions): Promise<void> {
+  const { signal, deadlineMs = AUTH_DEADLINE_MS, openBrowserFn = openBrowser } = options;
+  const url = def.url!;
+
+  // Compose deadline with caller signal.
+  const deadline = AbortSignal.timeout(deadlineMs);
+  const composed: AbortSignal = signal ? AbortSignal.any([deadline, signal]) : deadline;
+
+  const authErr = (detail: string): AuthError =>
+    new AuthError(
+      `"${def.name}" ${detail} — use /mcp (Shift+A) to re-authenticate. Do not retry automatically.`,
+      def.name,
+    );
+
+  // Abort-aware fetch wrapper: threads the composed deadline+caller signal
+  // into every SDK discovery/token HTTP request so they cancel promptly on
+  // timeout or cancellation rather than running until the network gives up.
+  const abortFetch: typeof fetch = (input, init) => {
+    const sig = init?.signal
+      ? AbortSignal.any([composed, init.signal as AbortSignal])
+      : composed;
+    return fetch(input, { ...init, signal: sig });
+  };
+
+  const guard = async <T>(step: string, operation: () => Promise<T>): Promise<T> => {
+    try {
+      return await operation();
+    } catch (e) {
+      if (e instanceof AuthError) throw e;
+      if (composed.aborted) throw authErr("authentication timed out or was cancelled");
+      throw authErr(`${step}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // ---- client_credentials (browserless) ------------------------------------
+  if (def.oauth?.grantType === "client_credentials") {
+    if (composed.aborted) throw authErr("authentication timed out or was cancelled");
+    const provider = new FileProvider(url, undefined, def);
+    const result = await guard("authentication failed", () => auth(provider, { serverUrl: url, fetchFn: abortFetch }));
+    if (result !== "AUTHORIZED") throw authErr("client_credentials grant did not complete");
+    return;
+  }
+
+  // ---- authorization_code (browser flow) ------------------------------------
+  if (composed.aborted) throw authErr("authentication timed out or was cancelled");
+  const cb = await startCallback(def.oauth?.redirectUri);
+  try {
+    const provider = new FileProvider(url, cb.redirect, def);
+
+    // For dynamic-port callbacks, any stored DCR client is tied to a stale
+    // redirect URI — always re-register to get a valid client for the new port.
+    // For configured stable URIs, only re-register when the age threshold passes.
+    if (!def.oauth?.redirectUri || isDcrStale(url)) {
+      provider.invalidateCredentials("client");
+    }
+
+    // First call: returns AUTHORIZED if stored credentials are valid/refreshable.
+    // Otherwise triggers redirectToAuthorization → sets provider.authUrl.
+    const firstResult = await guard("authentication failed", () => auth(provider, { serverUrl: url, fetchFn: abortFetch }));
+    if (firstResult === "AUTHORIZED") return; // existing credentials are valid
+
+    // Open the browser for the authorization URL.
+    if (!provider.authUrl) throw authErr("no authorization URL was produced");
+    await guard("browser launch failed", () => withAbort(openBrowserFn(provider.authUrl!.href), composed));
+
+    // Wait for the browser callback with the authorization code.
+    const code = await guard("authorization callback failed", () => withAbort(cb.code, composed));
+
+    // Exchange the code for tokens.
+    const finalResult = await guard("token exchange failed", () =>
+      auth(provider, { serverUrl: url, authorizationCode: code, fetchFn: abortFetch }),
+    );
+    if (finalResult !== "AUTHORIZED") throw authErr("token exchange did not complete");
+  } finally {
+    cb.close();
+  }
+}
+
+// ---- Public API ------------------------------------------------------------
 
 export function bearerHeaders(def: ServerDef): Record<string, string> {
   return def.bearerToken ? { Authorization: `Bearer ${def.bearerToken}` } : {};
@@ -207,65 +367,52 @@ export function bearerHeaders(def: ServerDef): Record<string, string> {
 
 /** Provider attached to the live transport so it can refresh tokens on its own. */
 export function oauthProvider(def: ServerDef): OAuthClientProvider {
-  return new FileProvider(def.url!, def.oauth?.redirectUri ?? MANUAL_REDIRECT, def);
+  // Use a stable redirect URI if configured; otherwise omit so the SDK does not
+  // inadvertently use a stale localhost port from DCR.
+  return new FileProvider(def.url!, def.oauth?.redirectUri, def);
 }
 
 /**
- * Forget all locally persisted OAuth state for this server, including its DCR
- * registration. The next authorization attempt must therefore obtain fresh
- * credentials rather than silently refreshing the previous token.
+ * Forget all locally persisted OAuth state for this server. The next
+ * authorization attempt obtains fresh credentials rather than refreshing.
  */
 export function clearOAuthCredentials(def: ServerDef): void {
   if (!def.url) return;
-  new FileProvider(def.url, def.oauth?.redirectUri ?? MANUAL_REDIRECT, def).invalidateCredentials("all");
+  new FileProvider(def.url, def.oauth?.redirectUri, def).invalidateCredentials("all");
 }
 
-/** Interactive browser flow used by the `/mcp` panel (press Shift+A). */
-export async function authInteractive(def: ServerDef, signal?: AbortSignal): Promise<void> {
+/**
+ * Coalesced implicit auth: open one browser flow per server URL even when
+ * multiple concurrent callers need auth at the same time. A waiter that sees
+ * an in-progress flow awaits it and returns normally on success (the caller
+ * retries the connection). On failure all waiters receive the same error and
+ * each latch their own session independently.
+ *
+ * Called by the manager when `connect` encounters `UnauthorizedError`.
+ */
+export async function authImplicit(def: ServerDef, options?: AuthFlowOptions): Promise<void> {
   const url = def.url!;
-  if (def.oauth?.grantType === "client_credentials") {
-    if ((await auth(new FileProvider(url, undefined, def), { serverUrl: url })) !== "AUTHORIZED") {
-      throw new Error("client_credentials grant did not complete");
-    }
+  const existing = activeAuthFlows.get(url);
+  if (existing) {
+    // Waiter: block until the first caller's flow resolves or rejects.
+    await existing;
+    // If we reach here the flow succeeded and credentials are now written.
+    // The caller will retry the connection; let it proceed.
     return;
   }
-  const cb = await startCallback(def.oauth?.redirectUri);
-  try {
-    const provider = new FileProvider(url, cb.redirect, def, (u) => openBrowser(u.href));
-    // Pre-invalidate any stored client registration that is too old.  OAuth servers
-    // (e.g. Atlassian) silently expire DCR registrations; using a stale client_id
-    // causes the authorization endpoint to return 500 before the user can authorize.
-    // Clearing it here forces a fresh DCR so the authorization URL always uses a
-    // valid client.
-    if (isDcrStale(url)) provider.invalidateCredentials("client");
-    if ((await auth(provider, { serverUrl: url })) === "AUTHORIZED") return; // tokens already valid
-    const code = await withAbort(cb.code, signal);
-    if ((await auth(provider, { serverUrl: url, authorizationCode: code })) !== "AUTHORIZED") {
-      throw new Error("token exchange did not complete");
-    }
-  } finally {
-    cb.close();
-  }
+
+  const flow = runOAuthFlow(def, options ?? {}).finally(() => {
+    if (activeAuthFlows.get(url) === flow) activeAuthFlows.delete(url);
+  });
+  activeAuthFlows.set(url, flow);
+  await flow;
 }
 
-/** Headless flow: returns the authorization URL to open (empty if already authed). */
-export async function authStart(def: ServerDef): Promise<string> {
-  const url = def.url!;
-  const provider = new FileProvider(url, def.oauth?.redirectUri ?? MANUAL_REDIRECT, def);
-  // Same stale-client guard as authInteractive — applies to the headless flow too.
-  if (isDcrStale(url)) provider.invalidateCredentials("client");
-  if ((await auth(provider, { serverUrl: url })) === "AUTHORIZED") return "";
-  if (!provider.authUrl) throw new Error("no authorization URL was produced");
-  return provider.authUrl.href;
-}
-
-/** Headless flow: finish from the full redirect URL the user was sent to. */
-export async function authComplete(def: ServerDef, redirectUrl: string): Promise<void> {
-  const url = def.url!;
-  const code = new URL(redirectUrl).searchParams.get("code");
-  if (!code) throw new Error('redirectUrl is missing a "?code=" parameter');
-  const provider = new FileProvider(url, def.oauth?.redirectUri ?? MANUAL_REDIRECT, def);
-  if ((await auth(provider, { serverUrl: url, authorizationCode: code })) !== "AUTHORIZED") {
-    throw new Error("token exchange did not complete");
-  }
+/**
+ * Explicit interactive re-auth flow for the /mcp panel (Shift+A). Always
+ * bypasses the coalescing cache so the user gets a guaranteed fresh flow
+ * regardless of any in-progress implicit attempt.
+ */
+export async function authInteractive(def: ServerDef, options?: AuthFlowOptions): Promise<void> {
+  return runOAuthFlow(def, options ?? {});
 }

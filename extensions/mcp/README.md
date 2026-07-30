@@ -1,6 +1,6 @@
 # mcp
 
-A lean [Model Context Protocol](https://modelcontextprotocol.io) client for pi. Reads standard `.mcp.json` (read-only), connects stdio + HTTP servers lazily, caches tool metadata, and exposes every server through a single `mcp` proxy tool. Supports bearer and OAuth auth (PKCE, dynamic client registration, token refresh).
+A lean [Model Context Protocol](https://modelcontextprotocol.io) client for pi. Reads standard `.mcp.json` (read-only), connects stdio + HTTP servers lazily, caches tool metadata, and exposes every server through a single `mcp` proxy tool. Supports bearer and OAuth auth (PKCE, dynamic client registration, token refresh). Connection and authentication are fully implicit — agents never connect or authenticate manually.
 
 ## Configuration
 
@@ -60,19 +60,31 @@ The minimum configuration is one server with either `command` (stdio) or `url` (
   | `mcp({ search })` | Substring search across enabled servers; space-separated terms are OR'd; `regex: true` for regex |
   | `mcp({ describe })` | One tool's server, description, and input schema |
   | `mcp({ tool, args })` | Call a tool; `args` is a JSON object string; `tool` may be bare or `server_tool` |
-  | `mcp({ connect })` | Force a connect + metadata refresh |
-  | `mcp({ action, server })` | OAuth helpers: `auth-start` returns a URL, `auth-complete` finishes with `args: '{"redirectUrl":"…"}'` |
 
   Tools are advertised as `server_tool`; ambiguous bare names report the candidates.
 
-- `/mcp` command — searchable server panel: type to filter server names case-insensitively · `↑↓` move · `backspace` erase filter text · `space`/`enter` enable/disable the selected server · `R` (Shift+R) restart · `A` (Shift+A) force re-authentication (clears the server's locally saved OAuth state, then uses the interactive localhost callback + browser flow) · `esc` close.
+  Connection and OAuth authentication are fully implicit. The first call that needs a live connection establishes it automatically. If OAuth is required, the extension opens a browser and awaits the redirect (up to 120 seconds). The agent never needs to connect or authenticate manually. If authentication fails, the agent should tell the user and ask them to recover via the `/mcp` panel — **do not retry authentication automatically**.
+
+- `/mcp` command — searchable server panel: type to filter server names case-insensitively · `↑↓` move · `backspace` erase filter text · `space`/`enter` enable/disable the selected server · `R` (Shift+R) restart/refresh (clears any auth latch, then re-connects) · `A` (Shift+A) force re-authentication (clears saved OAuth state and the auth latch, then runs a fresh interactive browser flow) · `esc` close.
 
 ## Special Setup Instructions
 
 Servers default to **off** every session — curate the active set from the `/mcp` panel before the agent can reach them.
 
+## Child agent (pi-subagents) inheritance
+
+When a child agent is spawned via pi-subagents, the MCP extension automatically passes a validated point-in-time snapshot of the parent's enabled server set to the child through an MCP-owned process-local broker. The child inherits exactly what the parent had enabled at the moment of spawn, subject to identity verification against the child's own loaded config. Child connections and any subsequent enable/disable changes are fully isolated from the parent and from other children.
+
+The inheritance mechanism works only for child agents spawned by pi-subagents (the documented `subagents:started` / session-name contract). Independent sessions (no agent-id suffix in the session name) start with all servers off, as usual.
+
+Capability scoping and the MCP extension are independent:
+
+- **MCP extension not loaded** (e.g. not present in the child's extension set): the extension never initializes, `session_start` is never fired, and the broker entry is not consumed. Completion/failure or stale-age cleanup handles any unconsumed entries.
+- **`mcp` tool excluded or narrowed out** (`excludeTools: ["mcp"]` or a restrictive `tools:` list): pi-subagents still binds loaded extensions and fires `session_start`, so the MCP extension *does* initialize and consume the one-shot broker snapshot. The inherited servers are enabled in the manager, but the `mcp` tool is absent from the agent's tool list, so no inherited server can actually be reached. This does not bypass capability scoping — it just means the snapshot is silently consumed and the tool remains unavailable.
+
 ## Limitations and Technical details
 
 - State on disk under `~/.pi/agent/mcp/`: `auth.json` (OAuth credentials, keyed by server URL — never written to `.mcp.json` or the session) and `cache.json` (tool metadata keyed by a server-identity hash, 7-day TTL). The cache lets status/list/search/describe work without a live connection; actual tool calls trigger a lazy connect. Cache is an optimization, never the source of truth.
-- Enable/disable controls whether the current session exposes a server to the agent; it does not connect or disconnect it. Restart (`R`, Shift+R) enables the server, replaces any live transport, and refreshes its tool metadata, while retaining OAuth credentials. Re-authenticate (`A`, Shift+A) also clears all locally saved OAuth state first, so the next connection must obtain fresh credentials.
+- Enable/disable controls whether the current session exposes a server to the agent; it does not connect or disconnect it. Restart (`R`, Shift+R) enables the server, clears any auth latch, replaces any live transport, and refreshes its tool metadata, while retaining OAuth credentials. Re-authenticate (`A`, Shift+A) also clears the auth latch and all locally saved OAuth state first, so the next connection obtains fresh credentials.
+- OAuth auth is implicit: the first connect that needs auth opens a browser, awaits the callback (up to 120 seconds), exchanges the code, and reconnects exactly once. Multiple concurrent calls for the same URL coalesce to a single browser flow. A successful `client_credentials` grant is non-interactive. On failure the error is latched for that session so no further browser flows are attempted automatically.
 - Intentionally out of scope: direct-tool promotion, MCP UI/Glimpse, host-config imports (Cursor/Claude/VS Code/…), setup wizards, sampling, elicitation, and an `npx` binary resolver. This is a single-proxy MCP client, nothing more.

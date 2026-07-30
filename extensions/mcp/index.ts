@@ -1,13 +1,22 @@
 /**
  * mcp — a lean MCP client for pi.
  *
- * Reads standard `.mcp.json` (read-only), connects stdio + HTTP servers lazily,
- * caches tool metadata, and exposes every server through a single `mcp` proxy
- * tool (status / search / describe / call / connect / auth). Servers are curated
- * per session from the `/mcp` panel. See README.md for config + auth details.
+ * Reads standard `.mcp.json` (read-only), connects stdio + HTTP servers
+ * lazily, caches tool metadata, and exposes every server through a single
+ * `mcp` proxy tool (status / list / search / describe / call). Connection and
+ * OAuth authentication are fully implicit: the agent never needs to connect or
+ * authenticate manually. Required user recovery is through the /mcp panel
+ * (Shift+R to restart, Shift+A to force re-authentication).
+ *
+ * Child agents spawned via pi-subagents inherit a validated point-in-time copy
+ * of the parent's enabled server set through an MCP-owned process-local broker.
+ * The child's connections and any later enable/disable changes are isolated from
+ * the parent.
+ *
+ * See README.md for config details.
  */
 
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
   DEFAULT_MAX_BYTES,
@@ -22,9 +31,9 @@ import {
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { authComplete, authInteractive, authStart, clearOAuthCredentials } from "./auth.ts";
+import { AuthError, authInteractive, clearOAuthCredentials } from "./auth.ts";
 import { loadServers } from "./config.ts";
-import { Manager, type ServerState } from "./manager.ts";
+import { Manager, type McpEnabledSnapshot, type ServerState } from "./manager.ts";
 
 interface Runtime {
   manager: Manager;
@@ -43,10 +52,6 @@ interface McpRowState {
   invalidateFn?: () => void;
 }
 
-/**
- * A minimal single-line component that renders exactly one ANSI-safe truncated line.
- * Used for both the spinner call header and the collapsed checkmark/cross line.
- */
 class SingleLine {
   private content = "";
   private cachedWidth?: number;
@@ -73,28 +78,18 @@ class SingleLine {
   }
 }
 
-/** Zero-height component — renders nothing when result is collapsed. */
 const EMPTY_COMPONENT = { render: (_w: number): string[] => [], invalidate: () => {} };
 
-/** Build the description + params strings for a given set of proxy args. */
 function buildMcpLineParts(a: ProxyArgs | undefined): { mode: string; params: string } {
   if (!a) return { mode: "status", params: "" };
-  if (a.action) return { mode: a.action, params: a.server ?? "" };
   if (a.tool) return { mode: `call ${a.tool}`, params: a.args ?? "" };
   if (a.search) return { mode: "search", params: `"${a.search}"` };
   if (a.describe) return { mode: "describe", params: a.describe };
-  if (a.connect) return { mode: "connect", params: a.connect };
   if (a.server) return { mode: "list", params: a.server };
   return { mode: "status", params: "" };
 }
 
-/** Assemble the full colored line string. */
-function buildMcpLine(
-  prefix: string,
-  mode: string,
-  params: string,
-  theme: Theme,
-): string {
+function buildMcpLine(prefix: string, mode: string, params: string, theme: Theme): string {
   let line = prefix + " " + theme.fg("toolTitle", theme.bold("mcp")) + " " + theme.fg("muted", mode);
   if (params) line += " " + theme.fg("dim", params);
   return line;
@@ -120,7 +115,6 @@ const STATE_COLOR: Record<ServerState, ThemeColor> = {
 const oneLine = (s?: string) => (s ?? "").replace(/\s+/g, " ").trim();
 const asText = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
 
-/** Parse the tool's `args` field (a JSON object string) into an object. */
 function parseArgs(s?: string): Record<string, unknown> {
   if (!s) return {};
   let parsed: unknown;
@@ -146,14 +140,14 @@ function updateFooter(runtime: Runtime): void {
   );
 }
 
-/** Resolve a tool reference (bare or `server_tool`) across enabled servers. */
+/** Resolve a bare or qualified tool reference across enabled servers. */
 async function resolve(
   runtime: Runtime,
   arg: string,
 ): Promise<{ server: string; tool: string } | "none" | { ambiguous: string[] }> {
-  const all = await runtime.manager.enabledMetadata();
+  const { meta } = await runtime.manager.enabledMetadata();
   const matches = new Map<string, { server: string; tool: string }>();
-  for (const [server, tools] of all) {
+  for (const [server, tools] of meta) {
     for (const t of tools) {
       if (t.name === arg || arg === `${server}_${t.name}`) {
         matches.set(`${server}\0${t.name}`, { server, tool: t.name });
@@ -180,7 +174,9 @@ function statusText(runtime: Runtime): string {
     const count = manager.toolCount(n);
     const tools = count != null ? `${count} tool${count === 1 ? "" : "s"}` : "";
     let row = `${ICON[st]} ${n.padEnd(pad)}  ${st.padEnd(11)}  ${tools}`.trimEnd();
-    if (st === "needs-auth") row += "  → authenticate from the /mcp panel";
+    if (st === "needs-auth") {
+      row += "  → authentication failed; use /mcp (Shift+A) to re-authenticate";
+    }
     return row;
   });
   const hint =
@@ -195,17 +191,31 @@ async function listServerText(runtime: Runtime, server: string): Promise<string>
   const def = manager.servers.get(server);
   if (!def) return `Unknown server "${server}". Configured: ${manager.list().join(", ") || "none"}.`;
   if (!manager.enabled.has(server)) return `Server "${server}" is off — enable it from the /mcp panel.`;
-  const tools = await manager.metadata(server);
-  if (!tools.length) return `"${server}" exposes no tools.`;
-  return (
-    `"${server}" — ${tools.length} tools:\n` +
-    tools.map((t) => `  ${qualify(server, t.name)}${t.description ? ` — ${oneLine(t.description)}` : ""}`).join("\n")
-  );
+
+  // Check auth latch before attempting metadata fetch.
+  const authFailures = manager.getAuthFailures();
+  const authMsg = authFailures.get(server);
+  if (authMsg) return authMsg;
+
+  try {
+    const tools = await manager.metadata(server);
+    if (!tools.length) return `"${server}" exposes no tools.`;
+    return (
+      `"${server}" — ${tools.length} tools:\n` +
+      tools.map((t) => `  ${qualify(server, t.name)}${t.description ? ` — ${oneLine(t.description)}` : ""}`).join("\n")
+    );
+  } catch (e) {
+    if (e instanceof AuthError) return e.message;
+    throw e;
+  }
 }
 
 async function searchText(runtime: Runtime, query: string, regex?: boolean): Promise<string> {
-  const all = await runtime.manager.enabledMetadata();
-  if (!all.size) return "No enabled servers to search. Enable servers from the /mcp panel.";
+  const { meta, authFailed } = await runtime.manager.enabledMetadata();
+  if (!meta.size && !authFailed.size) {
+    return "No enabled servers to search. Enable servers from the /mcp panel.";
+  }
+
   let test: (s: string) => boolean;
   if (regex) {
     if (query.length > 200) return "Regex too long (max 200 chars).";
@@ -224,26 +234,48 @@ async function searchText(runtime: Runtime, query: string, regex?: boolean): Pro
       return terms.some((t) => l.includes(t));
     };
   }
+
   const hits: string[] = [];
-  for (const [server, tools] of all) {
+  for (const [server, tools] of meta) {
     for (const t of tools) {
       if (test(`${t.name} ${t.description ?? ""}`)) {
         hits.push(`  ${qualify(server, t.name)}${t.description ? ` — ${oneLine(t.description)}` : ""}`);
       }
     }
   }
-  if (!hits.length) return `No tools match "${query}".`;
+
+  const skipped = [...authFailed.keys()];
+  const skipLine =
+    skipped.length > 0
+      ? `\n\nNote: ${skipped.length} enabled server${skipped.length === 1 ? " was" : "s were"} skipped due to authentication failure: ${skipped.join(", ")}. Use /mcp (Shift+A) to re-authenticate.`
+      : "";
+
+  if (!hits.length) {
+    return `No tools match "${query}".${skipLine}`;
+  }
   const shown = hits.slice(0, 50);
   return (
     `${hits.length} match${hits.length === 1 ? "" : "es"} for "${query}":\n${shown.join("\n")}` +
-    (hits.length > shown.length ? `\n  … ${hits.length - shown.length} more` : "")
+    (hits.length > shown.length ? `\n  … ${hits.length - shown.length} more` : "") +
+    skipLine
   );
 }
 
 async function describeText(runtime: Runtime, arg: string): Promise<string> {
   const { manager } = runtime;
   const r = await resolve(runtime, arg);
-  if (r === "none") return `Tool "${arg}" not found. Try mcp({search:'${arg}'}).`;
+  if (r === "none") {
+    // Surface any relevant auth failures rather than claiming absence.
+    const authFailures = manager.getAuthFailures();
+    if (authFailures.size > 0) {
+      const lines = [...authFailures.entries()].map(([s, m]) => `  "${s}": ${m}`);
+      return (
+        `Tool "${arg}" not found in accessible servers. Try mcp({search:'${arg}'}).\n\n` +
+        `Enabled servers unavailable due to authentication failure:\n${lines.join("\n")}`
+      );
+    }
+    return `Tool "${arg}" not found. Try mcp({search:'${arg}'}).`;
+  }
   if ("ambiguous" in r) return `"${arg}" is ambiguous: ${r.ambiguous.join(", ")}. Use a qualified name.`;
   const t = (await manager.metadata(r.server)).find((x) => x.name === r.tool)!;
   return [
@@ -257,25 +289,13 @@ async function describeText(runtime: Runtime, arg: string): Promise<string> {
   ].join("\n");
 }
 
-async function connectText(runtime: Runtime, server: string): Promise<string> {
-  const { manager } = runtime;
-  const def = manager.servers.get(server);
-  if (!def) return `Unknown server "${server}". Configured: ${manager.list().join(", ") || "none"}.`;
-  manager.enabled.add(server); // enable the server (and connect) even if it was off
-  const tools = await manager.connect(server);
-  updateFooter(runtime);
-  return `Connected "${server}" — ${tools.length} tools:\n` + tools.map((t) => `  ${qualify(server, t.name)}`).join("\n");
-}
-
 interface ProxyArgs {
   server?: string;
   search?: string;
   describe?: string;
   tool?: string;
   args?: string;
-  connect?: string;
   regex?: boolean;
-  action?: "auth-start" | "auth-complete";
 }
 
 async function callToolResult(runtime: Runtime, p: ProxyArgs, signal?: AbortSignal) {
@@ -283,55 +303,35 @@ async function callToolResult(runtime: Runtime, p: ProxyArgs, signal?: AbortSign
   const args = parseArgs(p.args);
   const r = await resolve(runtime, p.tool!);
   if (r === "none") {
+    const authFailures = manager.getAuthFailures();
+    if (authFailures.size > 0) {
+      const names = [...authFailures.keys()].join(", ");
+      throw new Error(
+        `Tool "${p.tool}" not found in accessible servers. Enabled servers unavailable due to authentication failure: ${names}. Use /mcp (Shift+A) to re-authenticate.`,
+      );
+    }
     throw new Error(`Tool "${p.tool}" not found. Use mcp({search:'…'}) to discover tools, or enable its server from /mcp.`);
   }
   if ("ambiguous" in r) throw new Error(`Tool "${p.tool}" is ambiguous: ${r.ambiguous.join(", ")}.`);
-  const out = await manager.callTool(r.server, r.tool, args, signal);
-  updateFooter(runtime);
-  if (out.isError) throw new Error(out.text);
-  const t = truncateHead(out.text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-  const body = t.truncated
-    ? `${t.content}\n\n[truncated: ${t.outputLines}/${t.totalLines} lines, ${formatSize(t.outputBytes)}/${formatSize(t.totalBytes)}]`
-    : t.content;
-  return { content: [{ type: "text" as const, text: body }], details: { server: r.server, tool: r.tool } };
-}
-
-async function actionResult(runtime: Runtime, p: ProxyArgs) {
-  const { manager } = runtime;
-  const server = p.server;
-  if (!server) throw new Error(`${p.action} requires "server".`);
-  const def = manager.servers.get(server);
-  if (!def) throw new Error(`Unknown server "${server}".`);
-  if (!def.url) throw new Error(`"${server}" is not an HTTP/OAuth server.`);
-
-  if (p.action === "auth-start") {
-    const url = await authStart(def);
-    if (!url) return asText(`"${server}" is already authenticated.`);
-    return asText(
-      `Open this URL to authorize "${server}":\n${url}\n\n` +
-        `After approving, your browser is redirected to a URL containing "?code=…". Finish with:\n` +
-        `mcp({action:"auth-complete", server:"${server}", args:'{"redirectUrl":"<full redirect URL>"}'})`,
-    );
+  try {
+    const out = await manager.callTool(r.server, r.tool, args, signal);
+    updateFooter(runtime);
+    if (out.isError) throw new Error(out.text);
+    const t = truncateHead(out.text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+    const body = t.truncated
+      ? `${t.content}\n\n[truncated: ${t.outputLines}/${t.totalLines} lines, ${formatSize(t.outputBytes)}/${formatSize(t.totalBytes)}]`
+      : t.content;
+    return { content: [{ type: "text" as const, text: body }], details: { server: r.server, tool: r.tool } };
+  } catch (e) {
+    if (e instanceof AuthError) throw new Error(e.message);
+    throw e;
   }
-  // auth-complete
-  const extra = parseArgs(p.args) as { redirectUrl?: string };
-  if (!extra.redirectUrl) throw new Error('auth-complete requires args \'{"redirectUrl":"…"}\'.');
-  await authComplete(def, extra.redirectUrl);
-  manager.enabled.add(server);
-  await manager.connect(server).catch(() => {});
-  updateFooter(runtime);
-  return asText(`"${server}" authenticated ✓`);
 }
 
 // ---- /mcp management panel -------------------------------------------------
 
 const HELP = "type filter · ↑↓ · space toggle · R restart · A re-auth · esc";
 
-/**
- * Get printable text from both classic terminal input and Pi's Kitty
- * keyboard protocol. Special key handling must run first: space toggles the
- * selected server, and shifted R/A are panel actions rather than text.
- */
 function printableInput(data: string): string | undefined {
   const decoded = decodeKittyPrintable(data);
   if (decoded) return decoded;
@@ -410,16 +410,20 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
     };
 
     const restart = async (name: string) => {
+      // Clear any auth latch so Shift+R is not blocked by a prior automatic failure.
+      manager.clearAuthLatch(name);
       manager.enabled.add(name);
       busy.set(name, "connecting…");
       tui.requestRender();
       try {
         await manager.connect(name);
+        busy.delete(name); // success: clear status immediately
       } catch (e) {
         busy.set(name, `✗ ${oneLine((e as Error).message).slice(0, 40)}`);
+        // Leave the error visible; schedule cleanup after a short display window.
         setTimeout(() => (busy.delete(name), tui.requestRender()), 4000);
       } finally {
-        busy.delete(name);
+        // Always refresh footer and re-render regardless of outcome.
         updateFooter(runtime);
         tui.requestRender();
       }
@@ -465,14 +469,15 @@ async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: str
     ctx.ui.notify(`"${name}" is not an HTTP/OAuth server.`, "warning");
     return;
   }
-  // Shift+A deliberately means *re*-authenticate: a normal restart keeps the
-  // stored refresh token, whereas this action must request fresh consent.
+  // Shift+A means *re*-authenticate: clear credentials, clear any auth latch,
+  // then run a fresh interactive flow.
   await manager.disconnect(name);
+  manager.clearAuthLatch(name);
   clearOAuthCredentials(def);
   const ok = await ctx.ui.custom<boolean>((tui, theme, _kb, done) => {
     const loader = new BorderedLoader(tui, theme, `Re-authorizing "${name}" — a browser window should open…`);
     loader.onAbort = () => done(false);
-    authInteractive(def, loader.signal)
+    authInteractive(def, { signal: loader.signal })
       .then(() => done(true))
       .catch((e) => (ctx.ui.notify(`"${name}" auth failed: ${(e as Error).message}`, "error"), done(false)));
     return loader;
@@ -485,6 +490,64 @@ async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: str
   }
 }
 
+// ---- Process-global child snapshot broker ----------------------------------
+//
+// Keyed by the full subagent ID emitted in `subagents:started`. The child
+// session extracts the 8-char prefix from its session name (set by pi-subagents
+// as `<type>#${agentId.slice(0, 8)}` before session_start) and does a prefix
+// lookup to consume exactly one unambiguous pending handoff.
+
+const BROKER_SYMBOL = Symbol.for("pi-mcp.snapshot-broker.v1");
+const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
+
+interface BrokerEntry {
+  snapshot: McpEnabledSnapshot;
+  capturedAt: number;
+}
+
+function getBroker(): Map<string, BrokerEntry> {
+  const g = globalThis as Record<symbol, unknown>;
+  if (!g[BROKER_SYMBOL]) g[BROKER_SYMBOL] = new Map<string, BrokerEntry>();
+  return g[BROKER_SYMBOL] as Map<string, BrokerEntry>;
+}
+
+/** Remove entries older than SNAPSHOT_MAX_AGE_MS. Called lazily on each spawn. */
+function pruneStale(broker: Map<string, BrokerEntry>): void {
+  const cutoff = Date.now() - SNAPSHOT_MAX_AGE_MS;
+  for (const [id, entry] of broker) {
+    if (entry.capturedAt < cutoff) broker.delete(id);
+  }
+}
+
+/**
+ * Extract the agentId 8-char suffix from a session name of the form
+ * `<type>#<suffix>`. Returns undefined if the session name has no `#`.
+ */
+function extractAgentSuffix(sessionName: string): string | undefined {
+  const idx = sessionName.lastIndexOf("#");
+  const suffix = sessionName.slice(idx + 1);
+  return idx >= 0 && suffix.length === 8 ? suffix : undefined;
+}
+
+/**
+ * Consume a pending snapshot for the given 8-char agent suffix.
+ * Returns a deep-copied snapshot if exactly one broker entry matches the
+ * prefix, undefined if none match. Fails closed (returns undefined) if the
+ * prefix is ambiguous to prevent cross-agent snapshot leakage.
+ */
+function consumeSnapshot(suffix: string): McpEnabledSnapshot | undefined {
+  const broker = getBroker();
+  const matches: string[] = [];
+  for (const id of broker.keys()) {
+    if (id.startsWith(suffix)) matches.push(id);
+  }
+  if (matches.length !== 1) return undefined; // none or ambiguous — fail closed
+  const entry = broker.get(matches[0])!;
+  broker.delete(matches[0]);
+  // Return a deep copy so the consumer cannot mutate the broker.
+  return JSON.parse(JSON.stringify(entry.snapshot)) as McpEnabledSnapshot;
+}
+
 // ---- registration ----------------------------------------------------------
 
 function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: string[] = []): void {
@@ -494,13 +557,16 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
     description:
       "Proxy for configured MCP servers. Modes (pass exactly one): mcp({}) → server status; " +
       "mcp({server}) → list a server's tools; mcp({search}) → find tools across enabled servers; " +
-      "mcp({describe}) → a tool's schema; mcp({tool, args}) → call a tool (args is a JSON object string); " +
-      "mcp({connect}) → force connect + refresh; mcp({action}) → OAuth helpers.",
+      "mcp({describe}) → a tool's schema; mcp({tool, args}) → call a tool (args is a JSON object string). " +
+      "Connection and authentication are implicit — do not attempt to connect or authenticate manually. " +
+      "If a server is unavailable due to authentication failure, escalate to the user to recover via " +
+      "the /mcp panel (Shift+R to restart, Shift+A to force re-authentication).",
     promptSnippet:
       "Reach MCP servers: status mcp({}), search, describe, and call tools via mcp({tool, args})" +
       (configuredServers.length ? `. Configured MCP servers: ${configuredServers.join(", ")}.` : ""),
     promptGuidelines: [
       "Use mcp to reach MCP servers: mcp({}) for status, mcp({search:'…'}) to find tools, mcp({describe:'…'}) for a tool's schema, then mcp({tool:'…', args:'{…}'}) to call it. Only enabled servers are reachable — if a needed server is off, ask the user to enable it from the /mcp panel.",
+      "Connection and OAuth authentication are fully automatic — do not attempt to trigger a connection or authenticate manually. If authentication fails, tell the user and ask them to recover via /mcp (Shift+R to restart, Shift+A to re-authenticate). Do not retry authentication automatically.",
     ],
     parameters: Type.Object({
       server: Type.Optional(Type.String({ description: "List this server's tools (cache or lazy connect)." })),
@@ -509,33 +575,23 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
       ),
       describe: Type.Optional(Type.String({ description: "Show one tool's server, description, and input schema." })),
       tool: Type.Optional(Type.String({ description: "Tool to call (bare name or server-prefixed)." })),
-      args: Type.Optional(Type.String({ description: "JSON object string of arguments for the tool (or for auth-complete)." })),
-      connect: Type.Optional(Type.String({ description: "Force a connect + metadata refresh for this server." })),
+      args: Type.Optional(Type.String({ description: "JSON object string of arguments for the tool." })),
       regex: Type.Optional(Type.Boolean({ description: "Treat the search query as a case-insensitive regular expression." })),
-      action: Type.Optional(
-        StringEnum(["auth-start", "auth-complete"] as const, {
-          description: "OAuth helpers: auth-start returns a URL; auth-complete takes {redirectUrl} via args.",
-        }),
-      ),
     }),
 
     renderCall(args, theme, context) {
       const state = context.state as McpRowState;
-      // Lazily initialise state fields the first time renderCall fires.
       state.done ??= false;
       state.isError ??= false;
       state.frameIdx ??= 0;
 
       const comp = (context.lastComponent as SingleLine | undefined) ?? new SingleLine();
-
-      // Keep the invalidate reference fresh so the timer always reaches the live fn.
       state.invalidateFn = context.invalidate;
 
       const a = args as ProxyArgs | undefined;
       const { mode, params } = buildMcpLineParts(a);
 
       if (!state.done) {
-        // Start the spinner timer once.
         if (!state.spinnerTimer) {
           state.frameIdx = 0;
           state.spinnerTimer = setInterval(() => {
@@ -547,10 +603,7 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
         const spinChar = theme.fg("dim", SPINNER_FRAMES[state.frameIdx] ?? SPINNER_FRAMES[0]);
         comp.setText(buildMcpLine(spinChar, mode, params, theme));
       } else {
-        // Execution finished — show checkmark or cross.
-        const icon = state.isError
-          ? theme.fg("error", "✗")
-          : theme.fg("success", "✓");
+        const icon = state.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
         const hint = keyHint("app.tools.expand", "expand");
         comp.setText(buildMcpLine(icon, mode, params, theme) + " " + theme.fg("dim", hint));
       }
@@ -561,7 +614,6 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
     renderResult(result, { expanded, isPartial }, theme, context) {
       const state = context.state as McpRowState;
 
-      // On first final result: stop spinner and trigger call slot to re-render with icon.
       if (!isPartial && !state.done) {
         state.done = true;
         state.isError = context.isError;
@@ -569,19 +621,14 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
           clearInterval(state.spinnerTimer);
           state.spinnerTimer = undefined;
         }
-        context.invalidate(); // re-render renderCall with ✓ / ✗
+        context.invalidate();
       }
 
-      if (!expanded) {
-        // Collapsed: renderCall already shows the summary — render nothing here.
-        return EMPTY_COMPONENT;
-      }
+      if (!expanded) return EMPTY_COMPONENT;
 
-      // Expanded: full request + response details.
       const a = context.args as ProxyArgs | undefined;
       const lines: string[] = [];
 
-      // Show call parameters.
       if (a?.tool && a.args && a.args !== "{}") {
         lines.push(theme.fg("muted", "args: ") + theme.fg("dim", a.args));
       } else if (a?.search) {
@@ -590,11 +637,8 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
         lines.push(theme.fg("muted", "tool: ") + theme.fg("dim", a.describe));
       } else if (a?.server) {
         lines.push(theme.fg("muted", "server: ") + theme.fg("dim", a.server));
-      } else if (a?.connect) {
-        lines.push(theme.fg("muted", "connect: ") + theme.fg("dim", a.connect));
       }
 
-      // Show result content.
       const content = result.content[0];
       if (content?.type === "text") {
         const color = state.isError ? "error" : "dim";
@@ -606,9 +650,7 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
 
     async execute(_id, p: ProxyArgs, signal, _onUpdate, ctx) {
       runtime.ui = ctx.ui;
-      if (p.action) return actionResult(runtime, p);
       if (p.tool) return callToolResult(runtime, p, signal ?? ctx.signal);
-      if (p.connect) return asText(await connectText(runtime, p.connect));
       if (p.describe) return asText(await describeText(runtime, p.describe));
       if (p.search) return asText(await searchText(runtime, p.search, p.regex));
       if (p.server) return asText(await listServerText(runtime, p.server));
@@ -618,11 +660,37 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
 }
 
 export default function (pi: ExtensionAPI) {
-  // Pi calls each extension factory for each bound AgentSession. Keep all
-  // mutable runtime state here so an in-process child cannot reset its parent.
   const runtime: Runtime = { manager: new Manager() };
 
   registerMcpTool(pi, runtime);
+
+  // ---- Subagent snapshot broker ---------------------------------------------
+  //
+  // When a child agent is spawned via pi-subagents the parent's events bus
+  // emits `subagents:started`. Capture the parent's enabled set at that
+  // instant and store it in the process-global broker keyed by the full
+  // agentId. The child's MCP extension factory (below, in session_start) looks
+  // up the broker by the 8-char agentId prefix embedded in its session name.
+
+  pi.events.on("subagents:started", (data) => {
+    const d = data as { id?: string } | null;
+    if (!d?.id) return;
+    const broker = getBroker();
+    pruneStale(broker); // lazy cleanup on each spawn
+    broker.set(d.id, {
+      snapshot: runtime.manager.snapshot(),
+      capturedAt: Date.now(),
+    });
+  });
+
+  for (const event of ["subagents:completed", "subagents:failed"]) {
+    pi.events.on(event, (data) => {
+      const id = (data as { id?: string } | null)?.id;
+      if (id) getBroker().delete(id);
+    });
+  }
+
+  // ---- Session lifecycle ---------------------------------------------------
 
   pi.registerCommand("mcp", {
     description: "Open the searchable MCP server panel (enable/disable · restart · authenticate)",
@@ -634,7 +702,21 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     runtime.ui = ctx.ui;
-    await runtime.manager.initialize(loadServers(ctx.cwd));
+    const servers = loadServers(ctx.cwd);
+
+    // Try to inherit the parent's enabled snapshot via the broker.
+    // pi-subagents sets the session name to `<type>#${agentId.slice(0,8)}`
+    // before session_start fires, so we can extract the suffix here.
+    let inheritedSnapshot: McpEnabledSnapshot | undefined;
+    const sessionName = ctx.sessionManager.getSessionName();
+    if (sessionName) {
+      const suffix = extractAgentSuffix(sessionName);
+      if (suffix) {
+        inheritedSnapshot = consumeSnapshot(suffix);
+      }
+    }
+
+    await runtime.manager.initialize(servers, inheritedSnapshot);
     registerMcpTool(pi, runtime, runtime.manager.list());
     updateFooter(runtime);
   });
