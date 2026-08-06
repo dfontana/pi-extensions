@@ -3,13 +3,14 @@ import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { describe, it } from "node:test";
 
 // config.ts resolves the agent directory while it loads, so this must be set
 // before dynamically importing the OAuth module under test.
 const agentDir = mkdtempSync(join(tmpdir(), "mcp-auth-agent-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
-const { clearOAuthCredentials, authImplicit, authInteractive, AuthError } = await import("./auth.ts");
+const { clearOAuthCredentials, authImplicit, authInteractive, oauthProvider, AuthError } = await import("./auth.ts");
 
 const authFile = join(agentDir, "mcp", "auth.json");
 
@@ -48,6 +49,76 @@ describe("mcp auth", () => {
     assert.equal(err.isAuthError, true);
     assert.ok(err instanceof Error);
     assert.equal(err.name, "AuthError");
+  });
+
+  it("refreshes saved OAuth tokens without starting browser authorization", async () => {
+    let requestCount = 0;
+    let refreshGrantCount = 0;
+    let browserAuthorizationCount = 0;
+    const server = createServer((req, res) => {
+      requestCount++;
+      const path = new URL(req.url ?? "/", "http://localhost").pathname;
+      if (req.method === "GET" && path === "/.well-known/oauth-authorization-server") {
+        const port = (server.address() as { port: number }).port;
+        const base = `http://localhost:${port}`;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            issuer: base,
+            authorization_endpoint: `${base}/authorize`,
+            token_endpoint: `${base}/token`,
+            response_types_supported: ["code"],
+            grant_types_supported: ["authorization_code", "refresh_token"],
+            code_challenge_methods_supported: ["S256"],
+          }),
+        );
+        return;
+      }
+      if (req.method === "GET" && path === "/.well-known/oauth-protected-resource") {
+        res.writeHead(404).end();
+        return;
+      }
+      if (req.method === "POST" && path === "/token") {
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+        req.on("end", () => {
+          const params = new URLSearchParams(body);
+          assert.equal(params.get("grant_type"), "refresh_token");
+          assert.equal(params.get("refresh_token"), "saved-refresh");
+          refreshGrantCount++;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ access_token: "replacement-access", token_type: "bearer", refresh_token: "replacement-refresh" }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    const port = (server.address() as { port: number }).port;
+    const url = `http://localhost:${port}`;
+    const redirectUri = "http://localhost:4321/callback";
+    writeAuthState({
+      [url]: {
+        client: { client_id: "saved-client", redirect_uris: [redirectUri] },
+        tokens: { access_token: "old-access", refresh_token: "saved-refresh", token_type: "bearer" },
+      },
+    });
+
+    try {
+      const def = { name: "refresh-server", url, auth: "oauth" as const };
+      const provider = oauthProvider(def);
+      assert.equal(requestCount, 0, "constructing the provider must not make a request");
+      assert.equal(provider.redirectUrl, redirectUri);
+      provider.redirectToAuthorization = () => { browserAuthorizationCount++; };
+
+      assert.equal(await sdkAuth(provider, { serverUrl: url }), "AUTHORIZED");
+      assert.equal(refreshGrantCount, 1);
+      assert.equal(browserAuthorizationCount, 0);
+      assert.equal((readAuthState() as Record<string, { tokens: { access_token: string } }>)[url].tokens.access_token, "replacement-access");
+    } finally {
+      server.close();
+    }
   });
 
   it("auth flow failures preserve names, retry guidance, and browser boundaries", async () => {

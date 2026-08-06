@@ -367,9 +367,13 @@ export function bearerHeaders(def: ServerDef): Record<string, string> {
 
 /** Provider attached to the live transport so it can refresh tokens on its own. */
 export function oauthProvider(def: ServerDef): OAuthClientProvider {
-  // Use a stable redirect URI if configured; otherwise omit so the SDK does not
-  // inadvertently use a stale localhost port from DCR.
-  return new FileProvider(def.url!, def.oauth?.redirectUri, def);
+  const redirectUrl =
+    def.oauth?.grantType === "client_credentials"
+      ? undefined
+      : def.oauth?.redirectUri ??
+        readState<AuthStore>(AUTH_FILE, {})[def.url!]?.client?.redirect_uris?.[0] ??
+        "http://localhost/";
+  return new FileProvider(def.url!, redirectUrl, def);
 }
 
 /**
