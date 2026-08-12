@@ -32,6 +32,7 @@ Each extension has its own README covering configuration, provided tools/command
 | [pane-control](extensions/pane-control/README.md) | Multiplexing tools for opening, driving, reading, and closing Kitty or Zellij panes |
 | [prompt-stash](extensions/prompt-stash/README.md) | Stash/restore the prompt editor with `Alt+Shift+S` |
 | [rainbow-spinner](extensions/rainbow-spinner/README.md) | Theme-colored spinner with a random whimsical phrase each turn |
+| [model-query](extensions/model-query/README.md) | `model_query` tool: resolve one usable model by deterministic policy |
 | [review-model-selector](extensions/review-model-selector/README.md) | `select_review_model` tool: deterministic adversarial-reviewer selection |
 | [scoped-tools](extensions/scoped-tools/README.md) | YAML-specified bash commands as validated agent tools with hidden, call-time computed parameters |
 | [subagent](extensions/subagent/README.md) | Lean synchronous delegation to global agents, with single and bounded-parallel execution |

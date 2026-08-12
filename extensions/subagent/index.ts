@@ -22,6 +22,7 @@ import {
   type SubagentRunner,
 } from "./process.ts";
 import { aggregateUsage, emptyTrackedUsage, formatAggregateUsage, formatUsage } from "./usage.ts";
+import { resolveModelReference, thinkingFromModelReference } from "../model-query/query.ts";
 
 export const MAX_PARALLEL_TASKS = 8;
 export const MAX_CONCURRENCY = 4;
@@ -108,7 +109,7 @@ function parentDefaults(ctx: ExtensionContext): { model?: string; thinking?: Mod
 }
 
 function hasThinkingSuffix(model: string | undefined): boolean {
-  return Boolean(model && new RegExp(`:(${THINKING_LEVELS.join("|")})$`).test(model));
+  return thinkingFromModelReference(model) !== undefined;
 }
 
 function resolveThinking(
@@ -356,17 +357,23 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
         const discovery = discoverAgents(options.agentsDirectory);
         notifyDiagnostics(ctx, discovery.diagnostics);
         const defaults = parentDefaults(ctx);
-
+        await ctx.modelRegistry.refresh();
+        const modelSnapshot = { current: ctx.model, available: ctx.modelRegistry.getAvailable() };
         const resolveRequest = (task: TaskRequest) => {
           const agent =
             discovery.agents.find((candidate) => candidate.name.toLowerCase() === task.agent.toLowerCase()) ??
             discovery.agents.find((candidate) => candidate.name === GENERAL_AGENT_NAME)!;
+          const rawModel = task.model ?? agent.model;
+          const requestedThinking = resolveThinking(task, agent, defaults.thinking);
+          const resolved = rawModel
+            ? resolveModelReference(rawModel, modelSnapshot, requestedThinking)
+            : { model: defaults.model, thinking: requestedThinking };
           return {
             agent,
             task: task.task,
             cwd: task.cwd ?? ctx.cwd,
-            model: task.model ?? agent.model ?? defaults.model,
-            thinking: resolveThinking(task, agent, defaults.thinking),
+            model: resolved.model,
+            thinking: resolved.thinking,
             signal,
           };
         };

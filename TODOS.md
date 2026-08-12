@@ -2,7 +2,3 @@
 Context: When actively ssh'd in kitty+zmx is the primary way to manage splits, great for TUI testing. But when backgrounding the agent that falls apart as kitty isn't active so the tool calls will start to fail. And if you don't establish a zmx connection then the panes die anyways. Should kitty really be used for this workflow, or should we have the tools only support zellij? I think the answer is yes -- only zellij, and they should only be enabled if the host has zellij installed. We should then maske sure the tool always uses a session specific identity and closes it's own sessions after it's done testing (tear down).
 Ask: Remove kitty support from the tools and make it zellij specific, ensuring good hygene.
 Follow up: fix the artifacts repo's testing skills, for when it's not working inside zellij
-
-## Intelligence selection
-Context: The review tools implement an intelligence selection tool, this could be a good tool/library to use if you make your own subagents / pi-fork like system. See plans/subagents.md for more on that. The idea being the plugin could be used to select agents or models-for-agents (TBD) fit for a task dynamically.
-Ask: TBD, WIP.
