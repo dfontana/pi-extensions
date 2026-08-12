@@ -1,7 +1,7 @@
 /**
  * prompt-stash — Pi extension
  *
- * Stashes and un-stashes the current prompt editor content with Alt+Shift+S.
+ * Stashes and un-stashes the current prompt editor content with Alt+Shift+S or Alt+Ctrl+S.
  * Shows a footer indicator when stashed. Only durable to the session.
  */
 
@@ -19,9 +19,9 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.setStatus(STATUS_KEY, undefined);
   });
 
-  pi.registerShortcut("alt+shift+s", {
-    description: "Stash / un-stash the current prompt (Alt+Shift+S)",
-    handler: (ctx) => {
+  const shortcut = {
+    description: "Stash / un-stash the current prompt (Alt+Shift+S or Alt+Ctrl+S)",
+    handler: (ctx: Parameters<Parameters<ExtensionAPI["registerShortcut"]>[1]["handler"]>[0]) => {
       if (stash === null) {
         const text = ctx.ui.getEditorText();
         if (!text.trim()) {
@@ -37,5 +37,8 @@ export default function (pi: ExtensionAPI): void {
         ctx.ui.setStatus(STATUS_KEY, undefined);
       }
     },
-  });
+  };
+
+  pi.registerShortcut("alt+shift+s", shortcut);
+  pi.registerShortcut("alt+ctrl+s", shortcut);
 }
