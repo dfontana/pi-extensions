@@ -85,7 +85,7 @@ function successful(request: RunRequest, text = `done: ${request.task}`, taskUsa
   };
 }
 
-function setup(options: { files?: Record<string, string>; run?: SubagentRunner } = {}) {
+function setup(options: { files?: Record<string, string>; run?: SubagentRunner; available?: any[] } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "subagent-extension-"));
   for (const [name, content] of Object.entries(
     options.files ?? { "worker.md": definition("name: worker\ndescription: General worker") },
@@ -103,10 +103,22 @@ function setup(options: { files?: Record<string, string>; run?: SubagentRunner }
   assert.ok(tool, "subagent tool registered");
 
   const warnings: string[] = [];
+  const current = { provider: "parent-provider", id: "parent-model", name: "parent-model", api: "openai-responses", baseUrl: "https://example.test", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 16_384 };
+  const makeAvailable = (reference: string, index: number) => {
+    const slash = reference.indexOf("/");
+    const provider = slash === -1 ? `test-${index}` : reference.slice(0, slash);
+    const id = slash === -1 ? reference : reference.slice(slash + 1);
+    return { ...current, provider, id, name: id };
+  };
+  const fallbackAvailable = [
+    current,
+    ...["agent/model", "override/model", "provider/model", "model-1", "model-2", "model-3", "model-4", "model-5", "model-6"].map(makeAvailable),
+  ];
   const ctx = {
     cwd: "/parent/worktree",
-    model: { provider: "parent-provider", id: "parent-model" },
+    model: current,
     thinkingLevel: "medium",
+    modelRegistry: { refresh: async () => {}, getAvailable: () => options.available ?? fallbackAvailable },
     ui: { notify: (message: string) => warnings.push(message) },
   } as any;
   const call = (params: Record<string, unknown>, onUpdate?: (result: unknown) => void) =>
@@ -181,8 +193,8 @@ describe("subagent", () => {
           tools: ["read", "grep"],
           task: "model suffix",
           cwd: "/parent/worktree",
-          model: "override/model:high",
-          thinking: undefined,
+          model: "override/model",
+          thinking: "high",
         },
         {
           agent: "inherited",
@@ -194,6 +206,51 @@ describe("subagent", () => {
         },
       ],
     );
+  });
+
+  it("resolves explicit short model names to canonical active routes", async () => {
+    const requests: RunRequest[] = [];
+    const sol = { provider: "openai-codex", id: "gpt-5.6-sol", name: "gpt-5.6-sol", api: "openai-responses", baseUrl: "https://example.test", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 16_384 };
+    const terra = { ...sol, provider: "anthropic", id: "claude-sonnet-4-6", name: "claude-sonnet-4-6" };
+    const { call } = setup({ available: [sol, terra], run: async (request) => { requests.push(request); return successful(request); } });
+    await call({ agent: "worker", task: "short name", model: "sonnet", thinking: "high" });
+    assert.equal(requests[0].model, "anthropic/claude-sonnet-4-6");
+    assert.equal(requests[0].thinking, "high");
+  });
+
+  it("treats an exact colon-suffixed model ID as identity before parsing thinking", async () => {
+    const requests: RunRequest[] = [];
+    const exact = {
+      provider: "openrouter",
+      id: "vendor/model:high",
+      name: "vendor/model:high",
+      api: "openai-responses",
+      baseUrl: "https://example.test",
+      reasoning: true,
+      thinkingLevelMap: { high: null },
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200_000,
+      maxTokens: 16_384,
+    };
+    const { call } = setup({
+      available: [exact],
+      run: async (request) => {
+        requests.push(request);
+        return successful(request);
+      },
+    });
+
+    await call({ agent: "worker", task: "exact colon ID", model: "openrouter/vendor/model:high" });
+    assert.equal(requests[0].model, "openrouter/vendor/model:high");
+    assert.equal(requests[0].thinking, undefined);
+  });
+
+  it("validates every explicit parallel model before starting a child", async () => {
+    let started = 0;
+    const { call } = setup({ run: async (request) => { started += 1; return successful(request); } });
+    await assert.rejects(call({ tasks: [{ agent: "worker", task: "valid", model: "gpt-5.6-sol" }, { agent: "worker", task: "bad", model: "missing" }] }), /not available/);
+    assert.equal(started, 0);
   });
 
   it("runs at most four parallel tasks, preserves order, and aggregates usage", async () => {

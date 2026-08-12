@@ -8,6 +8,7 @@ This extension intentionally provides a smaller surface than Pi's example and th
 - single and bounded parallel execution only
 - global agent definitions only
 - per-task model, thinking, and working-directory overrides
+- explicit model values resolved through the shared model-query registry resolver
 - no chains, workflow prompts, background handles, steering, worktrees, or nested delegation
 
 ## Agent definitions
@@ -74,6 +75,10 @@ Parallel tasks:
 ```
 
 A parallel call accepts at most eight tasks and runs at most four child processes concurrently. Each task has independent `cwd`, `model`, and `thinking` fields.
+
+Explicit model values are resolved against Pi's refreshed authenticated registry. Canonical provider/model
+references and Pi-style short/fuzzy names are accepted; unavailable, ambiguous, or synthetic models fail before
+execution. A `:thinking` suffix remains compatible, and an explicit `task.thinking` wins over that suffix.
 
 Defaults resolve independently in this order:
 
