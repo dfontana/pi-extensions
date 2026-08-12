@@ -8,7 +8,7 @@ None.
 
 ## Provides
 
-- `Alt+Shift+S` shortcut — if nothing is stashed, saves the current editor text and clears the editor (a `● stashed` footer indicator appears); if something is stashed, restores it. Stashing an empty editor is a no-op with an info notice.
+- `Alt+Shift+S` or `Alt+Ctrl+S` shortcut — if nothing is stashed, saves the current editor text and clears the editor (a `● stashed` footer indicator appears); if something is stashed, restores it. Stashing an empty editor is a no-op with an info notice.
 
 ## Limitations and Technical details
 
