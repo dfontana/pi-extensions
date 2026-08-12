@@ -34,6 +34,7 @@ Each extension has its own README covering configuration, provided tools/command
 | [rainbow-spinner](extensions/rainbow-spinner/README.md) | Theme-colored spinner with a random whimsical phrase each turn |
 | [review-model-selector](extensions/review-model-selector/README.md) | `select_review_model` tool: deterministic adversarial-reviewer selection |
 | [scoped-tools](extensions/scoped-tools/README.md) | YAML-specified bash commands as validated agent tools with hidden, call-time computed parameters |
+| [subagent](extensions/subagent/README.md) | Lean synchronous delegation to global agents, with single and bounded-parallel execution |
 | [web-access](extensions/web-access/README.md) | `web_search` and `web_fetch` tools backed by configurable model providers |
 
 ## Skills

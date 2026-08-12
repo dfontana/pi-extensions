@@ -2,7 +2,7 @@
 name: quick-review
 description: >
   Run a lightweight single-agent code review and bounded fix/re-review loop for small, routine, low-risk, or clearly scoped changes. Use by default for ordinary review requests that do not explicitly request a deep, comprehensive, adversarial, or multi-agent audit. One reviewer checks completeness, correctness, duplication, and simplicity together.
-compatibility: Requires Pi 0.80.3+ and the @tintinweb/pi-subagents Agent tools.
+compatibility: Requires Pi 0.84.1+ and the subagent tool.
 ---
 
 # Quick Review
@@ -31,20 +31,14 @@ Reject thinking values outside `medium|high|xhigh`. Reject intelligence values o
 Internal callers may also supply:
 
 - `fixer=coordinator` — the current coordinating session applies fixes; this is the default.
-- `fixer=agent:<id>` — synchronously resume that implementing agent with findings.
+- `fixer=subagent` — delegate fixes to a fresh general-purpose subagent.
 - `requirements=<text>` — the intended behavior, consolidated feedback, or implementation plan to check for completeness.
 
 These internal fields are workflow context, not required user-facing syntax.
 
 ## 1. Preflight and resolve the target
 
-Confirm that `Agent`, `get_subagent_result`, and `steer_subagent` are available. If any are missing, stop with this installation guidance:
-
-```bash
-pi install npm:@tintinweb/pi-subagents
-```
-
-Then tell the user to run `/reload` and invoke the skill again.
+Confirm that `subagent` is available. If it is missing, stop and tell the user to enable or reload this package.
 
 Restate the exact review target. Resolve it with repository-appropriate commands and include untracked files.
 
@@ -71,7 +65,7 @@ The selector is mandatory because it reads the live session model and configured
 
 Read [references/reviewer-prompt.md](references/reviewer-prompt.md) in full and fill every placeholder with the exact scope, base, requirements, and prior-round context.
 
-Launch exactly one fresh, read-only reviewer for the standard round as a background `Agent` call using the selected model and thinking level. Capture its ID and retrieve its complete result with `get_subagent_result(wait=true)` before continuing. Never synthesize from a completion notification or summary.
+Launch exactly one fresh, read-only reviewer for the standard round with `subagent` using the selected model and thinking level. Consume its complete synchronous result before continuing.
 
 The reviewer must independently inspect the actual repository and cover all four angles in one pass:
 
@@ -93,7 +87,7 @@ There are at most three reviews. The third review is report-only.
    - If `CLEAN`, stop.
    - Otherwise deliver every validated finding to the fixer.
    - With `fixer=coordinator`, apply the fixes in this session.
-   - With `fixer=agent:<id>`, resume that exact ID synchronously and consume the returned result directly. `pi-subagents` does not background resumed agents or return a new ID; retain the original ID. If the completed session has expired and resume returns `Agent not found`, stop and report the unresolved findings rather than creating a replacement.
+   - With `fixer=subagent`, launch a fresh general-purpose subagent with the requirements, current target, and validated findings, then consume its complete result.
    - Run focused tests/checks for the fixes. Do not claim success if they fail.
 2. **Review 2**
    - Recompute the target and launch one fresh reviewer.

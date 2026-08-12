@@ -18,7 +18,7 @@
  * restriction, OpenRouter raw-content degradation, PDF/citation asymmetries).
  */
 
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import { Type, StringEnum } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, type ExtensionAPI, type ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text, truncateToWidth } from "@earendil-works/pi-tui";
@@ -48,9 +48,6 @@ function checkModelExists(
   if (!model) {
     return { ok: false, error: `model ${provider}/${modelId} is not in the model registry` };
   }
-  if (!model.baseUrl) {
-    return { ok: false, error: `no baseUrl found for ${provider}/${modelId}` };
-  }
   return { ok: true };
 }
 
@@ -64,7 +61,7 @@ async function resolveModelAuth(
   provider: string,
   modelId: string,
 ): Promise<
-  | { ok: true; model: Model<Api>; apiKey: string; headers?: Record<string, string> }
+  | { ok: true; model: Model<Api>; apiKey: string; baseUrl: string; headers?: ProviderHeaders }
   | { ok: false; error: string }
 > {
   // Since pi 0.80.8 model loading is async and find() reads a snapshot; refresh
@@ -77,8 +74,22 @@ async function resolveModelAuth(
   const auth = await modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok) return { ok: false, error: `auth failed for ${provider} (${auth.error})` };
   if (!auth.apiKey) return { ok: false, error: `no API key for ${provider}` };
-  if (!model.baseUrl) return { ok: false, error: `no baseUrl found for ${provider}/${modelId}` };
-  return { ok: true, model, apiKey: auth.apiKey, headers: auth.headers };
+  const baseUrl = auth.baseUrl ?? model.baseUrl;
+  if (!baseUrl) return { ok: false, error: `no baseUrl found for ${provider}/${modelId}` };
+  return { ok: true, model, apiKey: auth.apiKey, baseUrl, headers: auth.headers };
+}
+
+/** Merge case-insensitive HTTP headers, honoring pi's null-as-suppression contract. */
+function mergeHeaders(...sources: Array<ProviderHeaders | undefined>): Record<string, string> {
+  const merged = new Map<string, { name: string; value: string }>();
+  for (const source of sources) {
+    for (const [name, value] of Object.entries(source ?? {})) {
+      const key = name.toLowerCase();
+      if (value === null) merged.delete(key);
+      else merged.set(key, { name, value });
+    }
+  }
+  return Object.fromEntries(Array.from(merged.values(), ({ name, value }) => [name, value]));
 }
 
 type ToolUpdate = { content: Array<{ type: "text"; text: string }>; details: undefined };
@@ -113,7 +124,7 @@ async function postJsonWithThrobber(opts: {
   try {
     const res = await fetch(opts.url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...opts.headers },
+      headers: opts.headers,
       body: JSON.stringify(opts.body),
       signal: opts.signal,
     });
@@ -225,7 +236,7 @@ function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
       // Re-resolve per call so a mid-session credential/registry change is honored.
       const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model);
       if (!resolved.ok) throw new Error(resolved.error);
-      const { model, apiKey, headers } = resolved;
+      const { model, apiKey, baseUrl, headers } = resolved;
 
       // Agent-supplied args win; the config's common params are the defaults.
       const body = adapter.buildBody(
@@ -241,8 +252,8 @@ function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
 
       const json = await postJsonWithThrobber({
         toolName: "web_search",
-        url: adapter.endpoint(model.baseUrl),
-        headers: { ...adapter.headers(apiKey), ...headers },
+        url: adapter.endpoint(baseUrl),
+        headers: mergeHeaders({ "Content-Type": "application/json" }, adapter.headers(apiKey), headers),
         body,
         signal: signal ?? ctx.signal,
         onUpdate,
@@ -326,14 +337,14 @@ function registerWebFetch(pi: ExtensionAPI, cfg: FetchToolConfig) {
       // Re-resolve per call so a mid-session credential/registry change is honored.
       const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model);
       if (!resolved.ok) throw new Error(resolved.error);
-      const { model, apiKey, headers } = resolved;
+      const { model, apiKey, baseUrl, headers } = resolved;
 
       const body = adapter.buildBody(model.id, params.url, params.prompt, cfg.params);
 
       const json = await postJsonWithThrobber({
         toolName: "web_fetch",
-        url: adapter.endpoint(model.baseUrl),
-        headers: { ...adapter.headers(apiKey), ...headers },
+        url: adapter.endpoint(baseUrl),
+        headers: mergeHeaders({ "Content-Type": "application/json" }, adapter.headers(apiKey), headers),
         body,
         signal: signal ?? ctx.signal,
         onUpdate,
