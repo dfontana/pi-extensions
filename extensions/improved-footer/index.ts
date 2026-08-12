@@ -8,7 +8,7 @@
  *
  * Footer layout mirrors pi's default exactly:
  *   Line 1: ~/cwd (jj:bookmark) • session-name
- *   Line 2: ↑tokens ↓tokens Rcache Wcache $cost ctx%/window  model • thinking
+ *   Line 2: ↑tokens ↓tokens CHhit% $cost ctx%/window  model • thinking
  *   Line 3: extension statuses
  */
 
@@ -165,8 +165,8 @@ export default function (pi: ExtensionAPI) {
   // ─── Cached token totals (updated incrementally on message_end) ─────────
   let cachedTotalInput = 0;
   let cachedTotalOutput = 0;
-  let cachedTotalCacheRead = 0;
-  let cachedTotalCacheWrite = 0;
+  let latestCacheHitRate: number | undefined;
+  let hasCacheActivity = false;
 
   // ─── VCS state: jj bookmark (activity-triggered), git from FooterDataProvider ──
   let jjBookmark: string | null = null;
@@ -224,8 +224,13 @@ export default function (pi: ExtensionAPI) {
     // Incrementally accumulate token totals (avoids re-iterating all entries in render)
     cachedTotalInput += event.message.usage.input;
     cachedTotalOutput += event.message.usage.output;
-    cachedTotalCacheRead += event.message.usage.cacheRead;
-    cachedTotalCacheWrite += event.message.usage.cacheWrite;
+    const promptTokens = event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite;
+    latestCacheHitRate = promptTokens > 0
+      ? (event.message.usage.cacheRead / promptTokens) * 100
+      : undefined;
+    if (event.message.usage.cacheRead > 0 || event.message.usage.cacheWrite > 0) {
+      hasCacheActivity = true;
+    }
 
     // Refresh jj bookmark on activity (cheap: only fires when user is interacting)
     refreshJjBookmark();
@@ -266,8 +271,8 @@ export default function (pi: ExtensionAPI) {
     costState = { orCost: 0, piCost: 0, totalCacheDiscount: 0, lastProvider: "", lastModel: "", seenIds: new Set() };
     cachedTotalInput = 0;
     cachedTotalOutput = 0;
-    cachedTotalCacheRead = 0;
-    cachedTotalCacheWrite = 0;
+    latestCacheHitRate = undefined;
+    hasCacheActivity = false;
     modelId = ctx.model?.id ?? "";
     thinkingLevel = pi.getThinkingLevel();
     vcsCwd = ctx.cwd;
@@ -280,8 +285,13 @@ export default function (pi: ExtensionAPI) {
         if (entry.type === "message" && entry.message.role === "assistant") {
           cachedTotalInput += entry.message.usage.input;
           cachedTotalOutput += entry.message.usage.output;
-          cachedTotalCacheRead += entry.message.usage.cacheRead;
-          cachedTotalCacheWrite += entry.message.usage.cacheWrite;
+          const promptTokens = entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
+          latestCacheHitRate = promptTokens > 0
+            ? (entry.message.usage.cacheRead / promptTokens) * 100
+            : undefined;
+          if (entry.message.usage.cacheRead > 0 || entry.message.usage.cacheWrite > 0) {
+            hasCacheActivity = true;
+          }
         }
       }
     } catch { /* session may not be loaded yet */ }
@@ -334,8 +344,9 @@ export default function (pi: ExtensionAPI) {
           const statsParts: string[] = [];
           if (cachedTotalInput) statsParts.push(`↑${formatTokens(cachedTotalInput)}`);
           if (cachedTotalOutput) statsParts.push(`↓${formatTokens(cachedTotalOutput)}`);
-          if (cachedTotalCacheRead) statsParts.push(`R${formatTokens(cachedTotalCacheRead)}`);
-          if (cachedTotalCacheWrite) statsParts.push(`W${formatTokens(cachedTotalCacheWrite)}`);
+          if (hasCacheActivity && latestCacheHitRate !== undefined) {
+            statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+          }
 
           const combinedCost = costState.orCost + costState.piCost;
           if (combinedCost > 0) {
