@@ -1,0 +1,481 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+import type { Usage } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createSubagentExtension, MAX_CONCURRENCY, MAX_PARALLEL_TASKS } from "./index.ts";
+import { SUBAGENT_CHILD_ENV, type AgentResult, type RunRequest, type SubagentRunner } from "./process.ts";
+import { emptyTrackedUsage } from "./usage.ts";
+
+interface RegisteredTool {
+  name: string;
+  description: string;
+  parameters: { properties: Record<string, unknown> };
+  execute: (...args: any[]) => Promise<any>;
+  renderCall?: (...args: any[]) => { render(width: number): string[] };
+  renderResult?: (...args: any[]) => { render(width: number): string[] };
+}
+
+const testTheme = {
+  fg: (_color: string, text: string) => text,
+  bold: (text: string) => text,
+};
+
+function renderContext(state: Record<string, unknown> = {}) {
+  return {
+    state,
+    invalidate() {},
+    args: {},
+    toolCallId: "render-test",
+    lastComponent: undefined,
+    cwd: "/tmp",
+    isError: false,
+  } as any;
+}
+
+function definition(frontmatter: string, body = "Agent system prompt") {
+  return `---\n${frontmatter}\n---\n\n${body}\n`;
+}
+
+function usage(seed: number): Usage {
+  return {
+    input: seed,
+    output: seed + 1,
+    cacheRead: seed + 2,
+    cacheWrite: seed + 3,
+    cacheWrite1h: seed + 4,
+    reasoning: seed + 5,
+    totalTokens: seed + 6,
+    cost: {
+      input: seed / 100,
+      output: seed / 100 + 0.01,
+      cacheRead: seed / 100 + 0.02,
+      cacheWrite: seed / 100 + 0.03,
+      total: seed / 10,
+    },
+  };
+}
+
+function successful(request: RunRequest, text = `done: ${request.task}`, taskUsage = usage(1)): AgentResult {
+  return {
+    agent: request.agent.name,
+    task: request.task,
+    cwd: request.cwd,
+    exitCode: 0,
+    status: "done",
+    stderr: "",
+    model: request.model,
+    thinking: request.thinking,
+    stopReason: "stop",
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        api: "test",
+        provider: "test",
+        model: request.model ?? "test-model",
+        usage: taskUsage,
+        stopReason: "stop",
+        timestamp: 1,
+      },
+    ],
+    usage: { usage: taskUsage, turns: 1, contextTokens: taskUsage.totalTokens },
+  };
+}
+
+function setup(options: { files?: Record<string, string>; run?: SubagentRunner } = {}) {
+  const directory = mkdtempSync(join(tmpdir(), "subagent-extension-"));
+  for (const [name, content] of Object.entries(
+    options.files ?? { "worker.md": definition("name: worker\ndescription: General worker") },
+  )) {
+    writeFileSync(join(directory, name), content);
+  }
+
+  let tool: RegisteredTool | undefined;
+  const api = {
+    registerTool(value: RegisteredTool) {
+      tool = value;
+    },
+  } as unknown as ExtensionAPI;
+  createSubagentExtension({ agentsDirectory: directory, run: options.run })(api);
+  assert.ok(tool, "subagent tool registered");
+
+  const warnings: string[] = [];
+  const ctx = {
+    cwd: "/parent/worktree",
+    model: { provider: "parent-provider", id: "parent-model" },
+    thinkingLevel: "medium",
+    ui: { notify: (message: string) => warnings.push(message) },
+  } as any;
+  const call = (params: Record<string, unknown>, onUpdate?: (result: unknown) => void) =>
+    tool!.execute("call-id", params, undefined, onUpdate, ctx);
+  return { tool, call, warnings };
+}
+
+describe("subagent", () => {
+  it("registers a single synchronous tool with single and parallel parameters", () => {
+    const { tool } = setup();
+    assert.equal(tool.name, "subagent");
+    assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["agent", "cwd", "model", "task", "tasks", "thinking"]);
+    assert.match(tool.description, /worker: General worker/);
+    assert.doesNotMatch(tool.description, /chain|project-local|prompt template/i);
+  });
+
+  it("resolves call overrides before agent defaults before parent defaults", async () => {
+    const requests: RunRequest[] = [];
+    const run: SubagentRunner = async (request) => {
+      requests.push(request);
+      return successful(request);
+    };
+    const { call } = setup({
+      files: {
+        "configured.md": definition(
+          "name: configured\ndescription: Configured\nmodel: agent/model\nthinking: high\ntools: read, grep",
+        ),
+        "inherited.md": definition("name: inherited\ndescription: Inherited"),
+      },
+      run,
+    });
+
+    await call({ agent: "configured", task: "agent defaults" });
+    await call({
+      agent: "configured",
+      task: "call defaults",
+      cwd: "/override/cwd",
+      model: "override/model",
+      thinking: "low",
+    });
+    await call({ agent: "configured", task: "model suffix", model: "override/model:high" });
+    await call({ agent: "inherited", task: "parent defaults" });
+
+    assert.deepEqual(
+      requests.map(({ agent, task, cwd, model, thinking }) => ({
+        agent: agent.name,
+        tools: agent.tools,
+        task,
+        cwd,
+        model,
+        thinking,
+      })),
+      [
+        {
+          agent: "configured",
+          tools: ["read", "grep"],
+          task: "agent defaults",
+          cwd: "/parent/worktree",
+          model: "agent/model",
+          thinking: "high",
+        },
+        {
+          agent: "configured",
+          tools: ["read", "grep"],
+          task: "call defaults",
+          cwd: "/override/cwd",
+          model: "override/model",
+          thinking: "low",
+        },
+        {
+          agent: "configured",
+          tools: ["read", "grep"],
+          task: "model suffix",
+          cwd: "/parent/worktree",
+          model: "override/model:high",
+          thinking: undefined,
+        },
+        {
+          agent: "inherited",
+          tools: undefined,
+          task: "parent defaults",
+          cwd: "/parent/worktree",
+          model: "parent-provider/parent-model",
+          thinking: "medium",
+        },
+      ],
+    );
+  });
+
+  it("runs at most four parallel tasks, preserves order, and aggregates usage", async () => {
+    let active = 0;
+    let peak = 0;
+    const releases: Array<() => void> = [];
+    const run: SubagentRunner = async (request) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active--;
+      return successful(request, `result ${request.task}`, usage(Number(request.task)));
+    };
+    const { call } = setup({ run });
+    const updates: unknown[] = [];
+    const resultPromise = call(
+      {
+        tasks: Array.from({ length: 6 }, (_, index) => ({
+          agent: "worker",
+          task: String(index + 1),
+          model: `model-${index + 1}`,
+          thinking: index % 2 ? "low" : "high",
+        })),
+      },
+      (update) => updates.push(update),
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(active, MAX_CONCURRENCY);
+    while (releases.length) {
+      releases.shift()!();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const result = await resultPromise;
+
+    assert.equal(peak, MAX_CONCURRENCY);
+    assert.match(result.content[0].text, /\[worker\] completed\n\nresult 1[\s\S]*result 6/);
+    assert.ok(updates.length >= 6);
+    assert.deepEqual(
+      {
+        input: result.usage.input,
+        output: result.usage.output,
+        cacheRead: result.usage.cacheRead,
+        cacheWrite: result.usage.cacheWrite,
+        cacheWrite1h: result.usage.cacheWrite1h,
+        reasoning: result.usage.reasoning,
+        totalTokens: result.usage.totalTokens,
+      },
+      { input: 21, output: 27, cacheRead: 33, cacheWrite: 39, cacheWrite1h: 45, reasoning: 51, totalTokens: 57 },
+    );
+    assert.ok(Math.abs(result.usage.cost.total - 2.1) < 1e-12);
+  });
+
+  it("falls back to the globally overridable General agent for unknown names", async () => {
+    const requests: RunRequest[] = [];
+    const { call } = setup({
+      files: { "General.md": definition("name: General\ndescription: Custom general", "Custom general prompt") },
+      run: async (request) => {
+        requests.push(request);
+        return successful(request);
+      },
+    });
+
+    await call({ agent: "does-not-exist", task: "fallback" });
+    assert.equal(requests[0].agent.name, "General");
+    assert.equal(requests[0].agent.systemPrompt, "Custom general prompt");
+  });
+
+  it("reports invalid definitions while continuing with valid agents", async () => {
+    const { call, warnings } = setup({
+      files: {
+        "bad.md": definition("name: bad"),
+        "good.md": definition("name: good\ndescription: Good"),
+      },
+      run: async (request) => successful(request),
+    });
+
+    await call({ agent: "good", task: "continue" });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /skipped 1 invalid agent definition/);
+    assert.match(warnings[0], /bad\.md.*name.*description/s);
+  });
+
+  it("rejects ambiguous modes and oversized batches", async () => {
+    const { call } = setup({
+      run: async (request) => ({
+        ...successful(request),
+        exitCode: 2,
+        stderr: "provider unavailable",
+        messages: [],
+        usage: emptyTrackedUsage(),
+      }),
+    });
+
+    await assert.rejects(call({ agent: "worker", task: "x", tasks: [{ agent: "worker", task: "y" }] }), /either.*not both/);
+    await assert.rejects(
+      call({ tasks: Array.from({ length: MAX_PARALLEL_TASKS + 1 }, () => ({ agent: "worker", task: "x" })) }),
+      /maximum is 8/,
+    );
+  });
+
+  it("returns failed single runs with call details for custom rendering", async () => {
+    const { call } = setup({
+      run: async (request) => ({
+        ...successful(request, "Partial response"),
+        exitCode: 2,
+        stderr: "provider unavailable",
+        errorMessage: "provider unavailable",
+      }),
+    });
+
+    const result = await call({ agent: "worker", task: "Inspect failure", cwd: "/custom", model: "provider/model", thinking: "high" });
+    assert.equal(result.content[0].text, "provider unavailable");
+    assert.deepEqual(
+      {
+        agent: result.details.results[0].agent,
+        task: result.details.results[0].task,
+        cwd: result.details.results[0].cwd,
+        model: result.details.results[0].model,
+        thinking: result.details.results[0].thinking,
+        error: result.details.results[0].errorMessage,
+      },
+      {
+        agent: "worker",
+        task: "Inspect failure",
+        cwd: "/custom",
+        model: "provider/model",
+        thinking: "high",
+        error: "provider unavailable",
+      },
+    );
+  });
+
+  it("caps single output returned to the parent while preserving details", async () => {
+    const output = "x".repeat(60 * 1024);
+    const { call } = setup({ run: async (request) => successful(request, output) });
+    const result = await call({ agent: "worker", task: "large" });
+    assert.ok(Buffer.byteLength(result.content[0].text, "utf8") < Buffer.byteLength(output, "utf8"));
+    assert.match(result.content[0].text, /Output truncated/);
+    assert.equal(result.details.results[0].messages[0].content[0].text, output);
+  });
+
+  it("keeps parallel failures as visible per-task results", async () => {
+    const { call } = setup({
+      run: async (request) =>
+        request.task === "fail"
+          ? { ...successful(request), exitCode: 1, messages: [], stderr: "boom", usage: emptyTrackedUsage() }
+          : successful(request, "ok"),
+    });
+    const result = await call({ tasks: [{ agent: "worker", task: "pass" }, { agent: "worker", task: "fail" }] });
+    assert.match(result.content[0].text, /1\/2 succeeded/);
+    assert.match(result.content[0].text, /\[worker\] failed\n\nboom/);
+  });
+});
+
+describe("subagent render", () => {
+  it("renders the single call heading with status, emphasized agent, and muted model metadata", () => {
+    const { tool } = setup();
+    assert.ok(tool.renderCall);
+    const theme = {
+      fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+      bold: (text: string) => `<bold>${text}</bold>`,
+    };
+    const state = { frame: 0, timer: 1 as any };
+    const rendered = tool.renderCall!(
+      { agent: "Explore", task: "Inspect the project", model: "openai/gpt-5.6-terra", thinking: "medium" },
+      theme,
+      renderContext(state),
+    ).render(240).map((line) => line.trimEnd()).join("\n");
+    assert.equal(
+      rendered,
+      "<toolTitle><bold>subagent</bold></toolTitle> <warning>⠋</warning> <toolTitle><bold>Explore</bold></toolTitle> <dim>gpt-5.6-terra medium</dim>",
+    );
+    assert.doesNotMatch(rendered, /openai\/|thinking|Inspect the project/);
+  });
+
+  it("orders metadata before task and hides tool calls when collapsed", () => {
+    const { tool } = setup();
+    assert.ok(tool.renderResult);
+    const request = {
+      agent: { name: "worker", description: "Worker", systemPrompt: "", filePath: "test" },
+      task: "Inspect the project",
+      cwd: "/tmp",
+      model: "provider/model",
+      thinking: "high" as const,
+    };
+    const item = successful(request, "Final response");
+    item.messages[0] = {
+      ...item.messages[0],
+      content: [
+        { type: "toolCall", id: "tool-1", name: "read", arguments: { path: "/tmp/file.ts" } },
+        { type: "text", text: "Final response" },
+      ],
+    } as any;
+    const result = { content: [{ type: "text", text: "Final response" }], details: { mode: "single", results: [item] } };
+
+    const collapsed = tool.renderResult!(result, { expanded: false, isPartial: false }, testTheme, renderContext())
+      .render(160)
+      .map((line) => line.trimEnd())
+      .join("\n");
+    assert.match(collapsed, /^1 turn.*\nPrompt: Inspect the project\nFinal response/);
+    assert.doesNotMatch(collapsed, /read \/tmp\/file\.ts/);
+
+    const expanded = tool.renderResult!(result, { expanded: true, isPartial: false }, testTheme, renderContext())
+      .render(160)
+      .map((line) => line.trimEnd())
+      .join("\n");
+    assert.match(expanded, /Agent: worker\nModel: provider\/model\nThinking: high\nCwd: \/tmp\nTask: Inspect the project[\s\S]*read \/tmp\/file\.ts[\s\S]*Final response/);
+  });
+
+  it("shows truncated task plus error when collapsed and all parameters, partial output, and error when expanded", () => {
+    const { tool } = setup();
+    const longTask = `Investigate ${"a".repeat(160)}`;
+    const request = {
+      agent: { name: "worker", description: "Worker", systemPrompt: "", filePath: "test" },
+      task: longTask,
+      cwd: "/custom/path",
+      model: "provider/model",
+      thinking: "xhigh" as const,
+    };
+    const item = successful(request, "Partial response");
+    item.exitCode = 2;
+    item.status = "done";
+    item.errorMessage = "provider unavailable";
+    const result = { content: [{ type: "text", text: "provider unavailable" }], details: { mode: "single", results: [item] } };
+
+    const collapsed = tool.renderResult!(result, { expanded: false, isPartial: false }, testTheme, renderContext())
+      .render(200)
+      .map((line) => line.trimEnd())
+      .join("\n");
+    assert.match(collapsed, /^1 turn.*\nPrompt: Investigate a+…\nprovider unavailable/);
+    assert.doesNotMatch(collapsed, /Partial response/);
+    assert.ok(collapsed.length < longTask.length + 160);
+
+    const expanded = tool.renderResult!(result, { expanded: true, isPartial: false }, testTheme, renderContext())
+      .render(240)
+      .map((line) => line.trimEnd())
+      .join("\n");
+    assert.match(expanded, /Agent: worker\nModel: provider\/model\nThinking: xhigh\nCwd: \/custom\/path\nTask: Investigate a{160}/);
+    assert.match(expanded, /Partial response[\s\S]*Error: provider unavailable/);
+  });
+
+  it("updates the single call heading from throbber to checkmark", () => {
+    const { tool } = setup();
+    const request = {
+      agent: { name: "worker", description: "Worker", systemPrompt: "", filePath: "test" },
+      task: "Work",
+      cwd: "/tmp",
+      model: "provider/model",
+      thinking: "low" as const,
+    };
+    const item = successful(request, "Working");
+    item.exitCode = -1;
+    item.status = "running";
+    const state = { frame: 0, timer: 1 as any };
+    const partialResult = { content: [{ type: "text", text: "Working" }], details: { mode: "single", results: [item] } };
+    tool.renderResult!(partialResult, { expanded: false, isPartial: true }, testTheme, renderContext(state)).render(120);
+    const partialCall = tool.renderCall!({ agent: "worker", task: "Work" }, testTheme, renderContext(state))
+      .render(120).map((line) => line.trimEnd()).join("\n");
+    assert.equal(partialCall, "subagent ⠋ worker model low");
+
+    item.exitCode = 0;
+    item.status = "done";
+    const completeResult = { content: [{ type: "text", text: "Working" }], details: { mode: "single", results: [item] } };
+    tool.renderResult!(completeResult, { expanded: false, isPartial: false }, testTheme, renderContext(state)).render(120);
+    const completeCall = tool.renderCall!({ agent: "worker", task: "Work" }, testTheme, renderContext(state))
+      .render(120).map((line) => line.trimEnd()).join("\n");
+    assert.equal(completeCall, "subagent ✓ worker model low");
+  });
+});
+
+describe("subagent child isolation", () => {
+  it("does not register the tool inside spawned child sessions", () => {
+    const previous = process.env[SUBAGENT_CHILD_ENV];
+    process.env[SUBAGENT_CHILD_ENV] = "1";
+    try {
+      let registrations = 0;
+      createSubagentExtension()({ registerTool: () => registrations++ } as unknown as ExtensionAPI);
+      assert.equal(registrations, 0);
+    } finally {
+      if (previous === undefined) delete process.env[SUBAGENT_CHILD_ENV];
+      else process.env[SUBAGENT_CHILD_ENV] = previous;
+    }
+  });
+});
