@@ -4,7 +4,6 @@ import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import {
   emptyTrackedUsage,
   emptyUsage,
-  formatAggregateUsage,
   formatUsage,
   trackMessageUsage,
   type TrackedUsage,
@@ -71,28 +70,4 @@ describe("subagent usage", () => {
     assert.match(formatUsage(tracked), /12\.0%\/1\.0k$/);
   });
 
-  it("limits parallel totals to additive stats", () => {
-    for (const windows of [[100, 100], [100, 1_000]]) {
-      const items: TrackedUsage[] = [
-        {
-          usage: usage({ input: 10, output: 20, cacheRead: 90, cost: { total: 1 } }),
-          turns: 1,
-          contextTokens: 10,
-          contextWindow: windows[0],
-          latestCacheHitRate: 90,
-          hasCacheActivity: true,
-        },
-        {
-          usage: usage({ input: 30, output: 40, cacheWrite: 10, cost: { total: 2 } }),
-          turns: 2,
-          contextTokens: 90,
-          contextWindow: windows[1],
-          latestCacheHitRate: 0,
-          hasCacheActivity: true,
-        },
-      ];
-
-      assert.equal(formatAggregateUsage(items), "3 turns ↑40 ↓60 $3.000");
-    }
-  });
 });

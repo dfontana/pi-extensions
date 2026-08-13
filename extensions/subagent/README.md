@@ -1,14 +1,14 @@
 # Subagent
 
-Delegate tasks to global, user-defined agents in isolated Pi processes.
+Delegate one task at a time to global, user-defined agents in isolated Pi processes.
 
-This extension intentionally provides a smaller surface than Pi's example and third-party subagent managers:
+This extension intentionally keeps a small synchronous surface:
 
-- one synchronous `subagent` tool
-- single and bounded parallel execution only
+- one `subagent` tool invocation launches exactly one child process
+- independent work runs in parallel when the parent emits sibling `subagent` calls in the same assistant response
 - global agent definitions only
-- per-task model, thinking, and working-directory overrides
-- explicit model values resolved through the shared model-query registry resolver
+- per-call model, thinking, and working-directory overrides
+- shared model-query registry resolution
 - no chains, workflow prompts, background handles, steering, worktrees, or nested delegation
 
 ## Agent definitions
@@ -19,8 +19,7 @@ Create non-recursive Markdown files in:
 ~/.pi/agent/agents/*.md
 ```
 
-The actual root comes from Pi's `getAgentDir()`, so `PI_CODING_AGENT_DIR` is respected.
-Project-local `.pi/agents` directories are never read.
+The actual root comes from Pi's `getAgentDir()`, so `PI_CODING_AGENT_DIR` is respected. Project-local `.pi/agents` directories are never read.
 
 ```markdown
 ---
@@ -39,7 +38,7 @@ Required frontmatter:
 - `name`: unique agent name
 - `description`: short description shown in the tool definition
 
-A built-in `General` worker-style definition is always available and is used when a call requests an unknown agent name. A global agent named `General` overrides that built-in definition.
+A built-in `General` worker definition is always available and is used when a call requests an unknown agent name. A global agent named `General` overrides that built-in definition.
 
 Optional frontmatter:
 
@@ -51,8 +50,6 @@ The Markdown body is appended to the child Pi system prompt. Invalid files are s
 
 ## Tool API
 
-Single task:
-
 ```json
 {
   "agent": "scout",
@@ -63,41 +60,32 @@ Single task:
 }
 ```
 
-Parallel tasks:
+`agent` and `task` are required. `cwd`, `model`, and `thinking` are optional. The precedence for each call is:
 
-```json
-{
-  "tasks": [
-    { "agent": "scout", "task": "Find authentication code" },
-    { "agent": "scout", "task": "Find authorization tests", "thinking": "medium" }
-  ]
-}
-```
-
-A parallel call accepts at most eight tasks and runs at most four child processes concurrently. Each task has independent `cwd`, `model`, and `thinking` fields.
-
-Explicit model values are resolved against Pi's refreshed authenticated registry. Canonical provider/model
-references and Pi-style short/fuzzy names are accepted; unavailable, ambiguous, or synthetic models fail before
-execution. A `:thinking` suffix remains compatible, and an explicit `task.thinking` wins over that suffix.
-
-Defaults resolve independently in this order:
-
-1. tool-call task override
+1. call override
 2. agent frontmatter
-3. dispatching session's current model or thinking level
+3. dispatching session defaults
 
-The working directory defaults to the dispatching session's current directory.
+The working directory defaults to the dispatching session's current directory. Explicit model values are resolved against Pi's refreshed authenticated registry. Canonical provider/model references and Pi-style short/fuzzy names are accepted; unavailable, ambiguous, or synthetic models fail only their native row. A `:thinking` suffix remains compatible, and an explicit call `thinking` wins over that suffix.
 
-## Execution and output
+To run independent work in parallel, emit all independent sibling `subagent` calls in the same assistant response, up to eight calls. Do not issue unrelated sequential tools between those calls. Then consume every complete synchronous result before continuing. Each native Pi tool row remains separate, and Ctrl+O remains Pi's global expansion toggle.
 
-Each task launches Pi in JSON print mode with no session file. Explicit parent `--no-extensions` and `--extension` flags are preserved, with extension paths made absolute so per-task working-directory overrides cannot change what is loaded. Immediately before launch, registered environment providers can add values to that child's isolated environment; this supports launch-scoped capability handoffs without persisting them. The extension streams visible child activity into compact tool rendering, offers expanded Markdown output, and returns aggregate child usage through Pi's tool-result usage field. Invisible child tool-result events do not trigger repaints, and bursty parallel activity is coalesced. Model-visible final output is capped at 50 KB per task; retained transcript details are separately bounded to prevent runaway memory use.
+Older persisted calls containing the removed array syntax are display-only compatibility cases. Reissue those tasks as sibling calls; the live tool does not execute the old format.
 
-Parallel failures are reported alongside successful task results. A failed single task fails the tool call. Aborting the parent call sends `SIGTERM` to active children and escalates to `SIGKILL` after five seconds.
+## Scheduling and execution
 
-For a single call, the tool heading shows `subagent`, status, agent, model name, and thinking level on one line (without the provider prefix). The collapsed result then shows usage, truncated prompt, and the latest non-empty return value or error while hiding child tool calls. Usage stats mirror the improved footer (`↑input ↓output CHcache-hit% $cost context%/window`), with the useful `turn(s)` count as the only additional stat. Expanded output includes every resolved call parameter, bounded accumulated tool-call summaries (with an omission count after the activity limit), final output, and any error. While running, expanded output grows with visible tool activity but reserves Markdown rendering until completion, avoiding transient output shrinkage. Active agents use a static marker so large expanded rows do not redraw solely for animation; completed agents use a checkmark. Render components are retained across updates so unchanged text and Markdown keep their layout caches.
+Each extension instance has a FIFO scheduler with at most eight outstanding/admitted calls and four active child processes. An accepted call immediately emits a queued partial result, so its native row shows `·` and `waiting for subagent slot`; a launched call shows `●` and `working`; completion shows `✓`, and child failure or cancellation shows `✗`. Setup and model resolution may finish while a call waits, but only child launch consumes an active slot. Aborted waiters are removed and never launched. Every admission and active lease is released idempotently in `finally`, including runner and setup errors. The scheduler is scoped to the parent extension instance/session and is not shared across processes.
 
-The child process receives `PI_EXTENSIONS_SUBAGENT_CHILD=1`. This extension detects that marker and does not register its tool in children, preventing recursive delegation.
+Each call launches Pi in JSON print mode with no session file. Explicit parent `--no-extensions` and `--extension` flags are preserved, with extension paths made absolute so a working-directory override cannot change what is loaded. Immediately before launch, registered environment providers add values to that child's isolated environment. The child receives `PI_EXTENSIONS_SUBAGENT_CHILD=1`, preventing recursive registration. Visible child activity streams into compact rendering; transcript messages, stderr, and the latest full tool-call preview are separately bounded. Model-visible final output is capped at 50 KB per call; retained details are also separately bounded, while per-call usage remains available.
+
+The model registry refresh is shared as a single-flight operation across simultaneous sibling calls. Individual callers still honor their own cancellation, and each requested model is resolved independently after refresh, so one invalid model does not invalidate its siblings.
+
+Child failures return their retained, separately bounded result details and usage and are marked as native Pi tool errors. Setup, schema, admission, and model-resolution failures throw normally. Aborting a queued or admitted-but-not-started call cancels it without launching a child. An active child receives TERM first, then KILL after the five-second grace period if it remains alive.
+
+## Rendering
+
+Collapsed rows show per-call usage, a truncated prompt, and the latest final response or error; their rendering is unchanged by expanded activity. Expanded rows begin directly with the working directory and task—the native title already shows agent, model, thinking, and state—and render final Markdown only after completion. While running, expanded rows reserve exactly ten lines for only the latest tool call (or ten blank lines before the first call), showing its full name and arguments and then wrapping and clipping the preview to the available ten lines; queued rows do not reserve activity space. Completion, failure, and cancellation remove that activity area, so no historical tool calls remain in completed output. Stored `mode=single` details use the current renderer; stored `mode=parallel` details are rendered only from their persisted `content` fallback and are never treated as a structured batch.
 
 ## Reused Pi APIs
 
-The implementation uses public Pi APIs for config-directory discovery, frontmatter parsing, extension context defaults, context-token calculation, Markdown rendering, and tool-result usage. Pi does not currently export public helpers for streaming child processes, aggregating nested usage, compact token/cost formatting, or summarizing arbitrary tool calls. Stateless usage-formatting helpers are shared locally with the improved-footer extension; the remaining helpers stay small and local to this extension.
+The implementation uses public Pi APIs for config-directory discovery, frontmatter parsing, extension context defaults, context-token calculation, Markdown rendering, tool-result middleware, and tool-result usage. Stateless usage-formatting helpers are shared locally with the improved-footer extension; process and rendering helpers remain small and local to this extension.

@@ -34,13 +34,13 @@ Each extension has its own README covering configuration, provided tools/command
 | [model-query](extensions/model-query/README.md) | `model_query` tool: resolve one usable model by deterministic policy |
 | [review-model-selector](extensions/review-model-selector/README.md) | `select_review_model` tool: deterministic adversarial-reviewer selection |
 | [scoped-tools](extensions/scoped-tools/README.md) | YAML-specified bash commands as validated agent tools with hidden, call-time computed parameters |
-| [subagent](extensions/subagent/README.md) | Lean synchronous delegation to global agents, with single and bounded-parallel execution |
+| [subagent](extensions/subagent/README.md) | Lean synchronous one-call delegation to global agents, with sibling-call parallelism |
 | [web-access](extensions/web-access/README.md) | `web_search` and `web_fetch` tools backed by configurable model providers |
 
 ## Skills
 
 - **quick-review** — lightweight review/fix workflow for small, routine, low-risk, or clearly scoped changes: one reviewer covers completeness, correctness, duplication, and simplicity in each bounded round. This is the default for ordinary review requests.
-- **run-review** — full adversarial review/fix workflow for explicitly deep, comprehensive, multi-agent, broad, or high-risk reviews: four parallel investigations, an independent synthesis reviewer, and a bounded fix/re-review loop.
+- **run-review** — full adversarial review/fix workflow for explicitly deep, comprehensive, multi-agent, broad, or high-risk reviews: four sibling subagent investigations emitted in one response, an independent synthesis reviewer, and a bounded fix/re-review loop.
 - **run-plan** — consolidates review feedback, delegates implementation to a persistent large-context agent, then invokes the full `run-review` workflow with that implementer as the fixer.
 
 A repo-local **web-access-smoke-test** skill (in `.pi/skills/`, not shipped with the package) provides an end-to-end check of the web-access tools after code changes.

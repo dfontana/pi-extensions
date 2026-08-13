@@ -1,18 +1,18 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { Message, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "./agents.ts";
+import { thinkingFromModelReference } from "../model-query/query.ts";
 import { emptyTrackedUsage, trackMessageUsage, type TrackedUsage } from "./usage.ts";
 
 export const SUBAGENT_CHILD_ENV = "PI_EXTENSIONS_SUBAGENT_CHILD";
 const MAX_CAPTURED_TRANSCRIPT_BYTES = 1024 * 1024;
 const MAX_CAPTURED_MESSAGE_BYTES = 512 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
-const MAX_CAPTURED_TOOL_CALLS = 200;
-const MAX_TOOL_CALL_SUMMARY_LENGTH = 500;
+const MAX_TOOL_CALL_PREVIEW_BYTES = 64 * 1024;
 
 export interface RunRequest {
   agent: AgentConfig;
@@ -40,8 +40,8 @@ export interface AgentResult {
   thinking?: ModelThinkingLevel;
   stopReason?: string;
   errorMessage?: string;
-  toolCalls?: string[];
-  omittedToolCalls?: number;
+  /** Most recent tool activity, retained for the expanded running view. */
+  latestToolCall?: string;
 }
 
 export type SubagentRunner = (request: RunRequest) => Promise<AgentResult>;
@@ -66,52 +66,17 @@ export function childExtensionArgs(
   return inherited;
 }
 
-function shortenPath(value: string): string {
-  const home = homedir();
-  return value.startsWith(home) ? `~${value.slice(home.length)}` : value;
-}
-
 export function formatToolCall(name: string, args: Record<string, unknown>): string {
-  const path = String(args.path ?? args.file_path ?? "...");
-  let summary: string;
-  switch (name) {
-    case "bash": {
-      const command = String(args.command ?? "...");
-      summary = `$ ${command.length > 70 ? `${command.slice(0, 70)}…` : command}`;
-      break;
-    }
-    case "read":
-    case "write":
-    case "edit":
-    case "ls":
-      summary = `${name} ${shortenPath(path)}`;
-      break;
-    case "find":
-      summary = `find ${String(args.pattern ?? "*")} in ${shortenPath(path)}`;
-      break;
-    case "grep":
-      summary = `grep /${String(args.pattern ?? "")}/ in ${shortenPath(path)}`;
-      break;
-    default: {
-      const encoded = JSON.stringify(args);
-      summary = `${name} ${encoded.length > 60 ? `${encoded.slice(0, 60)}…` : encoded}`;
-    }
-  }
-  return summary.length > MAX_TOOL_CALL_SUMMARY_LENGTH
-    ? `${summary.slice(0, MAX_TOOL_CALL_SUMMARY_LENGTH - 1)}…`
-    : summary;
+  const preview = `${name} ${JSON.stringify(args, null, 2) ?? "{}"}`;
+  // Rendering clips this to ten terminal lines. Keep a generous storage bound
+  // as defense against exceptionally large write/edit arguments.
+  return truncateUtf8(preview, MAX_TOOL_CALL_PREVIEW_BYTES);
 }
 
 export function captureToolCalls(result: AgentResult, message: Message): void {
   if (message.role !== "assistant") return;
-  result.toolCalls ??= [];
   for (const part of message.content) {
-    if (part.type !== "toolCall") continue;
-    if (result.toolCalls.length < MAX_CAPTURED_TOOL_CALLS) {
-      result.toolCalls.push(formatToolCall(part.name, part.arguments));
-    } else {
-      result.omittedToolCalls = (result.omittedToolCalls ?? 0) + 1;
-    }
+    if (part.type === "toolCall") result.latestToolCall = formatToolCall(part.name, part.arguments);
   }
 }
 
@@ -194,21 +159,64 @@ function capMessage(message: Message): Message {
   return { ...message, content: truncateUtf8(typeof message.content === "string" ? message.content : "[oversized user message omitted]", MAX_CAPTURED_MESSAGE_BYTES / 2) };
 }
 
-function thinkingFromModelReference(model: string | undefined): ModelThinkingLevel | undefined {
-  const match = model?.match(/:(off|minimal|low|medium|high|xhigh|max)$/);
-  return match?.[1] as ModelThinkingLevel | undefined;
+export interface AbortedResultRequest {
+  agent: AgentConfig | string;
+  task: string;
+  cwd: string;
+  model?: string;
+  thinking?: ModelThinkingLevel;
+  contextWindow?: number;
 }
 
-async function writeSystemPrompt(agent: AgentConfig): Promise<{ directory: string; filePath: string } | undefined> {
+/** Build the canonical result for a call cancelled before or during launch. */
+export function abortedResult(request: AbortedResultRequest): AgentResult {
+  return {
+    agent: typeof request.agent === "string" ? request.agent : request.agent.name,
+    task: request.task,
+    cwd: request.cwd,
+    exitCode: 130,
+    status: "done",
+    messages: [],
+    stderr: "",
+    usage: emptyTrackedUsage(request.contextWindow),
+    model: request.model,
+    thinking: request.thinking ?? thinkingFromModelReference(request.model),
+    stopReason: "aborted",
+    errorMessage: "Subagent was aborted",
+  };
+}
+
+interface SystemPromptFile {
+  directory: string;
+  filePath: string;
+}
+
+/** Test-only launch seams; normal callers use the one-argument runner. */
+export interface RunPiSubagentHooks {
+  afterPromptCreation?: (prompt: SystemPromptFile | undefined) => void | Promise<void>;
+  spawn?: typeof spawn;
+}
+
+async function writeSystemPrompt(
+  agent: AgentConfig,
+  afterCreation?: RunPiSubagentHooks["afterPromptCreation"],
+): Promise<SystemPromptFile | undefined> {
   if (!agent.systemPrompt.trim()) return undefined;
   const directory = await mkdtemp(join(tmpdir(), "pi-subagent-"));
-  const safeName = agent.name.replace(/[^\w.-]+/g, "_");
-  const filePath = join(directory, `prompt-${safeName}.md`);
-  await writeFile(filePath, agent.systemPrompt, { encoding: "utf8", mode: 0o600 });
-  return { directory, filePath };
+  try {
+    const safeName = agent.name.replace(/[^\w.-]+/g, "_");
+    const filePath = join(directory, `prompt-${safeName}.md`);
+    const prompt = { directory, filePath };
+    await writeFile(filePath, agent.systemPrompt, { encoding: "utf8", mode: 0o600 });
+    await afterCreation?.(prompt);
+    return prompt;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
 }
 
-export const runPiSubagent: SubagentRunner = async (request) => {
+export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHooks = {}): Promise<AgentResult> {
   const result: AgentResult = {
     agent: request.agent.name,
     task: request.task,
@@ -220,31 +228,27 @@ export const runPiSubagent: SubagentRunner = async (request) => {
     usage: emptyTrackedUsage(request.contextWindow),
     model: request.model,
     thinking: request.thinking ?? thinkingFromModelReference(request.model),
-    toolCalls: [],
   };
-  if (request.signal?.aborted) {
-    result.exitCode = 130;
-    result.status = "done";
-    result.stopReason = "aborted";
-    result.errorMessage = "Subagent was aborted";
-    return result;
-  }
+  if (request.signal?.aborted) return abortedResult(request);
 
   const args = [...childExtensionArgs(), "--mode", "json", "-p", "--no-session"];
   if (request.model) args.push("--model", request.model);
   if (request.thinking) args.push("--thinking", request.thinking);
   if (request.agent.tools?.length) args.push("--tools", request.agent.tools.join(","));
 
-  const prompt = await writeSystemPrompt(request.agent);
-  if (prompt) args.push("--append-system-prompt", prompt.filePath);
-  args.push(`Task: ${request.task}`);
-
+  let prompt: SystemPromptFile | undefined;
   try {
+    prompt = await writeSystemPrompt(request.agent, hooks.afterPromptCreation);
+    if (request.signal?.aborted) return abortedResult(request);
+    if (prompt) args.push("--append-system-prompt", prompt.filePath);
+    args.push(`Task: ${request.task}`);
+
     const invocation = getPiInvocation(args);
+    if (request.signal?.aborted) return abortedResult(request);
     let aborted = false;
 
     result.exitCode = await new Promise<number>((resolve) => {
-      const child = spawn(invocation.command, invocation.args, {
+      const child = (hooks.spawn ?? spawn)(invocation.command, invocation.args, {
         cwd: request.cwd,
         env: childProcessEnvironment(request.environment),
         shell: false,
@@ -287,9 +291,9 @@ export const runPiSubagent: SubagentRunner = async (request) => {
           result.stopReason = event.message.stopReason;
           result.errorMessage = event.message.errorMessage;
         }
-        // Tool-result bodies are retained for accounting/debug details but are not
-        // visible in the subagent renderer. Only assistant messages can add a
-        // visible tool call or response, so avoid repainting for invisible events.
+        // Bounded tool-result bodies are retained for accounting/debug details but
+        // are not visible in the subagent renderer. Only assistant messages can
+        // add a visible tool call or response, so avoid repainting invisible events.
         if (event.message.role === "assistant") request.onUpdate?.(result);
       };
 

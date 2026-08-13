@@ -37,7 +37,7 @@ export function emptyTrackedUsage(contextWindow?: number): TrackedUsage {
   return tracked;
 }
 
-export function addUsage(target: Usage, usage: Usage): void {
+function addUsage(target: Usage, usage: Usage): void {
   target.input += usage.input;
   target.output += usage.output;
   target.cacheRead += usage.cacheRead;
@@ -69,12 +69,6 @@ export function trackMessageUsage(target: TrackedUsage, message: Message): void 
   }
 }
 
-export function aggregateUsage(items: readonly TrackedUsage[]): Usage {
-  const total = emptyUsage();
-  for (const item of items) addUsage(total, item.usage);
-  return total;
-}
-
 function formatTokenStats(usage: Usage): string[] {
   const parts: string[] = [];
   if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
@@ -82,7 +76,7 @@ function formatTokenStats(usage: Usage): string[] {
   return parts;
 }
 
-export function formatUsage(usage: TrackedUsage, model?: string): string {
+export function formatUsage(usage: TrackedUsage): string {
   const parts: string[] = [];
   if (usage.turns) parts.push(`${usage.turns} turn${usage.turns === 1 ? "" : "s"}`);
   parts.push(...formatTokenStats(usage.usage));
@@ -105,16 +99,5 @@ export function formatUsage(usage: TrackedUsage, model?: string): string {
       : null;
     parts.push(formatContextStat(percent, usage.contextWindow));
   }
-  if (model) parts.push(model);
-  return parts.join(" ");
-}
-
-export function formatAggregateUsage(items: readonly TrackedUsage[]): string {
-  const usage = aggregateUsage(items);
-  const turns = items.reduce((total, item) => total + item.turns, 0);
-  const parts = turns ? [`${turns} turn${turns === 1 ? "" : "s"}`] : [];
-  parts.push(...formatTokenStats(usage));
-  const costStat = formatCostStat(usage.cost.total);
-  if (costStat) parts.push(costStat);
   return parts.join(" ");
 }

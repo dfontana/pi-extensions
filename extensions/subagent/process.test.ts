@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   captureToolCalls,
   childExtensionArgs,
+  formatToolCall,
   childProcessEnvironment,
   runPiSubagent,
   SUBAGENT_CHILD_ENV,
@@ -40,7 +42,7 @@ describe("subagent process", () => {
     );
   });
 
-  it("keeps bounded visible tool activity independent of transcript eviction", () => {
+  it("retains only the latest visible tool activity", () => {
     const result: AgentResult = {
       agent: "test",
       task: "inspect",
@@ -68,16 +70,53 @@ describe("subagent process", () => {
     } as any;
 
     captureToolCalls(result, message);
-    result.messages = [];
+    assert.equal(result.latestToolCall, `read {\n  "path": "/tmp/file-204.ts"\n}`);
     captureToolCalls(result, {
       ...message,
       content: [{ type: "toolCall", id: "later", name: "grep", arguments: { pattern: "later", path: "/tmp" } }],
     });
 
-    assert.equal(result.toolCalls?.length, 200);
-    assert.equal(result.toolCalls?.[0], "read /tmp/file-0.ts");
-    assert.equal(result.toolCalls?.at(-1), "read /tmp/file-199.ts");
-    assert.equal(result.omittedToolCalls, 6);
+    assert.equal(result.latestToolCall, `grep {\n  "pattern": "later",\n  "path": "/tmp"\n}`);
+    assert.equal("toolCalls" in result, false);
+    assert.equal("omittedToolCalls" in result, false);
+  });
+
+  it("includes all tool arguments in the expanded-preview payload", () => {
+    const command = `printf '%s' ${"x".repeat(200)}`;
+    const preview = formatToolCall("bash", { command, timeout: 30, description: "full detail" });
+
+    assert.match(preview, /^bash \{/);
+    assert.ok(preview.includes(command));
+    assert.match(preview, /"timeout": 30/);
+    assert.match(preview, /"description": "full detail"/);
+  });
+
+  it("does not spawn when cancellation happens during prompt creation and cleans the prompt", async () => {
+    const controller = new AbortController();
+    let promptDirectory: string | undefined;
+    let spawnCalls = 0;
+    const result = await runPiSubagent({
+      agent: { ...agent, systemPrompt: "Instructions" },
+      task: "cancel during launch",
+      cwd: process.cwd(),
+      model: "provider/model:HIGH",
+      signal: controller.signal,
+    }, {
+      afterPromptCreation: async (prompt) => {
+        promptDirectory = prompt?.directory;
+        controller.abort();
+      },
+      spawn: (() => {
+        spawnCalls++;
+        throw new Error("spawn should not be reached");
+      }) as any,
+    });
+
+    assert.equal(spawnCalls, 0);
+    assert.equal(result.stopReason, "aborted");
+    assert.equal(result.thinking, "high");
+    assert.ok(promptDirectory);
+    assert.equal(existsSync(promptDirectory), false);
   });
 
   it("returns a failed result without spawning when already aborted", async () => {
@@ -87,11 +126,16 @@ describe("subagent process", () => {
       agent,
       task: "never run",
       cwd: process.cwd(),
+      model: "provider/model:high",
+      contextWindow: 100_000,
       signal: controller.signal,
     });
 
     assert.equal(result.exitCode, 130);
     assert.equal(result.stopReason, "aborted");
+    assert.equal(result.thinking, "high");
+    assert.equal(result.latestToolCall, undefined);
+    assert.equal(result.usage.contextWindow, 100_000);
     assert.match(result.errorMessage ?? "", /aborted/);
   });
 });

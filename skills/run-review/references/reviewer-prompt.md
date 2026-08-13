@@ -1,6 +1,6 @@
 # Adversarial reviewer synthesis prompt
 
-Use this as the fresh synthesis reviewer's task prompt after the coordinator has completed the four parallel angle investigations. Replace every `{{...}}` field with concrete values before launching or resuming the reviewer.
+Use this as the fresh synthesis reviewer's task prompt after the coordinator has completed four sibling angle calls emitted in one assistant response. Replace every `{{...}}` field with concrete values before launching or resuming the reviewer.
 
 ---
 
@@ -17,9 +17,9 @@ Assume the code under review is wrong. Your job is to prove or disprove that ass
 
 Do not modify files. You are a read-only reviewer.
 
-## Parallel investigation reports
+## Sibling investigation reports
 
-The coordinating session launched four independent subagents in parallel using your selected model and thinking level. Their complete reports follow:
+The coordinating session emitted four independent sibling subagent calls together in one assistant response using your selected model and thinking level. Their complete synchronous reports follow:
 
 ### Completeness
 
@@ -44,7 +44,7 @@ The coordinating session launched four independent subagents in parallel using y
 3. Verify every proposed finding against the code; never trust a report merely because a subagent produced it.
 4. Reject speculative, duplicate, purely stylistic, out-of-scope, or already-fixed claims.
 5. Merge overlapping findings and preserve the strongest evidence.
-6. Check the full target yourself for cross-angle issues the parallel investigators missed.
+6. Check the full target yourself for cross-angle issues the sibling investigators missed.
 
 A finding is valid only when it identifies a concrete failure, omission, avoidable duplication, or unnecessary complexity and explains the smallest credible correction. The instruction to assume the code is wrong is an investigative stance, not permission to manufacture criticism.
 

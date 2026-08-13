@@ -63,11 +63,11 @@ The selector is mandatory because it reads the live session model and configured
 
 ## 3. Run one review round
 
-For each review round, the coordinating session—not a child reviewer—owns the parallel fan-out.
+For each review round, the coordinating session—not a child reviewer—owns the sibling-call fan-out. Independent subagent calls are separate native Pi rows.
 
-### Parallel angle investigation
+### Sibling angle investigation
 
-In one `subagent` call, launch exactly four parallel tasks with the selected model and thinking level. Give every agent the exact scope, base, requirements, prior findings/fixes, and repository rules. Mark every agent read-only. The four prompts must independently cover:
+In one assistant response, emit exactly four sibling `subagent` calls with the selected model and thinking level. Do not issue unrelated sequential tools between them. Give every agent the exact scope, base, requirements, prior findings/fixes, and repository rules. Mark every agent read-only. The four prompts must independently cover:
 
 1. **Completeness** — omitted or partial requirements, plan steps, tests, docs, migrations, error paths, integrations, and user-visible behavior.
 2. **Correctness** — logic bugs, invalid assumptions, edge cases, regressions, unsafe behavior, security, concurrency/state, API contracts, and inadequate tests.
@@ -76,7 +76,7 @@ In one `subagent` call, launch exactly four parallel tasks with the selected mod
 
 Every angle prompt must say: assume the code is wrong; inspect the actual repository; return only evidence-backed findings with file/line references or `NO FINDINGS`; do not modify files.
 
-Consume all four complete synchronous task results before continuing.
+Consume all four complete synchronous results before continuing.
 
 ### Adversarial synthesis
 
@@ -91,18 +91,18 @@ If a reviewer response violates the `CLEAN`/`CHANGES_REQUIRED` contract, allow o
 There are at most three reviews. The third review is report-only.
 
 1. **Review 1**
-   - Run the complete parallel investigation and synthesis above.
+   - Run the complete sibling-call investigation and synthesis above.
    - If `CLEAN`, stop.
    - Otherwise deliver every validated finding to the fixer.
    - With `fixer=coordinator`, apply the fixes in this session.
    - With `fixer=subagent`, launch a fresh general-purpose subagent with the requirements, current target, and validated findings, then consume its complete result.
    - Run focused tests/checks for the fixes. Do not claim success if they fail.
 2. **Review 2**
-   - Recompute the target, run a new four-agent parallel investigation, then launch a fresh synthesis reviewer.
+   - Recompute the target, emit a new four-call sibling investigation in one response, then launch a fresh synthesis reviewer.
    - If `CLEAN`, stop.
    - Otherwise use the same fixer, then run focused tests/checks again.
 3. **Review 3 — final verification**
-   - Recompute the target, run the four parallel angles, and launch a fresh synthesis reviewer.
+   - Recompute the target, emit the four sibling angle calls together, and launch a fresh synthesis reviewer.
    - Do not apply another fix round.
    - Return any remaining validated findings clearly as unresolved.
 

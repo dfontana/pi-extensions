@@ -2,9 +2,10 @@ import { getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLev
 import { fuzzyMatch } from "@earendil-works/pi-tui";
 
 export const MODEL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const THINKING_SUFFIX = new RegExp(`:(${MODEL_THINKING_LEVELS.join("|")})$`, "i");
 
 export function thinkingFromModelReference(reference: string | undefined): ModelThinkingLevel | undefined {
-  const suffix = reference?.match(/:(off|minimal|low|medium|high|xhigh|max)$/i)?.[1];
+  const suffix = reference?.match(THINKING_SUFFIX)?.[1];
   return suffix?.toLowerCase() as ModelThinkingLevel | undefined;
 }
 

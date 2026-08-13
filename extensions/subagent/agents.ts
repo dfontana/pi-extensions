@@ -2,9 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const thinkingLevels = new Set<string>(THINKING_LEVELS);
+import { MODEL_THINKING_LEVELS } from "../model-query/query.ts";
 
 export const GENERAL_AGENT_NAME = "General";
 export const BUILTIN_GENERAL_AGENT: AgentConfig = {
@@ -100,9 +98,9 @@ export function discoverAgents(directory = join(getAgentDir(), "agents")): Agent
 
       const thinkingValue = frontmatter.thinking;
       const thinking = thinkingValue === undefined ? undefined : nonEmptyString(thinkingValue);
-      if (thinking !== undefined && !thinkingLevels.has(thinking)) {
+      if (thinking !== undefined && !MODEL_THINKING_LEVELS.includes(thinking as ModelThinkingLevel)) {
         diagnostics.push(
-          diagnostic(filePath, `frontmatter field 'thinking' must be one of: ${THINKING_LEVELS.join(", ")}`),
+          diagnostic(filePath, `frontmatter field 'thinking' must be one of: ${MODEL_THINKING_LEVELS.join(", ")}`),
         );
         continue;
       }
