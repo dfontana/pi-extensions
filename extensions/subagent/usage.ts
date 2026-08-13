@@ -1,9 +1,23 @@
 import type { Message, Usage } from "@earendil-works/pi-ai";
+import { calculateContextTokens } from "@earendil-works/pi-coding-agent";
+import {
+  cacheStats,
+  formatCacheStat,
+  formatContextStat,
+  formatCostStat,
+  formatTokens,
+} from "../shared/usage-helpers.ts";
 
 export interface TrackedUsage {
   usage: Usage;
   turns: number;
   contextTokens: number;
+  /** Context window for the resolved model, when available. */
+  contextWindow?: number;
+  /** Cache-hit rate for the latest assistant request, or null when it had no prompt tokens. */
+  latestCacheHitRate?: number | null;
+  /** Whether any assistant request has reported cache activity. */
+  hasCacheActivity?: boolean;
 }
 
 export function emptyUsage(): Usage {
@@ -17,8 +31,10 @@ export function emptyUsage(): Usage {
   };
 }
 
-export function emptyTrackedUsage(): TrackedUsage {
-  return { usage: emptyUsage(), turns: 0, contextTokens: 0 };
+export function emptyTrackedUsage(contextWindow?: number): TrackedUsage {
+  const tracked: TrackedUsage = { usage: emptyUsage(), turns: 0, contextTokens: 0 };
+  if (contextWindow !== undefined) tracked.contextWindow = contextWindow;
+  return tracked;
 }
 
 export function addUsage(target: Usage, usage: Usage): void {
@@ -40,7 +56,13 @@ export function addUsage(target: Usage, usage: Usage): void {
 export function trackMessageUsage(target: TrackedUsage, message: Message): void {
   if (message.role === "assistant") {
     target.turns++;
-    target.contextTokens = message.usage.totalTokens;
+    const cache = cacheStats(message.usage);
+    target.latestCacheHitRate = cache.hitRate ?? null;
+    if (cache.hasActivity) target.hasCacheActivity = true;
+    if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+      const contextTokens = calculateContextTokens(message.usage);
+      if (contextTokens > 0) target.contextTokens = contextTokens;
+    }
     addUsage(target.usage, message.usage);
   } else if (message.role === "toolResult" && message.usage) {
     addUsage(target.usage, message.usage);
@@ -53,31 +75,46 @@ export function aggregateUsage(items: readonly TrackedUsage[]): Usage {
   return total;
 }
 
-function formatTokens(count: number): string {
-  if (count < 1_000) return count.toString();
-  if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
-  if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
-  return `${(count / 1_000_000).toFixed(1)}M`;
+function formatTokenStats(usage: Usage): string[] {
+  const parts: string[] = [];
+  if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
+  if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
+  return parts;
 }
 
 export function formatUsage(usage: TrackedUsage, model?: string): string {
   const parts: string[] = [];
   if (usage.turns) parts.push(`${usage.turns} turn${usage.turns === 1 ? "" : "s"}`);
-  if (usage.usage.input) parts.push(`↑${formatTokens(usage.usage.input)}`);
-  if (usage.usage.output) parts.push(`↓${formatTokens(usage.usage.output)}`);
-  if (usage.usage.cacheRead) parts.push(`R${formatTokens(usage.usage.cacheRead)}`);
-  if (usage.usage.cacheWrite) parts.push(`W${formatTokens(usage.usage.cacheWrite)}`);
-  if (usage.usage.cost.total) parts.push(`$${usage.usage.cost.total.toFixed(4)}`);
-  if (usage.contextTokens) parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
+  parts.push(...formatTokenStats(usage.usage));
+
+  const cache = "latestCacheHitRate" in usage
+    ? {
+        hitRate: usage.latestCacheHitRate ?? undefined,
+        hasActivity: usage.hasCacheActivity ?? cacheStats(usage.usage).hasActivity,
+      }
+    : cacheStats(usage.usage);
+  const cacheStat = formatCacheStat(cache);
+  if (cacheStat) parts.push(cacheStat);
+
+  const costStat = formatCostStat(usage.usage.cost.total);
+  if (costStat) parts.push(costStat);
+
+  if (usage.contextWindow && usage.contextWindow > 0) {
+    const percent = usage.contextTokens > 0
+      ? (usage.contextTokens / usage.contextWindow) * 100
+      : null;
+    parts.push(formatContextStat(percent, usage.contextWindow));
+  }
   if (model) parts.push(model);
   return parts.join(" ");
 }
 
 export function formatAggregateUsage(items: readonly TrackedUsage[]): string {
-  const tracked = emptyTrackedUsage();
-  for (const item of items) {
-    tracked.turns += item.turns;
-    addUsage(tracked.usage, item.usage);
-  }
-  return formatUsage(tracked);
+  const usage = aggregateUsage(items);
+  const turns = items.reduce((total, item) => total + item.turns, 0);
+  const parts = turns ? [`${turns} turn${turns === 1 ? "" : "s"}`] : [];
+  parts.push(...formatTokenStats(usage));
+  const costStat = formatCostStat(usage.cost.total);
+  if (costStat) parts.push(costStat);
+  return parts.join(" ");
 }

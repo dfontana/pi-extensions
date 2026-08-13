@@ -106,6 +106,19 @@ function parentDefaults(ctx: ExtensionContext): { model?: string; thinking?: Mod
   };
 }
 
+function contextWindowForModel(
+  model: string | undefined,
+  snapshot: {
+    current?: { provider: string; id: string; contextWindow: number };
+    available: readonly { provider: string; id: string; contextWindow: number }[];
+  },
+): number | undefined {
+  if (!model) return undefined;
+  const match = snapshot.available.find((candidate) => `${candidate.provider}/${candidate.id}` === model)
+    ?? (snapshot.current && `${snapshot.current.provider}/${snapshot.current.id}` === model ? snapshot.current : undefined);
+  return match?.contextWindow;
+}
+
 function hasThinkingSuffix(model: string | undefined): boolean {
   return thinkingFromModelReference(model) !== undefined;
 }
@@ -449,8 +462,24 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
     if (process.env[SUBAGENT_CHILD_ENV] === "1") return;
 
     const initialDiscovery = discoverAgents(options.agentsDirectory);
-    const runChild = (request: RunRequest) =>
-      run({ ...request, environment: collectSubagentEnvironment() });
+    const runChild = (request: RunRequest) => {
+      const update = (result: AgentResult): void => {
+        if (request.contextWindow !== undefined && result.usage.contextWindow === undefined) {
+          result.usage.contextWindow = request.contextWindow;
+        }
+        request.onUpdate?.(result);
+      };
+      return run({
+        ...request,
+        environment: collectSubagentEnvironment(),
+        onUpdate: request.onUpdate ? update : undefined,
+      }).then((result) => {
+        if (request.contextWindow !== undefined && result.usage.contextWindow === undefined) {
+          result.usage.contextWindow = request.contextWindow;
+        }
+        return result;
+      });
+    };
 
     pi.registerTool({
       name: "subagent",
@@ -491,6 +520,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
             cwd: task.cwd ?? ctx.cwd,
             model: resolved.model,
             thinking: resolved.thinking,
+            contextWindow: contextWindowForModel(resolved.model, modelSnapshot),
             signal,
           };
         };
@@ -508,7 +538,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
                 status: "running",
                 messages: [],
                 stderr: "",
-                usage: emptyTrackedUsage(),
+                usage: emptyTrackedUsage(request.contextWindow),
                 model: request.model,
                 thinking: request.thinking,
               },
@@ -563,6 +593,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
             thinking: request.thinking,
             status: "running",
           };
+          allResults[index].usage.contextWindow = request.contextWindow;
           emit();
           const result = await runChild({
             ...request,

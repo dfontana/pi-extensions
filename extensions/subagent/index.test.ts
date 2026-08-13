@@ -294,6 +294,7 @@ describe("subagent", () => {
     await call({ agent: "worker", task: "short name", model: "sonnet", thinking: "high" });
     assert.equal(requests[0].model, "anthropic/claude-sonnet-4-6");
     assert.equal(requests[0].thinking, "high");
+    assert.equal(requests[0].contextWindow, 200_000);
   });
 
   it("treats an exact colon-suffixed model ID as identity before parsing thinking", async () => {

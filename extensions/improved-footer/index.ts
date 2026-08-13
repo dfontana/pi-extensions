@@ -15,6 +15,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFile } from "child_process";
 import { visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  cacheStats,
+  formatCacheStat,
+  formatContextStat,
+  formatCostStat,
+  formatTokens,
+} from "../shared/usage-helpers.ts";
 
 // ─── Jujutsu Bookmark Detection (async, activity-triggered) ───────────────
 
@@ -43,16 +50,6 @@ async function resolveJjBookmark(cwd: string): Promise<string | null> {
     if (bookmark) return `jj:${bookmark}`;
   }
   return "jj:??";
-}
-
-// ─── Token Formatting (mirrors pi's formatTokens) ──────────────────────────
-
-function formatTokens(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-  return `${Math.round(count / 1000000)}M`;
 }
 
 // ─── OpenRouter Cost Tracking ─────────────────────────────────────────────
@@ -224,13 +221,9 @@ export default function (pi: ExtensionAPI) {
     // Incrementally accumulate token totals (avoids re-iterating all entries in render)
     cachedTotalInput += event.message.usage.input;
     cachedTotalOutput += event.message.usage.output;
-    const promptTokens = event.message.usage.input + event.message.usage.cacheRead + event.message.usage.cacheWrite;
-    latestCacheHitRate = promptTokens > 0
-      ? (event.message.usage.cacheRead / promptTokens) * 100
-      : undefined;
-    if (event.message.usage.cacheRead > 0 || event.message.usage.cacheWrite > 0) {
-      hasCacheActivity = true;
-    }
+    const cache = cacheStats(event.message.usage);
+    latestCacheHitRate = cache.hitRate;
+    hasCacheActivity ||= cache.hasActivity;
 
     // Refresh jj bookmark on activity (cheap: only fires when user is interacting)
     refreshJjBookmark();
@@ -285,13 +278,9 @@ export default function (pi: ExtensionAPI) {
         if (entry.type === "message" && entry.message.role === "assistant") {
           cachedTotalInput += entry.message.usage.input;
           cachedTotalOutput += entry.message.usage.output;
-          const promptTokens = entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-          latestCacheHitRate = promptTokens > 0
-            ? (entry.message.usage.cacheRead / promptTokens) * 100
-            : undefined;
-          if (entry.message.usage.cacheRead > 0 || entry.message.usage.cacheWrite > 0) {
-            hasCacheActivity = true;
-          }
+          const cache = cacheStats(entry.message.usage);
+          latestCacheHitRate = cache.hitRate;
+          hasCacheActivity ||= cache.hasActivity;
         }
       }
     } catch { /* session may not be loaded yet */ }
@@ -319,9 +308,6 @@ export default function (pi: ExtensionAPI) {
           const contextUsage = ctx.getContextUsage();
           const contextWindow = contextUsage?.contextWindow ?? 0;
           const contextPercentValue = contextUsage?.percent ?? 0;
-          const contextPercent = contextUsage?.percent !== null
-            ? contextPercentValue.toFixed(1)
-            : "?";
 
           // ── Line 1: CWD + VCS + session name ──
           let pwd = ctx.sessionManager.getCwd();
@@ -344,19 +330,14 @@ export default function (pi: ExtensionAPI) {
           const statsParts: string[] = [];
           if (cachedTotalInput) statsParts.push(`↑${formatTokens(cachedTotalInput)}`);
           if (cachedTotalOutput) statsParts.push(`↓${formatTokens(cachedTotalOutput)}`);
-          if (hasCacheActivity && latestCacheHitRate !== undefined) {
-            statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-          }
+          const cacheStat = formatCacheStat({ hitRate: latestCacheHitRate, hasActivity: hasCacheActivity });
+          if (cacheStat) statsParts.push(cacheStat);
 
-          const combinedCost = costState.orCost + costState.piCost;
-          if (combinedCost > 0) {
-            statsParts.push(`$${combinedCost.toFixed(3)}`);
-          }
+          const costStat = formatCostStat(costState.orCost + costState.piCost);
+          if (costStat) statsParts.push(costStat);
 
           // Context percentage with color
-          const contextPercentDisplay = contextPercent === "?"
-            ? `?/${formatTokens(contextWindow)}`
-            : `${contextPercent}%/${formatTokens(contextWindow)}`;
+          const contextPercentDisplay = formatContextStat(contextUsage?.percent, contextWindow);
 
           if (contextPercentValue > 90) {
             statsParts.push(theme.fg("error", contextPercentDisplay));

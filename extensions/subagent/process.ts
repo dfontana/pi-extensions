@@ -20,6 +20,8 @@ export interface RunRequest {
   cwd: string;
   model?: string;
   thinking?: ModelThinkingLevel;
+  /** Context window of the resolved model, used for compact usage display. */
+  contextWindow?: number;
   signal?: AbortSignal;
   environment?: Record<string, string>;
   onUpdate?: (result: AgentResult) => void;
@@ -215,7 +217,7 @@ export const runPiSubagent: SubagentRunner = async (request) => {
     status: "running",
     messages: [],
     stderr: "",
-    usage: emptyTrackedUsage(),
+    usage: emptyTrackedUsage(request.contextWindow),
     model: request.model,
     thinking: request.thinking ?? thinkingFromModelReference(request.model),
     toolCalls: [],
