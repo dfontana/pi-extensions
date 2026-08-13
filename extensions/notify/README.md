@@ -18,8 +18,9 @@ The minimum configuration is: none.
 
 ## Provides
 
-- On `agent_end`: terminal bell (`\x07`) + a desktop notification ("Pi — Ready for input") via OSC escape sequences, + the sound hook.
-- In Zellij: a `• ` prefix added to the tab name on `agent_end`, cleared on `agent_start` and on quit.
+- On `agent_settled` in TUI mode: terminal bell (`\x07`) + a desktop notification ("Pi — Ready for input") via OSC escape sequences, + the sound hook.
+- In Zellij/TUI: a `• ` prefix added to the tab name on `agent_settled`, cleared on `agent_start` and on quit.
+- Headless modes do not write terminal notifications or update Zellij tabs.
 - `/ack` command — manually clears the Zellij tab dot (no-op outside Zellij).
 
 ## Special Setup Instructions
@@ -29,5 +30,5 @@ The minimum configuration is: none.
 
 ## Limitations and Technical details
 
-- The tab id is resolved once at startup; the live tab *name* is re-fetched before every rename, so tabs you rename mid-session keep their new name (only the dot is added/removed).
+- The tab id is resolved once when first needed; the live tab *name* is re-fetched before every rename, so tabs you rename mid-session keep their new name (only the dot is added/removed).
 - If the terminal supports neither OSC protocol the notification is silently ignored — the bell is the fallback signal.

@@ -357,7 +357,12 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
         const discovery = discoverAgents(options.agentsDirectory);
         notifyDiagnostics(ctx, discovery.diagnostics);
         const defaults = parentDefaults(ctx);
-        await ctx.modelRegistry.refresh();
+        const refreshResult = await ctx.modelRegistry.refresh({ signal });
+        if (refreshResult.aborted) {
+          signal?.throwIfAborted();
+          throw new Error("Model refresh was aborted");
+        }
+        signal?.throwIfAborted();
         const modelSnapshot = { current: ctx.model, available: ctx.modelRegistry.getAvailable() };
         const resolveRequest = (task: TaskRequest) => {
           const agent =

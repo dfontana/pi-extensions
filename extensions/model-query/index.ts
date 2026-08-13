@@ -37,10 +37,15 @@ export default function (pi: ExtensionAPI) {
         Type.Integer({ minimum: 1, description: "Minimum context-window size for eligible models." }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       // getAvailable() is a synchronous snapshot. Refresh exactly once per
       // invocation so the pure resolver never performs registry I/O itself.
-      await ctx.modelRegistry.refresh();
+      const refreshResult = await ctx.modelRegistry.refresh({ signal });
+      if (refreshResult.aborted) {
+        signal?.throwIfAborted();
+        throw new Error("Model refresh was aborted");
+      }
+      signal?.throwIfAborted();
       const options = params as ModelQueryOptions;
       const result = resolveModelQuery({
         ...options,

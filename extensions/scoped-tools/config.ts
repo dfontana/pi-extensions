@@ -3,7 +3,7 @@
  *
  * Tool specs are read (never written) from `scoped-tools.yaml` files, merged
  * in precedence order: `~/.pi/agent/scoped-tools.yaml` (global, honors
- * PI_AGENT_DIR) then `./.pi/scoped-tools.yaml` (project). A project entry
+ * PI_AGENT_DIR) then `<cwd>/<CONFIG_DIR_NAME>/scoped-tools.yaml` (project). A project entry
  * replaces a same-named global entry wholesale before validation, so an
  * invalid project override drops the tool rather than silently falling back
  * to the global definition.
@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { parse } from "yaml";
 
 export interface ParameterSpec {
@@ -114,7 +114,7 @@ function validate(name: string, raw: unknown): ToolSpec {
 export function loadScopedTools(cwd: string, agentDir = getAgentDir()): LoadResult {
   const errors: string[] = [];
   const merged = new Map<string, unknown>();
-  for (const path of [join(agentDir, "scoped-tools.yaml"), resolve(cwd, ".pi", "scoped-tools.yaml")]) {
+  for (const path of [join(agentDir, "scoped-tools.yaml"), resolve(cwd, CONFIG_DIR_NAME, "scoped-tools.yaml")]) {
     if (!existsSync(path)) continue;
     let parsed: unknown;
     try {

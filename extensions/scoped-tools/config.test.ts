@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { stringify } from "yaml";
 import { loadScopedTools } from "./config.ts";
 
@@ -14,9 +15,9 @@ function fixture(global?: unknown, project?: unknown) {
     writeFileSync(join(agentDir, "scoped-tools.yaml"), body);
   }
   if (project !== undefined) {
-    mkdirSync(join(cwd, ".pi"));
+    mkdirSync(join(cwd, CONFIG_DIR_NAME));
     const body = typeof project === "string" ? project : stringify(project);
-    writeFileSync(join(cwd, ".pi", "scoped-tools.yaml"), body);
+    writeFileSync(join(cwd, CONFIG_DIR_NAME, "scoped-tools.yaml"), body);
   }
   return loadScopedTools(cwd, agentDir);
 }

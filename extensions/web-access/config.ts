@@ -3,7 +3,7 @@
  *
  * Reads and merges two optional config files, synchronously:
  *   - Global:  ~/.pi/agent/web-access.json
- *   - Project: <cwd>/.pi/web-access.json   (overrides global)
+ *   - Project: <cwd>/<CONFIG_DIR_NAME>/web-access.json   (overrides global)
  *
  * The project file is merged over the global one: scalars override; the
  * `search`/`fetch` sections merge key-by-key, with `providerParams` maps
@@ -57,7 +57,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   isRecord,
   OPENROUTER_FETCH_ENGINES,
@@ -362,7 +362,7 @@ function validateConfig(raw: Record<string, unknown>): LoadResult {
 /** Load, merge, and validate web-access.json (global then project override). */
 export function loadConfig(cwd: string): LoadResult {
   const globalPath = join(getAgentDir(), "web-access.json");
-  const localPath = join(cwd, ".pi", "web-access.json");
+  const localPath = join(cwd, CONFIG_DIR_NAME, "web-access.json");
 
   let merged: Record<string, unknown> = {};
   let found = false;

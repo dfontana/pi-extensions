@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 
+import extension from "./index.ts";
 import { loadConfig } from "./config.ts";
 import { extractChatGptAccountId, getAdapter, parseResponse, readSseResponse } from "./providers.ts";
 
@@ -19,8 +21,8 @@ function loadTestConfig(global: unknown, local?: unknown) {
   process.env.PI_CODING_AGENT_DIR = agentDir;
   writeFileSync(join(agentDir, "web-access.json"), JSON.stringify(global));
   if (local !== undefined) {
-    mkdirSync(join(cwd, ".pi"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "web-access.json"), JSON.stringify(local));
+    mkdirSync(join(cwd, CONFIG_DIR_NAME), { recursive: true });
+    writeFileSync(join(cwd, CONFIG_DIR_NAME, "web-access.json"), JSON.stringify(local));
   }
   return loadConfig(cwd);
 }
@@ -162,6 +164,131 @@ describe("web-access web-access", () => {
         assert.throws(() => parseResponse(response), message);
       }
     });
+  });
+
+  it("passes each tool signal to refresh while keeping session-start refresh signal-free", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-signal-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "wa-signal-cwd-"));
+    const before = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({
+        search: { provider: "openai", model: "gpt-5.5" },
+        fetch: { provider: "anthropic", model: "claude-opus-4-8" },
+      }),
+    );
+
+    try {
+      let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+      const tools = new Map<string, { execute: (...args: any[]) => Promise<any> }>();
+      const refreshOptions: Array<{ signal?: AbortSignal } | undefined> = [];
+      const models = new Map([
+        ["openai/gpt-5.5", { provider: "openai", id: "gpt-5.5" }],
+        ["anthropic/claude-opus-4-8", { provider: "anthropic", id: "claude-opus-4-8" }],
+      ]);
+      const modelRegistry = {
+        refresh: async (options?: { signal?: AbortSignal }) => {
+          refreshOptions.push(options);
+          return { aborted: false, errors: new Map() };
+        },
+        find: (provider: string, model: string) => models.get(`${provider}/${model}`),
+        getApiKeyAndHeaders: async () => ({ ok: false as const, error: "credentials unavailable" }),
+      };
+      const notify = () => {};
+
+      extension({
+        on: (_event: string, handler: (event: unknown, ctx: any) => Promise<void>) => {
+          sessionStart = handler;
+        },
+        registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => {
+          tools.set(tool.name, tool);
+        },
+      } as any);
+      assert.ok(sessionStart);
+
+      const sessionSignal = new AbortController().signal;
+      const ctx = { cwd, signal: sessionSignal, modelRegistry, ui: { notify } };
+      await sessionStart({}, ctx);
+      assert.equal(refreshOptions.length, 1);
+      assert.equal(refreshOptions[0], undefined);
+      assert.equal(tools.size, 2);
+
+      const searchSignal = new AbortController().signal;
+      await assert.rejects(
+        tools.get("web_search")!.execute("search-call", { query: "test" }, searchSignal, undefined, ctx),
+        /auth failed for openai \(credentials unavailable\)/,
+      );
+      assert.equal(refreshOptions[1]?.signal, searchSignal);
+
+      const fetchSignal = new AbortController().signal;
+      await assert.rejects(
+        tools.get("web_fetch")!.execute("fetch-call", { url: "https://example.test" }, fetchSignal, undefined, ctx),
+        /auth failed for anthropic \(credentials unavailable\)/,
+      );
+      assert.equal(refreshOptions[2]?.signal, fetchSignal);
+    } finally {
+      if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = before;
+    }
+  });
+
+  it("stops before resolving credentials when a tool refresh is aborted", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-abort-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "wa-abort-cwd-"));
+    const before = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({ search: { provider: "openai", model: "gpt-5.5" } }),
+    );
+
+    try {
+      let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+      let abortNextRefresh = false;
+      let authCalls = 0;
+      const tools = new Map<string, { execute: (...args: any[]) => Promise<any> }>();
+      const modelRegistry = {
+        refresh: async () => {
+          if (abortNextRefresh) return { aborted: true, errors: new Map() };
+          return { aborted: false, errors: new Map() };
+        },
+        find: () => ({ provider: "openai", id: "gpt-5.5" }),
+        getApiKeyAndHeaders: async () => {
+          authCalls += 1;
+          return { ok: true as const, apiKey: "test-key", baseUrl: "https://example.test" };
+        },
+      };
+
+      extension({
+        on: (_event: string, handler: (event: unknown, ctx: any) => Promise<void>) => {
+          sessionStart = handler;
+        },
+        registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => {
+          tools.set(tool.name, tool);
+        },
+      } as any);
+      assert.ok(sessionStart);
+      const ctx = { cwd, modelRegistry, ui: { notify: () => {} } };
+      await sessionStart({}, ctx);
+      assert.ok(tools.has("web_search"));
+
+      abortNextRefresh = true;
+      await assert.rejects(
+        tools.get("web_search")!.execute(
+          "search-call",
+          { query: "test" },
+          new AbortController().signal,
+          undefined,
+          ctx,
+        ),
+        /Model refresh was aborted/,
+      );
+      assert.equal(authCalls, 0);
+    } finally {
+      if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = before;
+    }
   });
 
   describe("configuration behavior", () => {

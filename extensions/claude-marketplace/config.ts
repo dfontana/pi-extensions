@@ -3,7 +3,7 @@
  *
  * Reads and merges two optional config files:
  *   - Global:  ~/.pi/agent/marketplace-config.json
- *   - Project: <cwd>/.pi/marketplace-config.json  (overrides global)
+ *   - Project: <cwd>/<CONFIG_DIR_NAME>/marketplace-config.json  (overrides global)
  *
  * Project config's `marketplaces` array is merged by `name`: a project entry
  * with the same name as a global entry replaces that entry entirely; novel
@@ -40,7 +40,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -88,9 +88,9 @@ const DEFAULT_CONFIG: MarketplaceConfig = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Returns the Pi agent directory, respecting PI_CODING_AGENT_DIR if set. */
+/** Returns the Pi agent directory, respecting its configured agent-dir environment variable. */
 export function piAgentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  return getAgentDir();
 }
 
 function readJson(filePath: string): unknown {
@@ -252,7 +252,7 @@ export interface LoadConfigResult {
 export function loadConfig(cwd: string): LoadConfigResult {
   const agentDir = piAgentDir();
   const globalPath = join(agentDir, "marketplace-config.json");
-  const projectPath = join(cwd, ".pi", "marketplace-config.json");
+  const projectPath = join(cwd, CONFIG_DIR_NAME, "marketplace-config.json");
 
   let config: MarketplaceConfig = { ...DEFAULT_CONFIG };
   let foundGlobal: string | null = null;

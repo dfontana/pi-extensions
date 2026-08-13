@@ -19,10 +19,9 @@
  * }
  */
 
-import { exec as execCallback } from "node:child_process";
+import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { type MarketplaceEntry, isLocalSource, piAgentDir, toCloneUrl } from "./config.ts";
 import { isStale, markUpdated } from "./state.ts";
 
@@ -43,7 +42,14 @@ export interface ResolvedPaths {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const execAsync = promisify(execCallback);
+const GIT_TIMEOUT_MS = 120_000;
+
+/** A pi.exec-compatible runner, injectable so Git argv construction is testable. */
+export type ExecRunner = (
+  command: string,
+  args: string[],
+  options?: ExecOptions,
+) => Promise<ExecResult>;
 
 function cacheDir(): string {
   return join(piAgentDir(), "marketplace-cache");
@@ -54,8 +60,20 @@ export function marketplaceCacheDir(name: string): string {
   return join(cacheDir(), name);
 }
 
-async function exec(command: string, cwd: string): Promise<void> {
-  await execAsync(command, { cwd, timeout: 120_000 });
+async function execGit(runner: ExecRunner, args: string[], cwd: string): Promise<void> {
+  const result = await runner("git", args, { cwd, timeout: GIT_TIMEOUT_MS });
+  if (result.code === 0 && !result.killed) return;
+
+  const detail = (result.stderr || result.stdout).trim();
+  const action = args[0] ?? "command";
+  if (result.killed) {
+    throw new Error(
+      `git ${action} timed out or was aborted${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  throw new Error(
+    `git ${action} failed (exit ${result.code})${detail ? `: ${detail}` : ""}`,
+  );
 }
 
 // ─── Clone ────────────────────────────────────────────────────────────────────
@@ -70,7 +88,7 @@ async function exec(command: string, cwd: string): Promise<void> {
  *
  * @throws if the clone command fails.
  */
-export async function ensureCloned(entry: MarketplaceEntry): Promise<void> {
+export async function ensureCloned(entry: MarketplaceEntry, runner: ExecRunner): Promise<void> {
   if (isLocalSource(entry.source)) return; // Local path — nothing to clone
 
   const dest = marketplaceCacheDir(entry.name);
@@ -84,8 +102,9 @@ export async function ensureCloned(entry: MarketplaceEntry): Promise<void> {
   const branch = entry.branch ?? "main";
 
   try {
-    await exec(
-      `git clone --depth=1 --branch=${branch} ${cloneUrl} "${dest}"`,
+    await execGit(
+      runner,
+      ["clone", "--depth=1", "--branch", branch, "--", cloneUrl, dest],
       cacheDir(),
     );
   } catch (err: unknown) {
@@ -114,19 +133,24 @@ export async function ensureCloned(entry: MarketplaceEntry): Promise<void> {
  * @returns              true if a pull was performed, false if skipped.
  * @throws               if the fetch/reset command fails.
  */
-export async function pullIfStale(entry: MarketplaceEntry, intervalHours: number): Promise<boolean> {
+export async function pullIfStale(
+  entry: MarketplaceEntry,
+  intervalHours: number,
+  runner: ExecRunner,
+): Promise<boolean> {
   if (isLocalSource(entry.source)) return false;
   if (!isStale(entry.name, intervalHours)) return false;
 
   const dest = marketplaceCacheDir(entry.name);
   if (!existsSync(dest)) {
     // Cache dir disappeared — re-clone instead
-    await ensureCloned(entry);
+    await ensureCloned(entry, runner);
     return true;
   }
 
   try {
-    await exec("git fetch --depth=1 origin && git reset --hard FETCH_HEAD", dest);
+    await execGit(runner, ["fetch", "--depth=1", "origin"], dest);
+    await execGit(runner, ["reset", "--hard", "FETCH_HEAD"], dest);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -147,17 +171,18 @@ export async function pullIfStale(entry: MarketplaceEntry, intervalHours: number
  *
  * @throws if the fetch/reset command fails.
  */
-export async function forcePull(entry: MarketplaceEntry): Promise<void> {
+export async function forcePull(entry: MarketplaceEntry, runner: ExecRunner): Promise<void> {
   if (isLocalSource(entry.source)) return;
 
   const dest = marketplaceCacheDir(entry.name);
   if (!existsSync(dest)) {
-    await ensureCloned(entry);
+    await ensureCloned(entry, runner);
     return;
   }
 
   try {
-    await exec("git fetch --depth=1 origin && git reset --hard FETCH_HEAD", dest);
+    await execGit(runner, ["fetch", "--depth=1", "origin"], dest);
+    await execGit(runner, ["reset", "--hard", "FETCH_HEAD"], dest);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(

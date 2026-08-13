@@ -7,7 +7,7 @@ Registers YAML-specified bash commands as first-class agent tools. Because each 
 Tool specs are read from two files, merged with the project file replacing same-named global tools:
 
 1. `~/.pi/agent/scoped-tools.yaml` (global; honors `PI_AGENT_DIR`)
-2. `.pi/scoped-tools.yaml` (project)
+2. `<project>/<CONFIG_DIR_NAME>/scoped-tools.yaml` (project; `CONFIG_DIR_NAME` comes from pi)
 
 Both files map tool names to definitions. YAML block scalars (`|`) are useful for readable multi-line commands and pipelines:
 

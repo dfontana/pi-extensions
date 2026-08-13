@@ -4,7 +4,7 @@ Gives the pi agent two tools backed by a configured model provider: `web_search`
 
 ## Configuration
 
-`~/.pi/agent/web-access.json` (global) with `./.pi/web-access.json` (project) merged on top — scalars override, `search`/`fetch` sections merge key-by-key, `providerParams` merge per provider key.
+The global `getAgentDir()/web-access.json` (by default `~/.pi/agent/web-access.json`) is merged with `<project>/<CONFIG_DIR_NAME>/web-access.json` (project) on top — scalars override, `search`/`fetch` sections merge key-by-key, `providerParams` merge per provider key. `CONFIG_DIR_NAME` comes from pi.
 
 ```jsonc
 {

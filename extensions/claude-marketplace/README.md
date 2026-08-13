@@ -4,7 +4,7 @@ Pulls skills from Claude Code plugin marketplaces (e.g. `github.com/acme-corp/cl
 
 ## Configuration
 
-`~/.pi/agent/marketplace-config.json` (global) and/or `.pi/marketplace-config.json` (project — merged on top of global):
+`getAgentDir()/marketplace-config.json` (global; by default `~/.pi/agent/marketplace-config.json`) and/or `<CONFIG_DIR_NAME>/marketplace-config.json` (project — merged on top of global; `CONFIG_DIR_NAME` comes from pi):
 
 ```jsonc
 {

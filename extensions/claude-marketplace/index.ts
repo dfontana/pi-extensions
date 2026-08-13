@@ -7,9 +7,9 @@
  *
  * Config files (both optional, project overrides global):
  *   ~/.pi/agent/marketplace-config.json
- *   <cwd>/.pi/marketplace-config.json
+ *   <cwd>/<CONFIG_DIR_NAME>/marketplace-config.json
  *
- * On startup:
+ * On session start:
  *   1. Merge global + project configs.
  *   2. Start async clones for any marketplace repos not yet cached.
  *   3. Register a `resources_discover` handler that waits for clones then
@@ -23,7 +23,7 @@
  *                  U: pull selected marketplace · Esc: close
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -68,7 +68,7 @@ function noConfigMessage(): string {
   const globalPath = join(piAgentDir(), "marketplace-config.json");
   return (
     "No marketplaces configured.\n\n" +
-    `Create ${globalPath} (global) or .pi/marketplace-config.json (project) with:\n\n` +
+    `Create ${globalPath} (global) or ${CONFIG_DIR_NAME}/marketplace-config.json (project) with:\n\n` +
     '{\n' +
     '  "marketplaces": [\n' +
     '    {\n' +
@@ -83,53 +83,58 @@ function noConfigMessage(): string {
 
 // ─── Extension factory ────────────────────────────────────────────────────────
 
-export default async function (pi: ExtensionAPI) {
-  const cwd = process.cwd();
-
-  // ── Load config ──────────────────────────────────────────────────────────
-  // A config error is non-fatal: we still register the command so the user
-  // can see the error via /marketplace rather than a silent failure.
-
+export default function (pi: ExtensionAPI) {
+  // The factory runs before the session context is available. Keep all
+  // session-sensitive state lazy so project config is resolved from ctx.cwd,
+  // not from the process that happened to load the extension.
   let config: MarketplaceConfig | null = null;
   let configError: string | null = null;
   let configPaths: Pick<LoadConfigResult, "projectPath" | "globalPath"> = {
     projectPath: null,
     globalPath: null,
   };
+  let clonePromises = new Map<string, Promise<void>>();
 
-  try {
-    const result = loadConfig(cwd);
-    config = result.config;
-    configPaths = { projectPath: result.projectPath, globalPath: result.globalPath };
-  } catch (err: unknown) {
-    configError = err instanceof Error ? err.message : String(err);
-  }
+  function initializeSession(cwd: string): void {
+    config = null;
+    configError = null;
+    configPaths = { projectPath: null, globalPath: null };
+    clonePromises = new Map();
 
-  // ── Start async clones (non-blocking) ────────────────────────────────────
-  // Each remote marketplace gets a single shared Promise that both
-  // resources_discover and session_start can await without re-running work.
+    // A config error is non-fatal: we still register the command so the user
+    // can see the error via /marketplace rather than a silent failure.
+    try {
+      const result = loadConfig(cwd);
+      config = result.config;
+      configPaths = { projectPath: result.projectPath, globalPath: result.globalPath };
+    } catch (err: unknown) {
+      configError = err instanceof Error ? err.message : String(err);
+      return;
+    }
 
-  const clonePromises = new Map<string, Promise<void>>();
-
-  if (config && config.marketplaces.length > 0) {
+    // Start clones only after the session context is available. Each remote
+    // marketplace gets one shared Promise that resources_discover and the
+    // session-start status/error reporting can await without re-running work.
     for (const entry of config.marketplaces) {
       if (isLocalSource(entry.source)) continue;
-      clonePromises.set(entry.name, ensureCloned(entry));
+      clonePromises.set(entry.name, ensureCloned(entry, pi.exec));
     }
   }
 
   // ── resources_discover: inject skill paths ───────────────────────────────
 
   pi.on("resources_discover", async (_event, _ctx) => {
-    if (!config || config.marketplaces.length === 0) return { skillPaths: [] };
+    const sessionConfig = config;
+    const sessionClonePromises = clonePromises;
+    if (!sessionConfig || sessionConfig.marketplaces.length === 0) return { skillPaths: [] };
 
     // Wait for all in-flight clones before resolving paths.  allSettled so
     // that a single failed clone doesn't prevent other repos from loading.
-    if (clonePromises.size > 0) {
-      await Promise.allSettled(clonePromises.values());
+    if (sessionClonePromises.size > 0) {
+      await Promise.allSettled(sessionClonePromises.values());
     }
 
-    const { skillPaths, warnings } = resolveAllPaths(config);
+    const { skillPaths, warnings } = resolveAllPaths(sessionConfig);
     for (const w of warnings) {
       console.warn(`[claude-marketplace] ${w}`);
     }
@@ -139,15 +144,21 @@ export default async function (pi: ExtensionAPI) {
   // ── session_start: surface errors + trigger stale pulls ──────────────────
 
   pi.on("session_start", async (_event, ctx) => {
-    if (configError) {
-      ctx.ui.notify(`claude-marketplace: config error — ${configError}`, "error");
+    initializeSession(ctx.cwd);
+
+    const sessionConfig = config;
+    const sessionConfigError = configError;
+    const sessionClonePromises = clonePromises;
+
+    if (sessionConfigError) {
+      ctx.ui.notify(`claude-marketplace: config error — ${sessionConfigError}`, "error");
     }
 
     // ── Await any in-progress initial clones and surface errors ──────────
-    if (clonePromises.size > 0) {
+    if (sessionClonePromises.size > 0) {
       (async () => {
         ctx.ui.setStatus("claude-marketplace", "↓ cloning marketplaces…");
-        const results = await Promise.allSettled(clonePromises.values());
+        const results = await Promise.allSettled(sessionClonePromises.values());
         ctx.ui.setStatus("claude-marketplace", "");
 
         for (const result of results) {
@@ -162,15 +173,16 @@ export default async function (pi: ExtensionAPI) {
     }
 
     // ── Background stale-pull check ──────────────────────────────────────
-    if (!config || config.marketplaces.length === 0 || config.updateIntervalHours === 0) return;
+    if (!sessionConfig || sessionConfig.marketplaces.length === 0 || sessionConfig.updateIntervalHours === 0) return;
 
-    const remoteEntries = config.marketplaces.filter((e) => !isLocalSource(e.source));
+    const remoteEntries = sessionConfig.marketplaces.filter((e) => !isLocalSource(e.source));
     if (remoteEntries.length === 0) return;
+    const updateIntervalHours = sessionConfig.updateIntervalHours;
 
     (async () => {
       // Let the clone phase finish first so we don't race against a fresh checkout.
-      if (clonePromises.size > 0) {
-        await Promise.allSettled(clonePromises.values());
+      if (sessionClonePromises.size > 0) {
+        await Promise.allSettled(sessionClonePromises.values());
       }
 
       ctx.ui.setStatus("claude-marketplace", "↻ checking for marketplace updates…");
@@ -180,7 +192,7 @@ export default async function (pi: ExtensionAPI) {
 
       for (const entry of remoteEntries) {
         try {
-          const pulled = await pullIfStale(entry, config!.updateIntervalHours);
+          const pulled = await pullIfStale(entry, updateIntervalHours, pi.exec);
           if (pulled) updated.push(entry.name);
         } catch (err: unknown) {
           errors.push(err instanceof Error ? err.message : String(err));
@@ -212,6 +224,10 @@ export default async function (pi: ExtensionAPI) {
       }
       if (!config || config.marketplaces.length === 0) {
         ctx.ui.notify(noConfigMessage(), "info");
+        return;
+      }
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("The marketplace manager is only available in TUI mode.", "warning");
         return;
       }
 
@@ -406,7 +422,7 @@ export default async function (pi: ExtensionAPI) {
               startSpinner();
               tui.requestRender();
 
-              forcePull(row.entry)
+              forcePull(row.entry, pi.exec)
                 .then(() => {
                   row.updateStatus = "ok";
                   stopSpinnerIfIdle();

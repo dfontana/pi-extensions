@@ -4,7 +4,7 @@
  * Sends a desktop notification when Pi finishes and is waiting for input.
  * Also rings the terminal bell (\x07) so attention is audible even when
  * desktop notifications are muted or unavailable.
- * Also adds a "•" prefix to the active Zellij tab on agent_end (cleared on agent_start)
+ * Also adds a "•" prefix to the active Zellij tab on agent_settled (cleared on agent_start)
  * so attention is visible from other tabs.
  *
  * Supported notification protocols:
@@ -119,34 +119,39 @@ async function setTabDot(add: boolean, tabId: string): Promise<void> {
 export default function (pi: ExtensionAPI) {
     const inZellij = process.env.ZELLIJ !== undefined;
 
-    // Tab id resolved once at startup; null outside Zellij or if probe fails.
-    // We store only the id so the live tab name is always fetched fresh before
-    // acting — avoiding stale-name restores when the user renames the tab.
-    const tabIdPromise: Promise<string | null> = inZellij
-        ? resolveOwnTabId()
-        : Promise.resolve(null);
+    // Resolve the tab id only when a TUI handler needs it; null outside Zellij
+    // or if the probe fails. We store only the id so the live tab name is always
+    // fetched fresh before acting — avoiding stale-name restores when the user
+    // renames the tab.
+    let tabIdPromise: Promise<string | null> | undefined;
+    const getTabId = (): Promise<string | null> =>
+        (tabIdPromise ??= inZellij ? resolveOwnTabId() : Promise.resolve(null));
 
     pi.registerCommand("ack", {
         description: "Clear the Zellij tab dot (no-op outside Zellij)",
-        handler: async (_args, _ctx) => {
-            const tabId = await tabIdPromise;
+        handler: async (_args, ctx) => {
+            if (ctx.mode !== "tui") return;
+            const tabId = await getTabId();
             if (tabId) await setTabDot(false, tabId);
         },
     });
 
-    pi.on("session_shutdown", async (event) => {
-        const tabId = await tabIdPromise;
-        if (tabId && event.reason === "quit") await setTabDot(false, tabId);
+    pi.on("session_shutdown", async (event, ctx) => {
+        if (ctx.mode !== "tui" || event.reason !== "quit") return;
+        const tabId = await getTabId();
+        if (tabId) await setTabDot(false, tabId);
     });
 
-    pi.on("agent_end", async () => {
+    pi.on("agent_settled", async (_event, ctx) => {
+        if (ctx.mode !== "tui") return;
         notify("Pi", "Ready for input");
-        const tabId = await tabIdPromise;
+        const tabId = await getTabId();
         if (tabId) await setTabDot(true, tabId);
     });
 
-    pi.on("agent_start", async () => {
-        const tabId = await tabIdPromise;
+    pi.on("agent_start", async (_event, ctx) => {
+        if (ctx.mode !== "tui") return;
+        const tabId = await getTabId();
         if (tabId) await setTabDot(false, tabId);
     });
 }

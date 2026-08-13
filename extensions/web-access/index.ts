@@ -5,7 +5,7 @@
  * or OpenRouter chat/completions).
  *
  * The provider/model and any provider-specific params are read from
- * `web-access.json` (global ~/.pi/agent + project ./.pi override). On session
+ * `web-access.json` (global ~/.pi/agent + project config-directory override). On session
  * start the config is validated and the chosen model is checked against pi's
  * model registry (including credential resolution). If anything is wrong we warn
  * the user and simply don't register the tool, leaving it disabled.
@@ -60,13 +60,19 @@ async function resolveModelAuth(
   modelRegistry: ModelRegistry,
   provider: string,
   modelId: string,
+  signal: AbortSignal | undefined,
 ): Promise<
   | { ok: true; model: Model<Api>; apiKey: string; baseUrl: string; headers?: ProviderHeaders }
   | { ok: false; error: string }
 > {
   // Since pi 0.80.8 model loading is async and find() reads a snapshot; refresh
   // reloads models.json so a mid-session registry change is actually observed.
-  await modelRegistry.refresh();
+  const refreshResult = await modelRegistry.refresh({ signal });
+  if (refreshResult.aborted) {
+    signal?.throwIfAborted();
+    throw new Error("Model refresh was aborted");
+  }
+  signal?.throwIfAborted();
   const model = modelRegistry.find(provider, modelId);
   if (!model) {
     return { ok: false, error: `model ${provider}/${modelId} is not in the model registry` };
@@ -234,7 +240,7 @@ function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       // Re-resolve per call so a mid-session credential/registry change is honored.
-      const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model);
+      const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model, signal);
       if (!resolved.ok) throw new Error(resolved.error);
       const { model, apiKey, baseUrl, headers } = resolved;
 
@@ -335,7 +341,7 @@ function registerWebFetch(pi: ExtensionAPI, cfg: FetchToolConfig) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       // Re-resolve per call so a mid-session credential/registry change is honored.
-      const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model);
+      const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model, signal);
       if (!resolved.ok) throw new Error(resolved.error);
       const { model, apiKey, baseUrl, headers } = resolved;
 

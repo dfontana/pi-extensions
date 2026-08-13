@@ -103,6 +103,7 @@ function setup(options: { files?: Record<string, string>; run?: SubagentRunner; 
   assert.ok(tool, "subagent tool registered");
 
   const warnings: string[] = [];
+  let refreshOptions: unknown;
   const current = { provider: "parent-provider", id: "parent-model", name: "parent-model", api: "openai-responses", baseUrl: "https://example.test", reasoning: true, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200_000, maxTokens: 16_384 };
   const makeAvailable = (reference: string, index: number) => {
     const slash = reference.indexOf("/");
@@ -118,12 +119,23 @@ function setup(options: { files?: Record<string, string>; run?: SubagentRunner; 
     cwd: "/parent/worktree",
     model: current,
     thinkingLevel: "medium",
-    modelRegistry: { refresh: async () => {}, getAvailable: () => options.available ?? fallbackAvailable },
+    modelRegistry: {
+      refresh: async (options: unknown) => {
+        refreshOptions = options;
+        return { aborted: false, errors: new Map() };
+      },
+      getAvailable: () => options.available ?? fallbackAvailable,
+    },
     ui: { notify: (message: string) => warnings.push(message) },
   } as any;
   const call = (params: Record<string, unknown>, onUpdate?: (result: unknown) => void) =>
     tool!.execute("call-id", params, undefined, onUpdate, ctx);
-  return { tool, call, warnings };
+  const callWithSignal = (
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+    onUpdate?: (result: unknown) => void,
+  ) => tool!.execute("call-id", params, signal, onUpdate, ctx);
+  return { tool, call, callWithSignal, warnings, getRefreshOptions: () => refreshOptions };
 }
 
 describe("subagent", () => {
@@ -133,6 +145,32 @@ describe("subagent", () => {
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["agent", "cwd", "model", "task", "tasks", "thinking"]);
     assert.match(tool.description, /worker: General worker/);
     assert.doesNotMatch(tool.description, /chain|project-local|prompt template/i);
+  });
+
+  it("passes the tool cancellation signal to registry refresh", async () => {
+    const controller = new AbortController();
+    const { callWithSignal, getRefreshOptions } = setup({ run: async (request) => successful(request) });
+
+    await callWithSignal({ agent: "worker", task: "cancel-aware refresh" }, controller.signal);
+
+    assert.equal((getRefreshOptions() as { signal?: AbortSignal }).signal, controller.signal);
+  });
+
+  it("stops before starting a child when refresh is aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let started = false;
+    const { callWithSignal } = setup({
+      run: async (request) => {
+        started = true;
+        return successful(request);
+      },
+    });
+
+    await assert.rejects(
+      callWithSignal({ agent: "worker", task: "aborted refresh" }, controller.signal),
+    );
+    assert.equal(started, false);
   });
 
   it("resolves call overrides before agent defaults before parent defaults", async () => {
