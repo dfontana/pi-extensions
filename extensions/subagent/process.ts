@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { Message, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "./agents.ts";
@@ -11,6 +11,8 @@ export const SUBAGENT_CHILD_ENV = "PI_EXTENSIONS_SUBAGENT_CHILD";
 const MAX_CAPTURED_TRANSCRIPT_BYTES = 1024 * 1024;
 const MAX_CAPTURED_MESSAGE_BYTES = 512 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
+const MAX_CAPTURED_TOOL_CALLS = 200;
+const MAX_TOOL_CALL_SUMMARY_LENGTH = 500;
 
 export interface RunRequest {
   agent: AgentConfig;
@@ -35,9 +37,60 @@ export interface AgentResult {
   thinking?: ModelThinkingLevel;
   stopReason?: string;
   errorMessage?: string;
+  toolCalls?: string[];
+  omittedToolCalls?: number;
 }
 
 export type SubagentRunner = (request: RunRequest) => Promise<AgentResult>;
+
+function shortenPath(value: string): string {
+  const home = homedir();
+  return value.startsWith(home) ? `~${value.slice(home.length)}` : value;
+}
+
+export function formatToolCall(name: string, args: Record<string, unknown>): string {
+  const path = String(args.path ?? args.file_path ?? "...");
+  let summary: string;
+  switch (name) {
+    case "bash": {
+      const command = String(args.command ?? "...");
+      summary = `$ ${command.length > 70 ? `${command.slice(0, 70)}…` : command}`;
+      break;
+    }
+    case "read":
+    case "write":
+    case "edit":
+    case "ls":
+      summary = `${name} ${shortenPath(path)}`;
+      break;
+    case "find":
+      summary = `find ${String(args.pattern ?? "*")} in ${shortenPath(path)}`;
+      break;
+    case "grep":
+      summary = `grep /${String(args.pattern ?? "")}/ in ${shortenPath(path)}`;
+      break;
+    default: {
+      const encoded = JSON.stringify(args);
+      summary = `${name} ${encoded.length > 60 ? `${encoded.slice(0, 60)}…` : encoded}`;
+    }
+  }
+  return summary.length > MAX_TOOL_CALL_SUMMARY_LENGTH
+    ? `${summary.slice(0, MAX_TOOL_CALL_SUMMARY_LENGTH - 1)}…`
+    : summary;
+}
+
+export function captureToolCalls(result: AgentResult, message: Message): void {
+  if (message.role !== "assistant") return;
+  result.toolCalls ??= [];
+  for (const part of message.content) {
+    if (part.type !== "toolCall") continue;
+    if (result.toolCalls.length < MAX_CAPTURED_TOOL_CALLS) {
+      result.toolCalls.push(formatToolCall(part.name, part.arguments));
+    } else {
+      result.omittedToolCalls = (result.omittedToolCalls ?? 0) + 1;
+    }
+  }
+}
 
 export function finalOutput(messages: readonly Message[]): string {
   for (let index = messages.length - 1; index >= 0; index--) {
@@ -144,6 +197,7 @@ export const runPiSubagent: SubagentRunner = async (request) => {
     usage: emptyTrackedUsage(),
     model: request.model,
     thinking: request.thinking ?? thinkingFromModelReference(request.model),
+    toolCalls: [],
   };
   if (request.signal?.aborted) {
     result.exitCode = 130;
@@ -196,6 +250,7 @@ export const runPiSubagent: SubagentRunner = async (request) => {
         }
         if (!event.message || (event.type !== "message_end" && event.type !== "tool_result_end")) return;
 
+        captureToolCalls(result, event.message);
         const captured = capMessage(event.message);
         const messageBytes = Buffer.byteLength(JSON.stringify(captured), "utf8");
         while (result.messages.length && capturedBytes + messageBytes > MAX_CAPTURED_TRANSCRIPT_BYTES) {
@@ -209,7 +264,10 @@ export const runPiSubagent: SubagentRunner = async (request) => {
           result.stopReason = event.message.stopReason;
           result.errorMessage = event.message.errorMessage;
         }
-        request.onUpdate?.(result);
+        // Tool-result bodies are retained for accounting/debug details but are not
+        // visible in the subagent renderer. Only assistant messages can add a
+        // visible tool call or response, so avoid repainting for invisible events.
+        if (event.message.role === "assistant") request.onUpdate?.(result);
       };
 
       const abort = () => {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { runPiSubagent } from "./process.ts";
+import { captureToolCalls, runPiSubagent, type AgentResult } from "./process.ts";
+import { emptyTrackedUsage } from "./usage.ts";
 
 const agent = {
   name: "test",
@@ -10,6 +11,46 @@ const agent = {
 };
 
 describe("subagent process", () => {
+  it("keeps bounded visible tool activity independent of transcript eviction", () => {
+    const result: AgentResult = {
+      agent: "test",
+      task: "inspect",
+      cwd: "/tmp",
+      exitCode: -1,
+      status: "running",
+      messages: [],
+      stderr: "",
+      usage: emptyTrackedUsage(),
+    };
+    const message = {
+      role: "assistant",
+      content: Array.from({ length: 205 }, (_, index) => ({
+        type: "toolCall",
+        id: `call-${index}`,
+        name: "read",
+        arguments: { path: `/tmp/file-${index}.ts` },
+      })),
+      api: "test",
+      provider: "test",
+      model: "test",
+      usage: emptyTrackedUsage().usage,
+      stopReason: "toolUse",
+      timestamp: 1,
+    } as any;
+
+    captureToolCalls(result, message);
+    result.messages = [];
+    captureToolCalls(result, {
+      ...message,
+      content: [{ type: "toolCall", id: "later", name: "grep", arguments: { pattern: "later", path: "/tmp" } }],
+    });
+
+    assert.equal(result.toolCalls?.length, 200);
+    assert.equal(result.toolCalls?.[0], "read /tmp/file-0.ts");
+    assert.equal(result.toolCalls?.at(-1), "read /tmp/file-199.ts");
+    assert.equal(result.omittedToolCalls, 6);
+  });
+
   it("returns a failed result without spawning when already aborted", async () => {
     const controller = new AbortController();
     controller.abort();

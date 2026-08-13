@@ -326,7 +326,8 @@ describe("subagent", () => {
 
     assert.equal(peak, MAX_CONCURRENCY);
     assert.match(result.content[0].text, /\[worker\] completed\n\nresult 1[\s\S]*result 6/);
-    assert.ok(updates.length >= 6);
+    assert.ok(updates.length >= 1);
+    assert.ok(updates.length < 12, "bursty parallel status changes should be coalesced");
     assert.deepEqual(
       {
         input: result.usage.input,
@@ -460,7 +461,7 @@ describe("subagent render", () => {
     ).render(240).map((line) => line.trimEnd()).join("\n");
     assert.equal(
       rendered,
-      "<toolTitle><bold>subagent</bold></toolTitle> <warning>⠋</warning> <toolTitle><bold>Explore</bold></toolTitle> <dim>gpt-5.6-terra medium</dim>",
+      "<toolTitle><bold>subagent</bold></toolTitle> <warning>●</warning> <toolTitle><bold>Explore</bold></toolTitle> <dim>gpt-5.6-terra medium</dim>",
     );
     assert.doesNotMatch(rendered, /openai\/|thinking|Inspect the project/);
   });
@@ -531,7 +532,156 @@ describe("subagent render", () => {
     assert.match(expanded, /Partial response[\s\S]*Error: provider unavailable/);
   });
 
-  it("updates the single call heading from throbber to checkmark", () => {
+  it("retains the expanded component, shows activity while running, and adds final output only on completion", () => {
+    const { tool } = setup();
+    const request = {
+      agent: { name: "worker", description: "Worker", systemPrompt: "", filePath: "test" },
+      task: "Work",
+      cwd: "/tmp",
+      model: "provider/model",
+      thinking: "low" as const,
+    };
+    const item = successful(request, "Intermediate response");
+    item.exitCode = -1;
+    item.status = "running";
+    item.messages[0] = {
+      ...item.messages[0],
+      content: [
+        { type: "text", text: "Intermediate response" },
+        { type: "toolCall", id: "tool-1", name: "read", arguments: { path: "/tmp/file.ts" } },
+      ],
+    } as any;
+    const state = {};
+    const firstContext = renderContext(state);
+    const partialResult = { content: [{ type: "text", text: "Intermediate response" }], details: { mode: "single", results: [item] } };
+    const component = tool.renderResult!(partialResult, { expanded: true, isPartial: true }, testTheme, firstContext);
+    const running = component.render(160).map((line) => line.trimEnd()).join("\n");
+    assert.match(running, /read \/tmp\/file\.ts[\s\S]*\(working…\)/);
+    assert.doesNotMatch(running, /Intermediate response/);
+
+    item.exitCode = 0;
+    item.status = "done";
+    item.messages.push({
+      ...item.messages[0],
+      content: [{ type: "text", text: "Final response" }],
+    } as any);
+    const completeResult = { content: [{ type: "text", text: "Final response" }], details: { mode: "single", results: [item] } };
+    const completeContext = { ...renderContext(state), lastComponent: component };
+    const retained = tool.renderResult!(completeResult, { expanded: true, isPartial: false }, testTheme, completeContext);
+    const completed = retained.render(160).map((line) => line.trimEnd()).join("\n");
+    assert.equal(retained, component);
+    assert.match(completed, /read \/tmp\/file\.ts[\s\S]*Final response/);
+    assert.doesNotMatch(completed, /Intermediate response|working/);
+  });
+
+  it("renders retained tool activity after its source messages leave the transcript", () => {
+    const { tool } = setup();
+    const request = {
+      agent: { name: "worker", description: "Worker", systemPrompt: "", filePath: "test" },
+      task: "Work",
+      cwd: "/tmp",
+      model: "provider/model",
+      thinking: "low" as const,
+    };
+    const item = successful(request, "Final response");
+    item.toolCalls = ["read /tmp/early.ts", "grep /later/ in /tmp"];
+    item.omittedToolCalls = 3;
+    const rendered = tool.renderResult!(
+      { content: [{ type: "text", text: "Final response" }], details: { mode: "single", results: [item] } },
+      { expanded: true, isPartial: false },
+      testTheme,
+      renderContext(),
+    ).render(160).map((line) => line.trimEnd()).join("\n");
+
+    assert.match(rendered, /read \/tmp\/early\.ts[\s\S]*grep \/later\/ in \/tmp/);
+    assert.match(rendered, /3 later tool calls omitted/);
+  });
+
+  it("defers call-heading invalidation until after result rendering", async () => {
+    const { tool } = setup();
+    const request = {
+      agent: { name: "worker", description: "Worker", systemPrompt: "", filePath: "test" },
+      task: "Work",
+      cwd: "/tmp",
+      model: "provider/model",
+      thinking: "low" as const,
+    };
+    const item = successful(request, "Working");
+    item.exitCode = -1;
+    item.status = "running";
+    const state = {};
+    let rendering = true;
+    let synchronous = false;
+    let invalidations = 0;
+    const context = {
+      ...renderContext(state),
+      invalidate() {
+        invalidations++;
+        if (rendering) synchronous = true;
+      },
+    };
+
+    tool.renderResult!(
+      { content: [{ type: "text", text: "Working" }], details: { mode: "single", results: [item] } },
+      { expanded: false, isPartial: true },
+      testTheme,
+      context,
+    );
+    rendering = false;
+
+    assert.equal(synchronous, false);
+    assert.equal(invalidations, 0);
+    await Promise.resolve();
+    assert.equal(invalidations, 1);
+  });
+
+  it("reports queued parallel tasks as unfinished in expanded progress", () => {
+    const { tool } = setup();
+    const results = Array.from({ length: 6 }, (_, index) => {
+      const item = successful({
+        agent: { name: `worker-${index}`, description: "Worker", systemPrompt: "", filePath: "test" },
+        task: `Task ${index}`,
+        cwd: "/tmp",
+      });
+      item.exitCode = -1;
+      item.status = index < 4 ? "running" : "queued";
+      item.messages = [];
+      return item;
+    });
+    const rendered = tool.renderResult!(
+      { content: [{ type: "text", text: "running" }], details: { mode: "parallel", results } },
+      { expanded: true, isPartial: true },
+      testTheme,
+      renderContext(),
+    ).render(160).map((line) => line.trimEnd()).join("\n");
+
+    assert.match(rendered, /^● parallel 0\/6 finished/);
+    assert.match(rendered, /\(queued…\)/);
+  });
+
+  it("does not promote an earlier response when the completed final response is empty", () => {
+    const { tool } = setup();
+    const request = {
+      agent: { name: "worker", description: "Worker", systemPrompt: "", filePath: "test" },
+      task: "Work",
+      cwd: "/tmp",
+      model: "provider/model",
+      thinking: "low" as const,
+    };
+    const item = successful(request, "Intermediate response");
+    item.messages.push({ ...item.messages[0], content: [] } as any);
+    const rendered = tool.renderResult!(
+      { content: [{ type: "text", text: "(no output)" }], details: { mode: "single", results: [item] } },
+      { expanded: true, isPartial: false },
+      testTheme,
+      renderContext(),
+    ).render(160).map((line) => line.trimEnd()).join("\n");
+
+    assert.match(rendered, /\(no output\)/);
+    assert.doesNotMatch(rendered, /Intermediate response/);
+  });
+
+  it("updates the single call heading from running marker to checkmark", () => {
     const { tool } = setup();
     const request = {
       agent: { name: "worker", description: "Worker", systemPrompt: "", filePath: "test" },
@@ -548,7 +698,7 @@ describe("subagent render", () => {
     tool.renderResult!(partialResult, { expanded: false, isPartial: true }, testTheme, renderContext(state)).render(120);
     const partialCall = tool.renderCall!({ agent: "worker", task: "Work" }, testTheme, renderContext(state))
       .render(120).map((line) => line.trimEnd()).join("\n");
-    assert.equal(partialCall, "subagent ⠋ worker model low");
+    assert.equal(partialCall, "subagent ● worker model low");
 
     item.exitCode = 0;
     item.status = "done";

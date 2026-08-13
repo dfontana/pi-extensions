@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Message, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
@@ -15,6 +14,7 @@ import {
 import {
   SUBAGENT_CHILD_ENV,
   finalOutput,
+  formatToolCall,
   resultFailed,
   resultOutput,
   runPiSubagent,
@@ -30,15 +30,11 @@ const COLLAPSED_SINGLE_ITEMS = 10;
 const COLLAPSED_PARALLEL_ITEMS = 5;
 const COLLAPSED_TASK_LENGTH = 120;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
-const THROBBER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
 interface SubagentRowState {
-  frame: number;
-  timer?: ReturnType<typeof setInterval>;
-  invalidate?: () => void;
   singleResult?: AgentResult;
   singleDone?: boolean;
   singleError?: boolean;
+  headingRefreshPending?: boolean;
 }
 
 interface TaskRequest {
@@ -203,34 +199,6 @@ function displayItems(messages: readonly Message[]): DisplayItem[] {
   return items;
 }
 
-function shortenPath(value: string): string {
-  const home = homedir();
-  return value.startsWith(home) ? `~${value.slice(home.length)}` : value;
-}
-
-function formatToolCall(name: string, args: Record<string, unknown>): string {
-  const path = String(args.path ?? args.file_path ?? "...");
-  switch (name) {
-    case "bash": {
-      const command = String(args.command ?? "...");
-      return `$ ${command.length > 70 ? `${command.slice(0, 70)}…` : command}`;
-    }
-    case "read":
-    case "write":
-    case "edit":
-    case "ls":
-      return `${name} ${shortenPath(path)}`;
-    case "find":
-      return `find ${String(args.pattern ?? "*")} in ${shortenPath(path)}`;
-    case "grep":
-      return `grep /${String(args.pattern ?? "")}/ in ${shortenPath(path)}`;
-    default: {
-      const encoded = JSON.stringify(args);
-      return `${name} ${encoded.length > 60 ? `${encoded.slice(0, 60)}…` : encoded}`;
-    }
-  }
-}
-
 function notifyDiagnostics(ctx: ExtensionContext, diagnostics: readonly AgentDiagnostic[]): void {
   if (!diagnostics.length) return;
   const preview = diagnostics
@@ -272,28 +240,12 @@ function isWorking(item: AgentResult, isPartial: boolean, mode: "single" | "para
   return item.status === "running" || (mode === "single" && isPartial && item.status !== "done");
 }
 
-function updateThrobber(state: SubagentRowState, active: boolean, invalidate: () => void): void {
-  state.frame ??= 0;
-  state.invalidate = invalidate;
-  if (active && !state.timer) {
-    state.timer = setInterval(() => {
-      state.frame = (state.frame + 1) % THROBBER_FRAMES.length;
-      state.invalidate?.();
-    }, 80);
-    state.timer.unref?.();
-  } else if (!active && state.timer) {
-    clearInterval(state.timer);
-    state.timer = undefined;
-  }
-}
-
 function agentIcon(
   item: AgentResult,
   working: boolean,
-  frame: number,
   color: (name: any, text: string) => string,
 ): string {
-  if (working) return color("warning", THROBBER_FRAMES[frame] ?? THROBBER_FRAMES[0]);
+  if (working) return color("warning", "●");
   if (item.status === "queued") return color("muted", "·");
   return resultFailed(item) ? color("error", "✗") : color("success", "✓");
 }
@@ -331,6 +283,161 @@ function agentParameterLines(
 
 function renderError(item: AgentResult, color: (name: any, text: string) => string): string | undefined {
   return resultFailed(item) ? color("error", resultOutput(item)) : undefined;
+}
+
+function renderToolCalls(item: AgentResult, color: (name: any, text: string) => string): string {
+  const summaries = item.toolCalls ?? displayItems(item.messages)
+    .filter((display): display is DisplayItem & { type: "toolCall" } => display.type === "toolCall")
+    .map((display) => formatToolCall(display.name!, display.arguments ?? {}));
+  const lines = summaries.map((summary) => color("muted", `→ ${summary}`));
+  if (item.omittedToolCalls) {
+    lines.push(color("muted", `… ${item.omittedToolCalls} later tool call${item.omittedToolCalls === 1 ? "" : "s"} omitted`));
+  }
+  return lines.join("\n");
+}
+
+function latestOutput(messages: readonly Message[]): string {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+    const output = message.content
+      .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (output) return output;
+  }
+  return "";
+}
+
+interface RenderTheme {
+  fg(name: any, text: string): string;
+  bold(text: string): string;
+}
+
+function updateText(component: Text, previous: string, next: string): string {
+  if (previous !== next) component.setText(next);
+  return next;
+}
+
+class ExpandedAgentBlock extends Container {
+  private readonly heading = new Text("", 0, 0);
+  private readonly parameters = new Text("", 0, 0);
+  private readonly usage = new Text("", 0, 0);
+  private readonly calls = new Text("", 0, 0);
+  private readonly output = new Markdown("", 0, 0, getMarkdownTheme());
+  private readonly status = new Text("", 0, 0);
+  private headingText = "";
+  private parametersText = "";
+  private usageText = "";
+  private callsText = "";
+  private outputText = "";
+  private statusText = "";
+
+  constructor(private readonly showHeading: boolean) {
+    super();
+    if (showHeading) {
+      this.addChild(new Spacer(1));
+      this.addChild(this.heading);
+    }
+    this.addChild(this.parameters);
+    this.addChild(this.usage);
+    this.addChild(this.calls);
+    this.addChild(new Spacer(1));
+    this.addChild(this.output);
+    this.addChild(this.status);
+  }
+
+  update(item: AgentResult, working: boolean, icon: string, theme: RenderTheme): void {
+    const heading = this.showHeading
+      ? `${icon} ${theme.fg("toolTitle", theme.bold(item.agent))}`
+      : "";
+    const parameters = agentParameterLines(item, theme).join("\n");
+    const usage = `${theme.fg("muted", "Usage: ")}${theme.fg("dim", formatUsage(item.usage) || "usage pending")}`;
+    const calls = renderToolCalls(item, theme.fg.bind(theme));
+    const output = working || item.status === "queued" ? "" : finalOutput(item.messages);
+    const error = working || item.status === "queued" ? undefined : renderError(item, theme.fg.bind(theme));
+    const status = error
+      ? `${theme.fg("muted", "Error: ")}${error}`
+      : working
+        ? theme.fg("muted", "(working…)")
+        : item.status === "queued"
+          ? theme.fg("muted", "(queued…)")
+          : output
+            ? ""
+            : theme.fg("muted", "(no output)");
+
+    this.headingText = updateText(this.heading, this.headingText, heading);
+    this.parametersText = updateText(this.parameters, this.parametersText, parameters);
+    this.usageText = updateText(this.usage, this.usageText, usage);
+    this.callsText = updateText(this.calls, this.callsText, calls);
+    if (this.outputText !== output) {
+      this.output.setText(output);
+      this.outputText = output;
+    }
+    this.statusText = updateText(this.status, this.statusText, status);
+  }
+}
+
+class ExpandedSubagentResult extends Container {
+  private readonly top = new Text("", 0, 0);
+  private readonly total = new Text("", 0, 0);
+  private blocks: ExpandedAgentBlock[] = [];
+  private mode?: "single" | "parallel";
+  private topText = "";
+  private totalText = "";
+
+  update(details: SubagentDetails, isPartial: boolean, theme: RenderTheme): void {
+    if (this.mode !== details.mode || this.blocks.length !== details.results.length) {
+      this.clear();
+      this.blocks = [];
+      this.mode = details.mode;
+      this.addChild(this.top);
+      for (let index = 0; index < details.results.length; index++) {
+        const block = new ExpandedAgentBlock(details.mode === "parallel");
+        this.blocks.push(block);
+        this.addChild(block);
+      }
+      if (details.mode === "parallel") {
+        this.addChild(new Spacer(1));
+        this.addChild(this.total);
+      }
+    }
+
+    const unfinished = details.results.filter((item) => item.exitCode === -1).length;
+    const succeeded = details.results.filter((item) => item.exitCode !== -1 && !resultFailed(item)).length;
+    const failed = details.results.filter((item) => item.exitCode !== -1 && resultFailed(item)).length;
+    const top = details.mode === "single"
+      ? theme.fg("muted", "── Parameters ──")
+      : `${unfinished ? theme.fg("warning", "●") : failed ? theme.fg("warning", "◐") : theme.fg("success", "✓")} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", unfinished ? `${details.results.length - unfinished}/${details.results.length} finished` : `${succeeded}/${details.results.length} succeeded`)}`;
+    this.topText = updateText(this.top, this.topText, top);
+
+    details.results.forEach((item, index) => {
+      const working = isWorking(item, isPartial, details.mode);
+      this.blocks[index].update(item, working, agentIcon(item, working, theme.fg.bind(theme)), theme);
+    });
+
+    const total = details.mode === "parallel" && !unfinished
+      ? formatAggregateUsage(details.results.map((item) => item.usage))
+      : "";
+    this.totalText = updateText(this.total, this.totalText, total ? theme.fg("dim", `Total: ${total}`) : "");
+  }
+}
+
+class RetainedText extends Text {
+  private value = "";
+
+  update(value: string): void {
+    if (this.value === value) return;
+    this.value = value;
+    this.setText(value);
+  }
+}
+
+function retainedText(lastComponent: unknown, text: string): Text {
+  const component = lastComponent instanceof RetainedText ? lastComponent : new RetainedText("", 0, 0);
+  component.update(text);
+  return component;
 }
 
 export function createSubagentExtension(options: SubagentExtensionOptions = {}) {
@@ -424,13 +531,21 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
 
         const tasks = params.tasks!;
         const allResults = tasks.map((task) => placeholder(task, ctx.cwd));
-        const emit = () => {
+        let emitTimer: ReturnType<typeof setTimeout> | undefined;
+        const flushEmit = () => {
+          if (emitTimer) clearTimeout(emitTimer);
+          emitTimer = undefined;
           if (!onUpdate) return;
           const done = allResults.filter((result) => result.exitCode !== -1).length;
           onUpdate({
             content: [{ type: "text", text: `Parallel subagents: ${done}/${allResults.length} finished` }],
             details: makeDetails("parallel", discovery.directory, discovery.diagnostics, [...allResults]),
           });
+        };
+        const emit = () => {
+          if (!onUpdate || emitTimer) return;
+          emitTimer = setTimeout(flushEmit, 50);
+          emitTimer.unref?.();
         };
 
         // Resolve every agent before starting work so a bad batch cannot partially execute.
@@ -457,6 +572,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
           return result;
         });
 
+        flushEmit();
         const succeeded = results.filter((result) => !resultFailed(result)).length;
         if (signal?.aborted) throw new Error("Subagent execution was aborted");
 
@@ -478,42 +594,33 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
 
       renderCall(args, theme, context) {
         if (args.tasks?.length) {
-          return new Text(
+          return retainedText(
+            context.lastComponent,
             `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length})`)}`,
-            0,
-            0,
           );
         }
 
         const state = context.state as SubagentRowState;
-        state.frame ??= 0;
-        state.invalidate = context.invalidate;
-        updateThrobber(state, !state.singleDone, context.invalidate);
         const item = state.singleResult;
         const icon = state.singleDone
           ? state.singleError ? theme.fg("error", "✗") : theme.fg("success", "✓")
-          : theme.fg("warning", THROBBER_FRAMES[state.frame] ?? THROBBER_FRAMES[0]);
+          : theme.fg("warning", "●");
         const agent = item?.agent ?? args.agent ?? "…";
         const metadata = modelThinkingSummary(item?.model ?? args.model, item?.thinking ?? args.thinking);
-        return new Text(
+        return retainedText(
+          context.lastComponent,
           `${theme.fg("toolTitle", theme.bold("subagent"))} ${icon} ${theme.fg("toolTitle", theme.bold(agent))} ${theme.fg("dim", metadata)}`,
-          0,
-          0,
         );
       },
 
       renderResult(result, { expanded, isPartial }, theme, context) {
         const details = result.details as SubagentDetails | undefined;
         if (!details?.results.length) {
-          const state = context.state as SubagentRowState;
-          updateThrobber(state, false, context.invalidate);
           const first = result.content[0];
-          return new Text(first?.type === "text" ? first.text : "(no output)", 0, 0);
+          return retainedText(context.lastComponent, first?.type === "text" ? first.text : "(no output)");
         }
 
         const state = context.state as SubagentRowState;
-        const active = details.results.some((item) => isWorking(item, isPartial, details.mode));
-        updateThrobber(state, active, context.invalidate);
 
         if (details.mode === "single") {
           const item = details.results[0];
@@ -529,55 +636,40 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
             state.singleResult = item;
             state.singleDone = singleDone;
             state.singleError = singleError;
-            context.invalidate();
+            if (!state.headingRefreshPending) {
+              state.headingRefreshPending = true;
+              queueMicrotask(() => {
+                state.headingRefreshPending = false;
+                context.invalidate();
+              });
+            }
           }
           const working = isWorking(item, isPartial, "single");
-          const icon = agentIcon(item, working, state.frame, theme.fg.bind(theme));
-          const items = displayItems(item.messages);
           if (!expanded) {
             const error = renderError(item, theme.fg.bind(theme));
-            const latest = finalOutput(item.messages);
+            const latest = latestOutput(item.messages);
             const output = error ?? (latest
               ? renderItems([{ type: "text", text: latest }], COLLAPSED_SINGLE_ITEMS, false, theme.fg.bind(theme))
               : theme.fg("muted", working ? "(working…)" : "(no output)"));
-            return new Text([
+            return retainedText(context.lastComponent, [
               theme.fg("dim", formatUsage(item.usage) || "usage pending"),
               `${theme.fg("muted", "Prompt: ")}${theme.fg("dim", truncatedTask(item.task))}`,
               output,
-            ].join("\n"), 0, 0);
+            ].join("\n"));
           }
 
-          const container = new Container();
-          container.addChild(new Text(theme.fg("muted", "── Parameters ──"), 0, 0));
-          container.addChild(new Text(agentParameterLines(item, theme).join("\n"), 0, 0));
-          container.addChild(new Spacer(1));
-          container.addChild(new Text(`${theme.fg("muted", "Usage: ")}${theme.fg("dim", formatUsage(item.usage) || "usage pending")}`, 0, 0));
-          const toolCalls = items.filter((display) => display.type === "toolCall");
-          if (toolCalls.length) {
-            container.addChild(new Spacer(1));
-            container.addChild(new Text(renderItems(toolCalls, undefined, true, theme.fg.bind(theme)), 0, 0));
-          }
-          const output = finalOutput(item.messages);
-          if (output) {
-            container.addChild(new Spacer(1));
-            container.addChild(new Markdown(output, 0, 0, getMarkdownTheme()));
-          }
-          const error = renderError(item, theme.fg.bind(theme));
-          if (error) {
-            container.addChild(new Spacer(1));
-            container.addChild(new Text(`${theme.fg("muted", "Error: ")}${error}`, 0, 0));
-          } else if (!output && working) {
-            container.addChild(new Spacer(1));
-            container.addChild(new Text(theme.fg("muted", "(working…)"), 0, 0));
-          }
-          return container;
+          const component = context.lastComponent instanceof ExpandedSubagentResult
+            ? context.lastComponent
+            : new ExpandedSubagentResult();
+          component.update(details, isPartial, theme);
+          return component;
         }
 
         const running = details.results.filter((item) => item.exitCode === -1).length;
         const succeeded = details.results.filter((item) => item.exitCode !== -1 && !resultFailed(item)).length;
         const failed = details.results.filter((item) => item.exitCode !== -1 && resultFailed(item)).length;
         const icon = running
-          ? theme.fg("warning", THROBBER_FRAMES[state.frame] ?? THROBBER_FRAMES[0])
+          ? theme.fg("warning", "●")
           : failed
             ? theme.fg("warning", "◐")
             : theme.fg("success", "✓");
@@ -586,39 +678,17 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
           : `${succeeded}/${details.results.length} succeeded`;
 
         if (expanded) {
-          const container = new Container();
-          container.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`, 0, 0));
-          for (const item of details.results) {
-            const working = isWorking(item, isPartial, "parallel");
-            const itemIcon = agentIcon(item, working, state.frame, theme.fg.bind(theme));
-            container.addChild(new Spacer(1));
-            container.addChild(new Text(`${itemIcon} ${theme.fg("toolTitle", theme.bold(item.agent))}`, 0, 0));
-            container.addChild(new Text(agentParameterLines(item, theme).join("\n"), 0, 0));
-            container.addChild(new Text(`${theme.fg("muted", "Usage: ")}${theme.fg("dim", formatUsage(item.usage) || "usage pending")}`, 0, 0));
-            const calls = displayItems(item.messages).filter((display) => display.type === "toolCall");
-            if (calls.length) container.addChild(new Text(renderItems(calls, undefined, true, theme.fg.bind(theme)), 0, 0));
-            const output = finalOutput(item.messages);
-            if (output) {
-              container.addChild(new Spacer(1));
-              container.addChild(new Markdown(output, 0, 0, getMarkdownTheme()));
-            }
-            const error = renderError(item, theme.fg.bind(theme));
-            if (error) container.addChild(new Text(`${theme.fg("muted", "Error: ")}${error}`, 0, 0));
-            else if (!output && working) container.addChild(new Text(theme.fg("muted", "(working…)"), 0, 0));
-            else if (item.status === "queued") container.addChild(new Text(theme.fg("muted", "(queued…)"), 0, 0));
-          }
-          const total = running ? "" : formatAggregateUsage(details.results.map((item) => item.usage));
-          if (total) {
-            container.addChild(new Spacer(1));
-            container.addChild(new Text(theme.fg("dim", `Total: ${total}`), 0, 0));
-          }
-          return container;
+          const component = context.lastComponent instanceof ExpandedSubagentResult
+            ? context.lastComponent
+            : new ExpandedSubagentResult();
+          component.update(details, isPartial, theme);
+          return component;
         }
 
         let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
         for (const item of details.results) {
           const working = isWorking(item, isPartial, "parallel");
-          const itemIcon = agentIcon(item, working, state.frame, theme.fg.bind(theme));
+          const itemIcon = agentIcon(item, working, theme.fg.bind(theme));
           const texts = displayItems(item.messages).filter((display) => display.type === "text");
           const error = renderError(item, theme.fg.bind(theme));
           text += `\n\n${agentSummaryLines(item, itemIcon, theme).join("\n")}`;
@@ -628,7 +698,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
           const total = formatAggregateUsage(details.results.map((item) => item.usage));
           if (total) text += `\n\n${theme.fg("dim", `Total: ${total}`)}`;
         }
-        return new Text(text, 0, 0);
+        return retainedText(context.lastComponent, text);
       },
     });
   };

@@ -90,11 +90,11 @@ The working directory defaults to the dispatching session's current directory.
 
 ## Execution and output
 
-Each task launches Pi in JSON print mode with no session file. The extension streams child messages into compact tool rendering, offers expanded Markdown output, and returns aggregate child usage through Pi's tool-result usage field. Model-visible final output is capped at 50 KB per task; retained transcript details are separately bounded to prevent runaway memory use.
+Each task launches Pi in JSON print mode with no session file. The extension streams visible child activity into compact tool rendering, offers expanded Markdown output, and returns aggregate child usage through Pi's tool-result usage field. Invisible child tool-result events do not trigger repaints, and bursty parallel activity is coalesced. Model-visible final output is capped at 50 KB per task; retained transcript details are separately bounded to prevent runaway memory use.
 
 Parallel failures are reported alongside successful task results. A failed single task fails the tool call. Aborting the parent call sends `SIGTERM` to active children and escalates to `SIGKILL` after five seconds.
 
-For a single call, the tool heading shows `subagent`, status, agent, model name, and thinking level on one line (without the provider prefix). The collapsed result then shows usage, truncated prompt, and the latest return value or error while hiding child tool calls. Expanded output includes every resolved call parameter, tool calls, output, and any error. Active agents use an animated throbber; completed agents use a checkmark.
+For a single call, the tool heading shows `subagent`, status, agent, model name, and thinking level on one line (without the provider prefix). The collapsed result then shows usage, truncated prompt, and the latest non-empty return value or error while hiding child tool calls. Expanded output includes every resolved call parameter, bounded accumulated tool-call summaries (with an omission count after the activity limit), final output, and any error. While running, expanded output grows with visible tool activity but reserves Markdown rendering until completion, avoiding transient output shrinkage. Active agents use a static marker so large expanded rows do not redraw solely for animation; completed agents use a checkmark. Render components are retained across updates so unchanged text and Markdown keep their layout caches.
 
 The child process receives `PI_EXTENSIONS_SUBAGENT_CHILD=1`. This extension detects that marker and does not register its tool in children, preventing recursive delegation.
 
