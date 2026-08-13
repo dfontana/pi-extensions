@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { Message, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "./agents.ts";
 import { emptyTrackedUsage, trackMessageUsage, type TrackedUsage } from "./usage.ts";
@@ -21,6 +21,7 @@ export interface RunRequest {
   model?: string;
   thinking?: ModelThinkingLevel;
   signal?: AbortSignal;
+  environment?: Record<string, string>;
   onUpdate?: (result: AgentResult) => void;
 }
 
@@ -42,6 +43,26 @@ export interface AgentResult {
 }
 
 export type SubagentRunner = (request: RunRequest) => Promise<AgentResult>;
+
+export function childProcessEnvironment(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  return { ...process.env, ...extra, [SUBAGENT_CHILD_ENV]: "1" };
+}
+
+/** Preserve explicit extension loading while making relative paths child-cwd safe. */
+export function childExtensionArgs(
+  argv: readonly string[] = process.argv.slice(2),
+  parentCwd = process.cwd(),
+): string[] {
+  const inherited: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === "--no-extensions" || arg === "-ne") inherited.push("--no-extensions");
+    else if ((arg === "--extension" || arg === "-e") && argv[index + 1]) {
+      inherited.push("--extension", resolve(parentCwd, argv[++index]));
+    }
+  }
+  return inherited;
+}
 
 function shortenPath(value: string): string {
   const home = homedir();
@@ -207,7 +228,7 @@ export const runPiSubagent: SubagentRunner = async (request) => {
     return result;
   }
 
-  const args = ["--mode", "json", "-p", "--no-session"];
+  const args = [...childExtensionArgs(), "--mode", "json", "-p", "--no-session"];
   if (request.model) args.push("--model", request.model);
   if (request.thinking) args.push("--thinking", request.thinking);
   if (request.agent.tools?.length) args.push("--tools", request.agent.tools.join(","));
@@ -223,7 +244,7 @@ export const runPiSubagent: SubagentRunner = async (request) => {
     result.exitCode = await new Promise<number>((resolve) => {
       const child = spawn(invocation.command, invocation.args, {
         cwd: request.cwd,
-        env: { ...process.env, [SUBAGENT_CHILD_ENV]: "1" },
+        env: childProcessEnvironment(request.environment),
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
       });

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerSubagentEnvironmentProvider } from "./environment.ts";
 import { createSubagentExtension, MAX_CONCURRENCY, MAX_PARALLEL_TASKS } from "./index.ts";
 import { SUBAGENT_CHILD_ENV, type AgentResult, type RunRequest, type SubagentRunner } from "./process.ts";
 import { emptyTrackedUsage } from "./usage.ts";
@@ -85,7 +86,12 @@ function successful(request: RunRequest, text = `done: ${request.task}`, taskUsa
   };
 }
 
-function setup(options: { files?: Record<string, string>; run?: SubagentRunner; available?: any[] } = {}) {
+function setup(options: {
+  files?: Record<string, string>;
+  run?: SubagentRunner;
+  available?: any[];
+  onSpawn?: (environment: Record<string, string>) => void;
+} = {}) {
   const directory = mkdtempSync(join(tmpdir(), "subagent-extension-"));
   for (const [name, content] of Object.entries(
     options.files ?? { "worker.md": definition("name: worker\ndescription: General worker") },
@@ -99,6 +105,11 @@ function setup(options: { files?: Record<string, string>; run?: SubagentRunner; 
       tool = value;
     },
   } as unknown as ExtensionAPI;
+  registerSubagentEnvironmentProvider("subagent-index-test", () => {
+    const environment: Record<string, string> = {};
+    options.onSpawn?.(environment);
+    return environment;
+  });
   createSubagentExtension({ agentsDirectory: directory, run: options.run })(api);
   assert.ok(tool, "subagent tool registered");
 
@@ -145,6 +156,35 @@ describe("subagent", () => {
     assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["agent", "cwd", "model", "task", "tasks", "thinking"]);
     assert.match(tool.description, /worker: General worker/);
     assert.doesNotMatch(tool.description, /chain|project-local|prompt template/i);
+  });
+
+  it("creates an isolated child environment for every launch", async () => {
+    const requests: RunRequest[] = [];
+    const environments: Array<Record<string, string>> = [];
+    const { call } = setup({
+      onSpawn(environment) {
+        environment.TEST_HANDOFF = String(environments.length + 1);
+        environments.push(environment);
+      },
+      run: async (request) => {
+        requests.push(request);
+        return successful(request);
+      },
+    });
+
+    await call({
+      tasks: [
+        { agent: "worker", task: "first" },
+        { agent: "worker", task: "second" },
+      ],
+    });
+
+    assert.equal(environments.length, 2);
+    assert.notEqual(environments[0], environments[1]);
+    assert.deepEqual(requests.map((request) => request.environment), [
+      { TEST_HANDOFF: "1" },
+      { TEST_HANDOFF: "2" },
+    ]);
   });
 
   it("passes the tool cancellation signal to registry refresh", async () => {

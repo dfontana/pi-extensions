@@ -82,16 +82,13 @@ The minimum configuration is one server with either `command` (stdio) or `url` (
 
 Servers default to **off** every session — curate the active set from the `/mcp` panel before the agent can reach them.
 
-## Child agent (pi-subagents) inheritance
+## Child agent inheritance
 
-When a child agent is spawned via pi-subagents, the MCP extension automatically passes a validated point-in-time snapshot of the parent's enabled server set to the child through an MCP-owned process-local broker. The child inherits exactly what the parent had enabled at the moment of spawn, subject to identity verification against the child's own loaded config. Child connections and any subsequent enable/disable changes are fully isolated from the parent and from other children.
+Each child process receives a point-in-time snapshot of the parent's enabled server set at launch. The handoff contains only server names and configuration identity hashes; it contains no credentials or server configuration. During child startup, MCP removes the handoff value from the process environment and enables only entries whose identity matches the child's independently loaded configuration.
 
-The inheritance mechanism works only for child agents spawned by pi-subagents (the documented `subagents:started` / session-name contract). Independent sessions (no agent-id suffix in the session name) start with all servers off, as usual.
+Snapshots are launch-scoped and isolated for parallel children. Child connections and subsequent enable/disable changes do not affect the parent or siblings. Other Pi sessions start with all servers off as usual.
 
-Capability scoping and the MCP extension are independent:
-
-- **MCP extension not loaded** (e.g. not present in the child's extension set): the extension never initializes, `session_start` is never fired, and the broker entry is not consumed. Completion/failure or stale-age cleanup handles any unconsumed entries.
-- **`mcp` tool excluded or narrowed out** (`excludeTools: ["mcp"]` or a restrictive `tools:` list): pi-subagents still binds loaded extensions and fires `session_start`, so the MCP extension *does* initialize and consume the one-shot broker snapshot. The inherited servers are enabled in the manager, but the `mcp` tool is absent from the agent's tool list, so no inherited server can actually be reached. This does not bypass capability scoping — it just means the snapshot is silently consumed and the tool remains unavailable.
+Capability scoping remains authoritative. If a child does not load MCP, it cannot consume or use the snapshot. If its tool list excludes `mcp`, MCP may initialize the inherited enabled set, but the child still has no tool with which to reach those servers.
 
 ## Limitations and Technical details
 

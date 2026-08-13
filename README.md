@@ -45,7 +45,7 @@ Each extension has its own README covering configuration, provided tools/command
 
 A repo-local **web-access-smoke-test** skill (in `.pi/skills/`, not shipped with the package) provides an end-to-end check of the web-access tools after code changes.
 
-`quick-review`, `run-review`, and `run-plan` require the separately installed `@tintinweb/pi-subagents` package; they preflight the `Agent` tools and return installation guidance rather than silently degrading.
+`quick-review`, `run-review`, and `run-plan` require this package's `subagent` and review-model selection tools; they preflight those tools and return enablement guidance rather than silently degrading.
 
 ```text
 /skill:quick-review
@@ -60,7 +60,6 @@ A repo-local **web-access-smoke-test** skill (in `.pi/skills/`, not shipped with
 
 ## Installed Packages
 
-- npm:@tintinweb/pi-subagents
 - npm:@juicesharp/rpiv-ask-user-question
 - npm:@tintinweb/pi-tasks
 - npm:@plannotator/pi-extension

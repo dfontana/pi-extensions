@@ -10,6 +10,8 @@ const testAgentDir = mkdtempSync(join(tmpdir(), "mcp-agent-"));
 process.env.PI_CODING_AGENT_DIR = testAgentDir;
 process.on("exit", () => rmSync(testAgentDir, { recursive: true, force: true }));
 
+const { MCP_ENABLED_SNAPSHOT_ENV } = await import("./handoff.ts");
+const { collectSubagentEnvironment } = await import("../subagent/environment.ts");
 const { default: mcpExtension, MCP_ACTIONS } = await import("./index.ts");
 
 interface Binding {
@@ -520,114 +522,51 @@ describe("mcp index", () => {
     ]);
   });
 
-  it("subagent snapshot broker: single-child handoffs require an unambiguous 8-character suffix", async () => {
-    const cases = [
-      {
-        label: "inherits the parent's enabled snapshot",
-        serverName: "broker-server",
-        startedIds: ["abcdef0123456789a"],
-        childSessionName: "general-purpose#abcdef01",
-        expectedEnabledCount: 1,
-      },
-      {
-        label: "independent session without # stays disabled",
-        serverName: "independent-server",
-        startedIds: ["abcdef0123456789a"],
-        childSessionName: "independent-session",
-        expectedEnabledCount: 0,
-      },
-      {
-        label: "one-character suffix cannot consume a pending snapshot",
-        serverName: "short-suffix-server",
-        startedIds: ["abcdef0123456789a"],
-        childSessionName: "normal#a",
-        expectedEnabledCount: 0,
-      },
-      {
-        label: "ambiguous prefix fails closed",
-        serverName: "ambiguous-prefix-server",
-        startedIds: ["12345678aaaaaaaaa", "12345678bbbbbbbbb"],
-        childSessionName: "general-purpose#12345678",
-        expectedEnabledCount: 0,
-      },
-    ];
+  it("adds a fresh enabled-server snapshot to every child launch environment", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "mcp-handoff-parent-"));
+    writeServerConfig(cwd, ["handoff-server"]);
 
-    for (const testCase of cases) {
-      const cwd = mkdtempSync(join(tmpdir(), "mcp-broker-case-"));
-      writeServerConfig(cwd, [testCase.serverName]);
+    const parent = bind();
+    await parent.events.get("session_start")!({}, context(cwd));
+    await enableFirstServer(parent, cwd);
 
-      const parent = bind();
-      await parent.events.get("session_start")!({}, context(cwd));
-      await enableFirstServer(parent, cwd);
+    const launchEnvironments = [collectSubagentEnvironment(), collectSubagentEnvironment()];
 
-      for (const id of testCase.startedIds) {
-        parent.piEvents.get("subagents:started")?.forEach((h) => h({ id }));
-      }
+    const snapshots = launchEnvironments.map((environment) =>
+      JSON.parse(environment[MCP_ENABLED_SNAPSHOT_ENV]) as { version: number; servers: Array<{ name: string }> },
+    );
+    assert.deepEqual(snapshots.map((snapshot) => snapshot.servers.map((server) => server.name)), [
+      ["handoff-server"],
+      ["handoff-server"],
+    ]);
+  });
 
+  it("consumes a child snapshot and identity-validates it against local config", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "mcp-handoff-child-"));
+    writeServerConfig(cwd, ["matching-server"]);
+
+    const parent = bind();
+    await parent.events.get("session_start")!({}, context(cwd));
+    await enableFirstServer(parent, cwd);
+    const environment = collectSubagentEnvironment();
+
+    const previous = process.env[MCP_ENABLED_SNAPSHOT_ENV];
+    try {
+      process.env[MCP_ENABLED_SNAPSHOT_ENV] = environment[MCP_ENABLED_SNAPSHOT_ENV];
       const child = bind();
-      await child.events.get("session_start")!({}, context(cwd, ui, testCase.childSessionName));
-      await assertEnabledCount(child, cwd, testCase.expectedEnabledCount, testCase.label);
+      await child.events.get("session_start")!({}, context(cwd));
+      await assertEnabledCount(child, cwd, 1, "matching child config inherits");
+      assert.equal(process.env[MCP_ENABLED_SNAPSHOT_ENV], undefined, "handoff is removed after consumption");
 
-      for (const id of testCase.startedIds) {
-        parent.piEvents.get("subagents:failed")?.forEach((h) => h({ id }));
-      }
+      writeServerConfig(cwd, ["different-server"]);
+      process.env[MCP_ENABLED_SNAPSHOT_ENV] = environment[MCP_ENABLED_SNAPSHOT_ENV];
+      const changedChild = bind();
+      await changedChild.events.get("session_start")!({}, context(cwd));
+      await assertEnabledCount(changedChild, cwd, 0, "changed child config rejects the snapshot");
+    } finally {
+      if (previous === undefined) delete process.env[MCP_ENABLED_SNAPSHOT_ENV];
+      else process.env[MCP_ENABLED_SNAPSHOT_ENV] = previous;
     }
-  });
-
-  it("subagent broker: consumed entry is not re-used by a second child", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-broker-once-"));
-    writeServerConfig(cwd, ["once-server"]);
-
-    const parent = bind();
-    await parent.events.get("session_start")!({}, context(cwd));
-    await enableFirstServer(parent, cwd);
-
-    const agentId = "deadbeef00000001a";
-    parent.piEvents.get("subagents:started")?.forEach((h) =>
-      h({ id: agentId, type: "general-purpose", description: "first" }),
-    );
-
-    // First child consumes the entry.
-    const child1 = bind();
-    await child1.events.get("session_start")!({}, context(cwd, ui, `general-purpose#${agentId.slice(0, 8)}`));
-    await assertEnabledCount(child1, cwd, 1, "first child inherits");
-
-    // Second child with the same suffix gets nothing (entry was consumed).
-    const child2 = bind();
-    await child2.events.get("session_start")!({}, context(cwd, ui, `general-purpose#${agentId.slice(0, 8)}`));
-    await assertEnabledCount(child2, cwd, 0, "entry consumed: second child gets nothing");
-  });
-
-  it("subagent broker: completed/failed events clean up pending entries", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-broker-cleanup-"));
-    writeServerConfig(cwd, ["cleanup-server"]);
-
-    const parent = bind();
-    await parent.events.get("session_start")!({}, context(cwd));
-    await enableFirstServer(parent, cwd);
-
-    const agentIdCompleted = "aaaaaaaa111111111";
-    const agentIdFailed = "bbbbbbbb222222222";
-
-    parent.piEvents.get("subagents:started")?.forEach((h) =>
-      h({ id: agentIdCompleted, type: "general-purpose", description: "completed" }),
-    );
-    parent.piEvents.get("subagents:started")?.forEach((h) =>
-      h({ id: agentIdFailed, type: "general-purpose", description: "failed" }),
-    );
-
-    // Simulate completion/failure before any child session_start.
-    parent.piEvents.get("subagents:completed")?.forEach((h) => h({ id: agentIdCompleted }));
-    parent.piEvents.get("subagents:failed")?.forEach((h) => h({ id: agentIdFailed }));
-
-    // A child with either suffix should now get nothing (cleaned up).
-    const child1 = bind();
-    await child1.events.get("session_start")!({}, context(cwd, ui, `general-purpose#${agentIdCompleted.slice(0, 8)}`));
-    await assertEnabledCount(child1, cwd, 0, "completed entry was cleaned up");
-
-    const child2 = bind();
-    await child2.events.get("session_start")!({}, context(cwd, ui, `general-purpose#${agentIdFailed.slice(0, 8)}`));
-    await assertEnabledCount(child2, cwd, 0, "failed entry was cleaned up");
   });
 
   it("rejected Shift+R restart renders the error until the display timeout", async () => {

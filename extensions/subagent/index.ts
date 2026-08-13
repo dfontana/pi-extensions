@@ -19,8 +19,10 @@ import {
   resultOutput,
   runPiSubagent,
   type AgentResult,
+  type RunRequest,
   type SubagentRunner,
 } from "./process.ts";
+import { collectSubagentEnvironment } from "./environment.ts";
 import { aggregateUsage, emptyTrackedUsage, formatAggregateUsage, formatUsage } from "./usage.ts";
 import { resolveModelReference, thinkingFromModelReference } from "../model-query/query.ts";
 
@@ -447,6 +449,9 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
     if (process.env[SUBAGENT_CHILD_ENV] === "1") return;
 
     const initialDiscovery = discoverAgents(options.agentsDirectory);
+    const runChild = (request: RunRequest) =>
+      run({ ...request, environment: collectSubagentEnvironment() });
+
     pi.registerTool({
       name: "subagent",
       label: "Subagent",
@@ -509,7 +514,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
               },
             ]),
           });
-          const result = await run({
+          const result = await runChild({
             ...request,
             onUpdate: onUpdate
               ? (partial) =>
@@ -559,7 +564,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
             status: "running",
           };
           emit();
-          const result = await run({
+          const result = await runChild({
             ...request,
             onUpdate: (partial) => {
               allResults[index] = { ...partial, status: "running" };

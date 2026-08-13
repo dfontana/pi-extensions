@@ -32,8 +32,8 @@ export type ServerState = "off" | "idle" | "cached" | "connected" | "needs-auth"
 
 /**
  * Point-in-time snapshot of a session's enabled MCP server set.
- * Passed from parent to child during subagent startup so the child inherits
- * only what the parent had enabled at the moment of spawn.
+ * Passed to a child process at launch so it inherits only what the parent had
+ * enabled at that instant.
  */
 export interface McpEnabledSnapshot {
   version: 1;

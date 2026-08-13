@@ -8,10 +8,9 @@
  * recovery is through the /mcp panel (Shift+R to restart, Shift+A to force
  * re-authentication).
  *
- * Child agents spawned via pi-subagents inherit a validated point-in-time copy
- * of the parent's enabled server set through an MCP-owned process-local broker.
- * The child's connections and any later enable/disable changes are isolated from
- * the parent.
+ * Child agents inherit a validated point-in-time copy of the parent's enabled
+ * server set through a child-only environment handoff. Connections and later
+ * enable/disable changes remain isolated between processes.
  *
  * See README.md for config details.
  */
@@ -33,7 +32,13 @@ import {
 import { decodeKittyPrintable, Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AuthError, authInteractive, clearOAuthCredentials } from "./auth.ts";
 import { loadServers } from "./config.ts";
-import { Manager, type McpEnabledSnapshot, type ServerState } from "./manager.ts";
+import {
+  consumeEnabledSnapshot,
+  MCP_ENABLED_SNAPSHOT_ENV,
+  serializeEnabledSnapshot,
+} from "./handoff.ts";
+import { Manager, type ServerState } from "./manager.ts";
+import { registerSubagentEnvironmentProvider } from "../subagent/environment.ts";
 
 interface Runtime {
   manager: Manager;
@@ -593,64 +598,6 @@ async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: str
   }
 }
 
-// ---- Process-global child snapshot broker ----------------------------------
-//
-// Keyed by the full subagent ID emitted in `subagents:started`. The child
-// session extracts the 8-char prefix from its session name (set by pi-subagents
-// as `<type>#${agentId.slice(0, 8)}` before session_start) and does a prefix
-// lookup to consume exactly one unambiguous pending handoff.
-
-const BROKER_SYMBOL = Symbol.for("pi-mcp.snapshot-broker.v1");
-const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
-
-interface BrokerEntry {
-  snapshot: McpEnabledSnapshot;
-  capturedAt: number;
-}
-
-function getBroker(): Map<string, BrokerEntry> {
-  const g = globalThis as Record<symbol, unknown>;
-  if (!g[BROKER_SYMBOL]) g[BROKER_SYMBOL] = new Map<string, BrokerEntry>();
-  return g[BROKER_SYMBOL] as Map<string, BrokerEntry>;
-}
-
-/** Remove entries older than SNAPSHOT_MAX_AGE_MS. Called lazily on each spawn. */
-function pruneStale(broker: Map<string, BrokerEntry>): void {
-  const cutoff = Date.now() - SNAPSHOT_MAX_AGE_MS;
-  for (const [id, entry] of broker) {
-    if (entry.capturedAt < cutoff) broker.delete(id);
-  }
-}
-
-/**
- * Extract the agentId 8-char suffix from a session name of the form
- * `<type>#<suffix>`. Returns undefined if the session name has no `#`.
- */
-function extractAgentSuffix(sessionName: string): string | undefined {
-  const idx = sessionName.lastIndexOf("#");
-  const suffix = sessionName.slice(idx + 1);
-  return idx >= 0 && suffix.length === 8 ? suffix : undefined;
-}
-
-/**
- * Consume a pending snapshot for the given 8-char agent suffix.
- * Returns a deep-copied snapshot if exactly one broker entry matches the
- * prefix, undefined if none match. Fails closed (returns undefined) if the
- * prefix is ambiguous to prevent cross-agent snapshot leakage.
- */
-function consumeSnapshot(suffix: string): McpEnabledSnapshot | undefined {
-  const broker = getBroker();
-  const matches: string[] = [];
-  for (const id of broker.keys()) {
-    if (id.startsWith(suffix)) matches.push(id);
-  }
-  if (matches.length !== 1) return undefined; // none or ambiguous — fail closed
-  const entry = broker.get(matches[0])!;
-  broker.delete(matches[0]);
-  // Return a deep copy so the consumer cannot mutate the broker.
-  return JSON.parse(JSON.stringify(entry.snapshot)) as McpEnabledSnapshot;
-}
-
 // ---- registration ----------------------------------------------------------
 
 function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: string[] = []): void {
@@ -796,31 +743,13 @@ export default function (pi: ExtensionAPI) {
 
   registerMcpTool(pi, runtime);
 
-  // ---- Subagent snapshot broker ---------------------------------------------
-  //
-  // When a child agent is spawned via pi-subagents the parent's events bus
-  // emits `subagents:started`. Capture the parent's enabled set at that
-  // instant and store it in the process-global broker keyed by the full
-  // agentId. The child's MCP extension factory (below, in session_start) looks
-  // up the broker by the 8-char agentId prefix embedded in its session name.
-
-  pi.events.on("subagents:started", (data) => {
-    const d = data as { id?: string } | null;
-    if (!d?.id) return;
-    const broker = getBroker();
-    pruneStale(broker); // lazy cleanup on each spawn
-    broker.set(d.id, {
-      snapshot: runtime.manager.snapshot(),
-      capturedAt: Date.now(),
-    });
+  // Capture the enabled set immediately before each child process starts.
+  // Parallel launches receive independent values and nothing is written to disk.
+  const unregisterEnvironmentProvider = registerSubagentEnvironmentProvider("mcp", (): Record<string, string> => {
+    const serialized = serializeEnabledSnapshot(runtime.manager.snapshot());
+    if (!serialized) return {};
+    return { [MCP_ENABLED_SNAPSHOT_ENV]: serialized };
   });
-
-  for (const event of ["subagents:completed", "subagents:failed"]) {
-    pi.events.on(event, (data) => {
-      const id = (data as { id?: string } | null)?.id;
-      if (id) getBroker().delete(id);
-    });
-  }
 
   // ---- Session lifecycle ---------------------------------------------------
 
@@ -836,24 +765,16 @@ export default function (pi: ExtensionAPI) {
     runtime.ui = ctx.ui;
     const servers = loadServers(ctx.cwd);
 
-    // Try to inherit the parent's enabled snapshot via the broker.
-    // pi-subagents sets the session name to `<type>#${agentId.slice(0,8)}`
-    // before session_start fires, so we can extract the suffix here.
-    let inheritedSnapshot: McpEnabledSnapshot | undefined;
-    const sessionName = ctx.sessionManager.getSessionName();
-    if (sessionName) {
-      const suffix = extractAgentSuffix(sessionName);
-      if (suffix) {
-        inheritedSnapshot = consumeSnapshot(suffix);
-      }
-    }
-
+    // Consume before initializing. The handoff helper always deletes the
+    // environment value, including malformed input, to prevent propagation.
+    const inheritedSnapshot = consumeEnabledSnapshot();
     await runtime.manager.initialize(servers, inheritedSnapshot);
     registerMcpTool(pi, runtime, runtime.manager.list());
     updateFooter(runtime);
   });
 
   pi.on("session_shutdown", async () => {
+    unregisterEnvironmentProvider();
     runtime.ui?.setStatus("mcp", undefined);
     runtime.ui = undefined;
     await runtime.manager.shutdown();

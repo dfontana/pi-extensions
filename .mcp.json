@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "echo": {
+      "command": "node",
+      "args": ["extensions/mcp/echo-server.mjs"]
+    }
+  }
+}
