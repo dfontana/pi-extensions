@@ -13,6 +13,8 @@ const MAX_CAPTURED_TRANSCRIPT_BYTES = 1024 * 1024;
 const MAX_CAPTURED_MESSAGE_BYTES = 512 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_TOOL_CALL_PREVIEW_BYTES = 64 * 1024;
+const MAX_STDOUT_TAIL_BYTES = 16 * 1024;
+const MAX_STDOUT_LINE_BYTES = MAX_CAPTURED_TRANSCRIPT_BYTES;
 
 export interface RunRequest {
   agent: AgentConfig;
@@ -27,12 +29,30 @@ export interface RunRequest {
   onUpdate?: (result: AgentResult) => void;
 }
 
+export type SubagentStatus = "queued" | "running" | "done" | "aborted" | "failed" | "spawn-error";
+
+export interface SubagentTermination {
+  exitCode?: number | null;
+  signal?: NodeJS.Signals;
+  escalatedToSigkill?: boolean;
+}
+
+export interface SubagentProcessDiagnostics {
+  pid?: number;
+  durationMs?: number;
+  termination?: SubagentTermination;
+  spawnError?: string;
+  stdoutTail?: string;
+  stdoutBytesIgnored?: number;
+  protocolErrors?: number;
+}
+
 export interface AgentResult {
   agent: string;
   task: string;
   cwd: string;
   exitCode: number;
-  status?: "queued" | "running" | "done";
+  status?: SubagentStatus;
   messages: Message[];
   stderr: string;
   usage: TrackedUsage;
@@ -42,6 +62,8 @@ export interface AgentResult {
   errorMessage?: string;
   /** Most recent tool activity, retained for the expanded running view. */
   latestToolCall?: string;
+  /** Process-level diagnostics, attached only when the run fails. */
+  process?: SubagentProcessDiagnostics;
 }
 
 export type SubagentRunner = (request: RunRequest) => Promise<AgentResult>;
@@ -98,8 +120,29 @@ export function resultFailed(result: AgentResult): boolean {
 }
 
 export function resultOutput(result: AgentResult): string {
-  if (resultFailed(result)) return result.errorMessage || result.stderr.trim() || finalOutput(result.messages) || "(no output)";
-  return finalOutput(result.messages) || "(no output)";
+  if (!resultFailed(result)) return finalOutput(result.messages) || "(no output)";
+  return result.errorMessage
+    || result.stderr.trim()
+    || finalOutput(result.messages)
+    || processSummary(result)
+    || "(no output)";
+}
+
+function processSummary(result: AgentResult): string {
+  const proc = result.process;
+  if (!proc) return "";
+  const term = proc.termination;
+  let lead: string;
+  if (proc.spawnError) lead = `Subagent process failed to spawn: ${proc.spawnError}`;
+  else if (result.status === "aborted") lead = "Subagent process was aborted before producing a Pi response";
+  else if (term?.signal) lead = `Subagent process was terminated by ${term.signal} before producing a Pi response`;
+  else if (term?.exitCode !== undefined && term.exitCode !== null) lead = `Subagent process exited with code ${term.exitCode} before producing a Pi response`;
+  else lead = "Subagent process ended before producing a Pi response";
+  const detail: string[] = [`${result.messages.length} message${result.messages.length === 1 ? "" : "s"}`];
+  if (proc.durationMs !== undefined) detail.push(`${proc.durationMs} ms`);
+  if (proc.protocolErrors) detail.push(`${proc.protocolErrors} protocol error${proc.protocolErrors === 1 ? "" : "s"}`);
+  if (proc.stdoutTail) detail.push(`${Buffer.byteLength(proc.stdoutTail, "utf8")} bytes unparsed stdout`);
+  return `${lead} (${detail.join(", ")}).`;
 }
 
 export function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -119,6 +162,18 @@ function truncateUtf8(value: string, maxBytes: number): string {
   let truncated = value.slice(0, maxBytes);
   while (Buffer.byteLength(truncated, "utf8") > maxBytes) truncated = truncated.slice(0, -1);
   return `${truncated}\n[truncated]`;
+}
+
+function utf8Tail(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let lo = 0;
+  let hi = value.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (Buffer.byteLength(value.slice(mid), "utf8") > maxBytes) lo = mid + 1;
+    else hi = mid;
+  }
+  return value.slice(lo);
 }
 
 function capMessage(message: Message): Message {
@@ -175,7 +230,7 @@ export function abortedResult(request: AbortedResultRequest): AgentResult {
     task: request.task,
     cwd: request.cwd,
     exitCode: 130,
-    status: "done",
+    status: "aborted",
     messages: [],
     stderr: "",
     usage: emptyTrackedUsage(request.contextWindow),
@@ -191,10 +246,29 @@ interface SystemPromptFile {
   filePath: string;
 }
 
+interface TaskFile {
+  directory: string;
+  filePath: string;
+}
+
+async function writeTaskFile(task: string): Promise<TaskFile> {
+  const directory = await mkdtemp(join(tmpdir(), "pi-subagent-task-"));
+  const filePath = join(directory, "task.md");
+  try {
+    await writeFile(filePath, task, { encoding: "utf8", mode: 0o600 });
+    return { directory, filePath };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 /** Test-only launch seams; normal callers use the one-argument runner. */
 export interface RunPiSubagentHooks {
   afterPromptCreation?: (prompt: SystemPromptFile | undefined) => void | Promise<void>;
   spawn?: typeof spawn;
+  /** Test-only override for the TERM→KILL escalation delay. */
+  escalationDelayMs?: number;
 }
 
 async function writeSystemPrompt(
@@ -237,45 +311,63 @@ export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHoo
   if (request.agent.tools?.length) args.push("--tools", request.agent.tools.join(","));
 
   let prompt: SystemPromptFile | undefined;
+  let taskFile: TaskFile | undefined;
   try {
     prompt = await writeSystemPrompt(request.agent, hooks.afterPromptCreation);
     if (request.signal?.aborted) return abortedResult(request);
     if (prompt) args.push("--append-system-prompt", prompt.filePath);
-    args.push(`Task: ${request.task}`);
+    taskFile = await writeTaskFile(`Task: ${request.task}`);
+    if (request.signal?.aborted) return abortedResult(request);
+    args.push(`@${taskFile.filePath}`);
 
     const invocation = getPiInvocation(args);
     if (request.signal?.aborted) return abortedResult(request);
     let aborted = false;
 
     result.exitCode = await new Promise<number>((resolve) => {
+      const startedAt = Date.now();
       const child = (hooks.spawn ?? spawn)(invocation.command, invocation.args, {
         cwd: request.cwd,
         env: childProcessEnvironment(request.environment),
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
       });
-      let stdout = "";
+      const pid = child.pid;
+      let stdoutLine = "";
+      let stdoutLineBytes = 0;
+      let discardingStdoutLine = false;
       let capturedBytes = 0;
-      let settled = false;
+      let stdoutTail = "";
+      let stdoutTailTotal = 0;
+      let protocolErrors = 0;
+      let spawnError: string | undefined;
+      let escalatedToSigkill = false;
+      let finished = false;
       let killTimer: NodeJS.Timeout | undefined;
 
-      const settle = (code: number) => {
-        if (settled) return;
-        settled = true;
-        if (killTimer) clearTimeout(killTimer);
-        request.signal?.removeEventListener("abort", abort);
-        resolve(code);
+      const captureStdoutTail = (chunk: string) => {
+        const chunkBytes = Buffer.byteLength(chunk, "utf8");
+        if (!chunkBytes) return;
+        stdoutTailTotal += chunkBytes;
+        stdoutTail = chunkBytes >= MAX_STDOUT_TAIL_BYTES
+          ? utf8Tail(chunk, MAX_STDOUT_TAIL_BYTES)
+          : utf8Tail(stdoutTail + chunk, MAX_STDOUT_TAIL_BYTES);
       };
 
-      const processLine = (line: string) => {
+      const processLine = (line: string, terminator: string) => {
         if (!line.trim()) return;
         let event: { type?: string; message?: Message };
         try {
           event = JSON.parse(line) as { type?: string; message?: Message };
         } catch {
+          captureStdoutTail(line + terminator);
+          protocolErrors++;
           return;
         }
-        if (!event.message || (event.type !== "message_end" && event.type !== "tool_result_end")) return;
+        if (!event.message || (event.type !== "message_end" && event.type !== "tool_result_end")) {
+          captureStdoutTail(line + terminator);
+          return;
+        }
 
         captureToolCalls(result, event.message);
         const captured = capMessage(event.message);
@@ -297,21 +389,92 @@ export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHoo
         if (event.message.role === "assistant") request.onUpdate?.(result);
       };
 
+      const appendStdoutSegment = (segment: string) => {
+        if (discardingStdoutLine) {
+          captureStdoutTail(segment);
+          return;
+        }
+        const segmentBytes = Buffer.byteLength(segment, "utf8");
+        if (stdoutLineBytes + segmentBytes <= MAX_STDOUT_LINE_BYTES) {
+          stdoutLine += segment;
+          stdoutLineBytes += segmentBytes;
+          return;
+        }
+        protocolErrors++;
+        discardingStdoutLine = true;
+        captureStdoutTail(stdoutLine);
+        captureStdoutTail(segment);
+        stdoutLine = "";
+        stdoutLineBytes = 0;
+      };
+
+      const consumeStdout = (chunk: string) => {
+        let offset = 0;
+        while (offset < chunk.length) {
+          const newline = chunk.indexOf("\n", offset);
+          if (newline === -1) {
+            appendStdoutSegment(chunk.slice(offset));
+            return;
+          }
+          appendStdoutSegment(chunk.slice(offset, newline));
+          if (discardingStdoutLine) captureStdoutTail("\n");
+          else processLine(stdoutLine, "\n");
+          stdoutLine = "";
+          stdoutLineBytes = 0;
+          discardingStdoutLine = false;
+          offset = newline + 1;
+        }
+      };
+
       const abort = () => {
         aborted = true;
         child.kill("SIGTERM");
         killTimer = setTimeout(() => {
-          if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-        }, 5_000);
+          if (child.exitCode === null && child.signalCode === null) {
+            escalatedToSigkill = true;
+            child.kill("SIGKILL");
+          }
+        }, hooks.escalationDelayMs ?? 5_000);
         killTimer.unref();
       };
 
-      child.stdout.on("data", (chunk) => {
-        stdout += chunk.toString();
-        const lines = stdout.split("\n");
-        stdout = lines.pop() ?? "";
-        for (const line of lines) processLine(line);
-      });
+      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (finished) return;
+        finished = true;
+        if (killTimer) clearTimeout(killTimer);
+        request.signal?.removeEventListener("abort", abort);
+        if (!discardingStdoutLine && stdoutLine.trim()) processLine(stdoutLine, "");
+        const termination: SubagentTermination = {};
+        if (code !== null) termination.exitCode = code;
+        if (signal) termination.signal = signal;
+        if (escalatedToSigkill) termination.escalatedToSigkill = true;
+        let status: SubagentStatus;
+        if (aborted) {
+          status = "aborted";
+          result.stopReason = "aborted";
+        } else if (spawnError) {
+          status = "spawn-error";
+        } else if (code === 0) {
+          status = "done";
+        } else {
+          status = "failed";
+        }
+        if (status !== "done") {
+          result.process = {
+            pid,
+            durationMs: Date.now() - startedAt,
+            termination: Object.keys(termination).length ? termination : undefined,
+            spawnError,
+            stdoutTail: stdoutTail || undefined,
+            stdoutBytesIgnored: (stdoutTailTotal - Buffer.byteLength(stdoutTail, "utf8")) || undefined,
+            protocolErrors: protocolErrors || undefined,
+          };
+        }
+        result.status = status;
+        resolve(aborted ? 130 : (code ?? 1));
+      };
+
+      child.stdout.on("data", (chunk) => consumeStdout(chunk.toString()));
       child.stderr.on("data", (chunk) => {
         result.stderr += chunk.toString();
         if (Buffer.byteLength(result.stderr, "utf8") > MAX_STDERR_BYTES) {
@@ -319,25 +482,19 @@ export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHoo
         }
       });
       child.on("error", (error) => {
-        result.stderr += `${result.stderr ? "\n" : ""}${error.message}`;
-        settle(1);
+        if (aborted) result.stderr += `${result.stderr ? "\n" : ""}${error.message}`;
+        else spawnError = error.message;
+        finish(null, null);
       });
-      child.on("close", (code) => {
-        if (stdout.trim()) processLine(stdout);
-        if (aborted) {
-          result.stopReason = "aborted";
-          result.errorMessage ||= "Subagent was aborted";
-        }
-        settle(code ?? (aborted ? 130 : 1));
-      });
+      child.on("close", (code, signal) => finish(code, signal));
 
       if (request.signal?.aborted) abort();
       else request.signal?.addEventListener("abort", abort, { once: true });
     });
 
-    result.status = "done";
     return result;
   } finally {
+    if (taskFile) await rm(taskFile.directory, { recursive: true, force: true });
     if (prompt) await rm(prompt.directory, { recursive: true, force: true });
   }
 };

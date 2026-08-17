@@ -9,6 +9,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { registerSubagentEnvironmentProvider } from "./environment.ts";
 import { createSubagentExtension, MAX_ACTIVE_CHILDREN, MAX_OUTSTANDING_CALLS } from "./index.ts";
 import { SUBAGENT_CHILD_ENV, type AgentResult, type RunRequest, type SubagentRunner } from "./process.ts";
+import { emptyTrackedUsage } from "./usage.ts";
 
 interface RegisteredTool {
   name: string;
@@ -691,6 +692,24 @@ describe("subagent render", () => {
     item.latestToolCall = "read /tmp/history.ts";
     const withActivity = tool.renderResult!({ content: [{ type: "text", text: "Final response" }], details: { result: item } }, { expanded: false, isPartial: false }, testTheme, { ...renderContext(state), lastComponent: undefined }).render(120).join("\n");
     assert.equal(withActivity, base);
+  });
+
+  it("renders a synthesized message when collapsed and process diagnostics when expanded", () => {
+    const { tool } = setup();
+    assert.ok(tool.renderResult);
+    const item: AgentResult = {
+      agent: "worker", task: "silent fail", cwd: "/tmp", exitCode: 1, status: "failed",
+      messages: [], stderr: "", usage: emptyTrackedUsage(),
+      process: { pid: 4242, durationMs: 5432, termination: { exitCode: 1 }, protocolErrors: 2, stdoutTail: "garbage\n" },
+    };
+    const collapsed = tool.renderResult!({ content: [{ type: "text", text: "" }], details: { result: item } }, { expanded: false, isPartial: false }, testTheme, renderContext({})).render(120).join("\n");
+    assert.match(collapsed, /exited with code 1 before producing a Pi response/);
+    assert.doesNotMatch(collapsed, /garbage/);
+
+    const expanded = tool.renderResult!({ content: [{ type: "text", text: "" }], details: { result: item } }, { expanded: true, isPartial: false }, testTheme, renderContext({})).render(120).join("\n");
+    assert.match(expanded, /Status: failed/);
+    assert.match(expanded, /Exit code: 1/);
+    assert.match(expanded, /garbage/);
   });
 
   it("renders legacy single details through the current renderer and parallel details as raw fallback", () => {

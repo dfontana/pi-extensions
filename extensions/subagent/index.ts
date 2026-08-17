@@ -152,7 +152,8 @@ function modelThinkingSummary(model: string | undefined, thinking: ModelThinking
 }
 
 function isComplete(item: AgentResult): boolean {
-  return item.status === "done" || (item.status === undefined && item.exitCode !== -1);
+  if (item.status === undefined) return item.exitCode !== -1;
+  return item.status === "done" || item.status === "aborted" || item.status === "failed" || item.status === "spawn-error";
 }
 
 function isWorking(item: AgentResult, isPartial: boolean): boolean {
@@ -187,6 +188,27 @@ function expandedContextLines(
 
 function renderError(item: AgentResult, color: (name: any, text: string) => string): string | undefined {
   return isComplete(item) && resultFailed(item) ? color("error", resultOutput(item)) : undefined;
+}
+
+function diagnosticsLines(item: AgentResult, theme: RenderTheme): string {
+  const proc = item.process;
+  if (!proc) return "";
+  const fg = theme.fg.bind(theme);
+  const term = proc.termination;
+  const exitCode = term?.exitCode !== undefined && term.exitCode !== null ? String(term.exitCode) : "n/a";
+  const lines = [
+    `${fg("muted", "Status: ")}${fg("dim", item.status ?? "failed")}`,
+    `${fg("muted", "Exit code: ")}${fg("dim", exitCode)}`,
+    `${fg("muted", "Signal: ")}${fg("dim", term?.signal ?? "none")}`,
+  ];
+  if (proc.durationMs !== undefined) lines.push(`${fg("muted", "Duration: ")}${fg("dim", `${proc.durationMs} ms`)}`);
+  lines.push(`${fg("muted", "Messages: ")}${fg("dim", String(item.messages.length))}`);
+  lines.push(`${fg("muted", "stderr: ")}${fg("dim", item.stderr.trim() ? "present" : "empty")}`);
+  if (proc.spawnError) lines.push(`${fg("muted", "Spawn error: ")}${fg("dim", proc.spawnError)}`);
+  if (proc.protocolErrors) lines.push(`${fg("muted", "Protocol errors: ")}${fg("dim", String(proc.protocolErrors))}`);
+  if (proc.stdoutBytesIgnored) lines.push(`${fg("muted", "Stdout truncated: ")}${fg("dim", `${proc.stdoutBytesIgnored} bytes`)}`);
+  if (proc.stdoutTail) lines.push(`${fg("muted", "Stdout tail:")}\n${fg("dim", proc.stdoutTail)}`);
+  return lines.join("\n");
 }
 
 function latestOutput(messages: readonly Message[]): string {
@@ -249,10 +271,12 @@ class ExpandedSubagentResult extends Container {
   private readonly activity = new ExpandedActivity();
   private readonly output = new Markdown("", 0, 0, getMarkdownTheme());
   private readonly status = new Text("", 0, 0);
+  private readonly diagnostics = new Text("", 0, 0);
   private contextText = "";
   private usageText = "";
   private outputText = "";
   private statusText = "";
+  private diagnosticsText = "";
 
   constructor() {
     super();
@@ -262,6 +286,7 @@ class ExpandedSubagentResult extends Container {
     this.addChild(new Spacer(1));
     this.addChild(this.output);
     this.addChild(this.status);
+    this.addChild(this.diagnostics);
   }
 
   update(item: AgentResult, theme: RenderTheme): void {
@@ -280,6 +305,7 @@ class ExpandedSubagentResult extends Container {
         : output
           ? ""
           : theme.fg("muted", "(no output)");
+    const diagnostics = working ? "" : diagnosticsLines(item, theme);
 
     this.contextText = updateText(this.context, this.contextText, context);
     this.usageText = updateText(this.usage, this.usageText, usage);
@@ -289,6 +315,7 @@ class ExpandedSubagentResult extends Container {
       this.outputText = output;
     }
     this.statusText = updateText(this.status, this.statusText, status);
+    this.diagnosticsText = updateText(this.diagnostics, this.diagnosticsText, diagnostics);
   }
 }
 
@@ -617,7 +644,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
                   }
                 : undefined,
             });
-            result.status = "done";
+            if (!isComplete(result)) result.status = result.exitCode === 0 ? "done" : "failed";
             return resultReturn(result, onUpdate);
           } finally {
             // The lease is released even if cancellation wins after acquire()
