@@ -9,8 +9,6 @@ compatibility: Requires Pi 0.84.1+ and the subagent tool.
 
 Coordinate a focused review of a concrete code target. Preserve the target resolution, model selection, evidence standards, fix loop, and reporting of the full review workflow while using one reviewer per standard round.
 
-Use the sibling `run-review` skill instead when the user explicitly requests a deep, comprehensive, adversarial, multi-axis, or multi-agent review, or when the target is broad or high-risk. Security boundaries, authorization, destructive migrations, concurrency-critical state, and public protocol changes are normally high-risk. When uncertain and no full-review criterion clearly applies, prefer this quick workflow.
-
 ## Invocation contract
 
 The user's arguments are appended to this skill as a `User:` message. Extract these optional preferences:
