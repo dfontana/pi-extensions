@@ -38,6 +38,7 @@ describe("model-query index", () => {
       "model",
       "thinking",
     ]);
+    assert.deepEqual((tool.parameters.properties.intelligence as { enum: string[] }).enum, ["higher", "same", "lower"]);
 
     const current = model("openai-codex", "gpt-5.6-sol");
     const peer = model("anthropic", "claude-sonnet-4-6");
@@ -66,6 +67,30 @@ describe("model-query index", () => {
     assert.equal(refreshSignal, controller.signal);
     assert.deepEqual(result.details, { model: "openai-codex/gpt-5.6-sol", thinking: "high" });
     assert.equal(result.content[0].text, JSON.stringify(result.details, null, 2));
+  });
+
+  test("accepts lower intelligence through the registered tool", async () => {
+    let tool: RegisteredTool | undefined;
+    extension({ registerTool: (registered: RegisteredTool) => (tool = registered) } as unknown as ExtensionAPI);
+    assert.ok(tool);
+
+    const current = model("openai-codex", "gpt-5.6-sol");
+    const lower = model("openrouter", "google/gemini-3-luna");
+    const result = await tool.execute(
+      "call",
+      { model: "luna", intelligence: "lower" },
+      undefined,
+      undefined,
+      {
+        model: current,
+        modelRegistry: {
+          refresh: async () => ({ aborted: false, errors: new Map() }),
+          getAvailable: () => [current, lower],
+        },
+      },
+    );
+
+    assert.deepEqual(result.details, { model: "openrouter/google/gemini-3-luna" });
   });
 
   test("stops before selecting a model when refresh is aborted", async () => {

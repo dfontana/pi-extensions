@@ -2,8 +2,9 @@ import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { MODEL_THINKING_LEVELS, resolveModelQuery, type ModelQueryOptions } from "./query.ts";
 
-const IntelligenceSchema = StringEnum(["higher", "same"] as const, {
-  description: 'Relative intelligence policy: "higher" prefers a tier above the active model, while "same" stays at its tier.',
+const IntelligenceSchema = StringEnum(["higher", "same", "lower"] as const, {
+  description:
+    'Relative intelligence policy: "higher" prefers a tier above the active model, "same" stays at its tier, and "lower" prefers a tier below it.',
 });
 
 const ThinkingSchema = StringEnum(MODEL_THINKING_LEVELS, {
@@ -16,7 +17,7 @@ export default function (pi: ExtensionAPI) {
     label: "Model Query",
     description:
       "Resolve one currently available authenticated model from Pi's registry. Use exact canonical provider/modelId " +
-      "references or controlled ID short names only; use the separate intelligence field for higher/same policy. " +
+      "references or controlled ID short names only; use the separate intelligence field for higher/same/lower policy. " +
       "Selection applies deterministic thinking, context, vendor, route, intelligence, version, and context-window policy.",
     promptSnippet: "Resolve a usable model by policy without inventing unavailable provider/model references",
     parameters: Type.Object({

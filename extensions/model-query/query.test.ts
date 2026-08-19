@@ -72,6 +72,31 @@ describe("model-query query", () => {
     const sonnetPeer = model("anthropic", "claude-sonnet-4-7");
     assert.equal(resolveModelQuery({ current: terra, available: [terra, sonnetPeer], intelligence: "same" }).model, canonicalModel(sonnetPeer));
     assert.equal(resolveModelQuery({ current: sol, available: [sol, terra], intelligence: "higher" }).model, canonicalModel(sol));
+    assert.equal(resolveModelQuery({ current: sol, available: [sol, terra], intelligence: "lower" }).model, canonicalModel(terra));
+
+    const solPeer = model("openai-codex", "gpt-5.7-sol");
+    assert.equal(resolveModelQuery({ current: sol, available: [sol, solPeer], intelligence: "lower" }).model, canonicalModel(solPeer));
+    assert.equal(resolveModelQuery({ current: sol, available: [sol], intelligence: "lower" }).model, canonicalModel(sol));
+
+    const lowerLuna = model("openrouter", "google/gemini-3-luna", {
+      contextWindow: 100_000,
+      thinkingLevelMap: { max: "supported" },
+    });
+    assert.deepEqual(
+      resolveModelQuery({
+        current: sol,
+        available: [sol, lowerLuna],
+        model: "luna",
+        intelligence: "lower",
+        thinking: "max",
+        minimumContextWindow: 100_000,
+      }),
+      { model: canonicalModel(lowerLuna), thinking: "max" },
+    );
+    assert.throws(
+      () => resolveModelQuery({ current: luna, available: [luna, terra], model: canonicalModel(terra), intelligence: "lower" }),
+      /No eligible/,
+    );
 
     const noMax = model("anthropic", "claude-opus-4-8", { thinkingLevelMap: { max: null } });
     const maxSol = model("openai-codex", "gpt-5.6-sol", { thinkingLevelMap: { max: "supported" } });

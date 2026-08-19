@@ -9,7 +9,7 @@ export function thinkingFromModelReference(reference: string | undefined): Model
   return suffix?.toLowerCase() as ModelThinkingLevel | undefined;
 }
 
-export type ModelIntelligence = "higher" | "same";
+export type ModelIntelligence = "higher" | "same" | "lower";
 
 export interface ModelQueryOptions {
   /** A canonical provider/id reference or a short name searched with Pi's fuzzy matcher. */
@@ -317,10 +317,16 @@ function intelligenceGroup(
   if (!intelligence) return 0;
   if (candidate.rank === undefined || currentRank === undefined) return 99;
 
-  // Keep peer/current diversity after route preference. A direct active route
-  // therefore remains preferable to a metered peer, while two candidates on
-  // the same route still prefer the distinct base model.
+  // Keep peer/current diversity after route preference. Directional policies
+  // prefer their requested side, then fall back to equal-tier candidates. A
+  // direct active route therefore remains preferable to a metered peer, while
+  // two candidates on the same route still prefer the distinct base model.
   if (intelligence === "same") return candidate.rank === currentRank ? 0 : 99;
+  if (intelligence === "lower") {
+    if (candidate.rank < currentRank) return 0;
+    if (candidate.rank === currentRank) return 1;
+    return 99;
+  }
   if (candidate.rank > currentRank) return 0;
   if (candidate.rank === currentRank) return 1;
   return 99;

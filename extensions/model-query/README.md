@@ -5,7 +5,7 @@ Provides the `model_query` tool for resolving one usable model from Pi's authent
 ```jsonc
 {
   "model": "sonnet",             // canonical provider/modelId or fuzzy short name
-  "intelligence": "higher",      // "higher" | "same"
+  "intelligence": "higher",      // "higher" | "same" | "lower"
   "excludeCurrentVendor": false,
   "thinking": "high",             // off | minimal | low | medium | high | xhigh | max
   "minimumContextWindow": 200000
@@ -26,7 +26,9 @@ must be available, support the requested thinking level, and meet the requested 
 
 `higher` requires a recognized active tier and prefers a higher tier, then an equal-tier peer, then the
 active model. `same` stays at the active tier and prefers a distinct base model before reusing the active
-base. Tiers are inferred from IDs only: Opus/Sol > Sonnet/Terra > Luna > Mini/Haiku/Nano. Direct native or
+base. `lower` requires a recognized active tier and prefers a lower tier, then an equal-tier peer, then the
+active model; it never selects a higher tier. Tiers are inferred from IDs only: Opus/Sol > Sonnet/Terra >
+Luna > Mini/Haiku/Nano. Direct native or
 subscription routes always beat known aggregators regardless of tier; version/release date, context window, and canonical ID provide
 stable tie-breakers. `excludeCurrentVendor` infers vendors from model IDs (Claude/Anthropic, GPT/OpenAI,
 Gemini/Google, and Llama/Meta); unknown active vendors fail safely rather than guessing.
