@@ -15,6 +15,7 @@ const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_TOOL_CALL_PREVIEW_BYTES = 64 * 1024;
 const MAX_STDOUT_TAIL_BYTES = 16 * 1024;
 const MAX_STDOUT_LINE_BYTES = MAX_CAPTURED_TRANSCRIPT_BYTES;
+const POST_SETTLEMENT_DELAY_MS = 60_000;
 
 export interface RunRequest {
   agent: AgentConfig;
@@ -269,6 +270,8 @@ export interface RunPiSubagentHooks {
   spawn?: typeof spawn;
   /** Test-only override for the TERM→KILL escalation delay. */
   escalationDelayMs?: number;
+  /** Test-only override for the post-settlement cleanup timeout. */
+  settlementDelayMs?: number;
 }
 
 async function writeSystemPrompt(
@@ -343,6 +346,9 @@ export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHoo
       let spawnError: string | undefined;
       let escalatedToSigkill = false;
       let finished = false;
+      let settlementObserved = false;
+      let settlementTimedOut = false;
+      let settlementTimer: NodeJS.Timeout | undefined;
       let killTimer: NodeJS.Timeout | undefined;
 
       const captureStdoutTail = (chunk: string) => {
@@ -362,6 +368,10 @@ export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHoo
         } catch {
           captureStdoutTail(line + terminator);
           protocolErrors++;
+          return;
+        }
+        if (event.type === "agent_settled") {
+          observeSettlement();
           return;
         }
         if (!event.message || (event.type !== "message_end" && event.type !== "tool_result_end")) {
@@ -426,21 +436,41 @@ export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHoo
         }
       };
 
-      const abort = () => {
-        aborted = true;
-        child.kill("SIGTERM");
+      const terminate = () => {
+        if (killTimer) clearTimeout(killTimer);
         killTimer = setTimeout(() => {
-          if (child.exitCode === null && child.signalCode === null) {
+          killTimer = undefined;
+          if (!finished && child.exitCode === null && child.signalCode === null) {
             escalatedToSigkill = true;
             child.kill("SIGKILL");
           }
         }, hooks.escalationDelayMs ?? 5_000);
         killTimer.unref();
+        child.kill("SIGTERM");
+      };
+
+      const abort = () => {
+        if (finished) return;
+        aborted = true;
+        terminate();
+      };
+
+      const observeSettlement = () => {
+        if (settlementObserved || finished || aborted) return;
+        settlementObserved = true;
+        settlementTimer = setTimeout(() => {
+          settlementTimer = undefined;
+          if (finished || aborted || child.exitCode !== null || child.signalCode !== null) return;
+          settlementTimedOut = true;
+          terminate();
+        }, hooks.settlementDelayMs ?? POST_SETTLEMENT_DELAY_MS);
+        settlementTimer.unref();
       };
 
       const finish = (code: number | null, signal: NodeJS.Signals | null) => {
         if (finished) return;
         finished = true;
+        if (settlementTimer) clearTimeout(settlementTimer);
         if (killTimer) clearTimeout(killTimer);
         request.signal?.removeEventListener("abort", abort);
         if (!discardingStdoutLine && stdoutLine.trim()) processLine(stdoutLine, "");
@@ -454,7 +484,7 @@ export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHoo
           result.stopReason = "aborted";
         } else if (spawnError) {
           status = "spawn-error";
-        } else if (code === 0) {
+        } else if (code === 0 || settlementTimedOut) {
           status = "done";
         } else {
           status = "failed";
@@ -471,7 +501,7 @@ export async function runPiSubagent(request: RunRequest, hooks: RunPiSubagentHoo
           };
         }
         result.status = status;
-        resolve(aborted ? 130 : (code ?? 1));
+        resolve(aborted ? 130 : (settlementTimedOut ? 0 : (code ?? 1)));
       };
 
       child.stdout.on("data", (chunk) => consumeStdout(chunk.toString()));

@@ -323,6 +323,58 @@ describe("subagent process diagnostics", () => {
     assert.equal(result.process?.termination?.escalatedToSigkill, true);
   });
 
+  it("terminates a settled child that remains alive and preserves its result", async () => {
+    const signals: NodeJS.Signals[] = [];
+    const message = JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop", api: "test", provider: "test", model: "m", usage: zeroUsage },
+    });
+    const result = await runPiSubagent(
+      { agent, task: "settled but stuck", cwd: process.cwd() },
+      {
+        settlementDelayMs: 0,
+        escalationDelayMs: 0,
+        spawn: fakeSpawn({
+          stdout: [`${message}\n`, `${JSON.stringify({ type: "agent_settled" })}\n`],
+          onKill: (child, signal) => {
+            signals.push(signal);
+            if (signal === "SIGKILL") setImmediate(() => child.emit("close", null, signal));
+          },
+        }) as any,
+      },
+    );
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    assert.equal(result.status, "done");
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stopReason, "stop");
+    assert.equal(result.errorMessage, undefined);
+    assert.equal(result.process, undefined);
+    assert.equal(resultOutput(result), "done");
+  });
+
+  it("does not kill a settled child that closes normally", async () => {
+    const signals: NodeJS.Signals[] = [];
+    const message = JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop", api: "test", provider: "test", model: "m", usage: zeroUsage },
+    });
+    const result = await runPiSubagent(
+      { agent, task: "settled and done", cwd: process.cwd() },
+      {
+        settlementDelayMs: 0,
+        spawn: fakeSpawn({
+          stdout: [`${message}\n`, `${JSON.stringify({ type: "agent_settled" })}\n`],
+          close: [0, null],
+          onKill: (_child, signal) => signals.push(signal),
+        }) as any,
+      },
+    );
+    assert.deepEqual(signals, []);
+    assert.equal(result.status, "done");
+    assert.equal(result.exitCode, 0);
+    assert.equal(resultOutput(result), "done");
+  });
+
   it("surfaces a spawn error as a distinct failure mode", async () => {
     const result = await runPiSubagent(
       { agent, task: "no binary", cwd: process.cwd() },
