@@ -766,7 +766,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     runtime.ui = ctx.ui;
-    const servers = loadServers(ctx.cwd);
+    const { servers, errors } = loadServers(ctx.cwd);
+    for (const error of errors) ctx.ui.notify(`mcp: ${error}`, "warning");
 
     // Consume before initializing. The handoff helper always deletes the
     // environment value, including malformed input, to prevent propagation.

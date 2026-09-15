@@ -278,6 +278,88 @@ describe("mcp index", () => {
     });
   });
 
+  // ---- config load failure tests ---------------------------------------------
+
+  describe("mcp config", () => {
+    const globalConfigPath = join(testAgentDir, "mcp.json");
+
+    function capturingUi() {
+      const notifications: Array<{ message: string; level: string }> = [];
+      return {
+        ui: { ...ui, notify: (message: string, level: string) => notifications.push({ message, level }) },
+        notifications,
+      };
+    }
+
+    const configCases: Array<{
+      label: string;
+      global?: string;
+      project: string;
+      expectWarning: RegExp;
+      expectServers: string[];
+    }> = [
+      {
+        label: "corrupt global config warns and still loads project servers",
+        global: '{ "mcpServers": { "global-srv": {} }',
+        project: JSON.stringify({ mcpServers: { "project-srv": {} } }),
+        expectWarning: /failed to read .*mcp\.json/,
+        expectServers: ["project-srv"],
+      },
+      {
+        label: "corrupt project config warns and still loads global servers",
+        global: JSON.stringify({ mcpServers: { "global-srv": {} } }),
+        project: "{ not json",
+        expectWarning: /failed to read .*\.mcp\.json/,
+        expectServers: ["global-srv"],
+      },
+      {
+        label: "non-object server entry warns, remaining entries still load",
+        project: JSON.stringify({ mcpServers: { "bad": null, "good": {} } }),
+        expectWarning: /invalid server entry "bad" in .*\.mcp\.json: expected an object/,
+        expectServers: ["good"],
+      },
+    ];
+
+    for (const { label, global, project, expectWarning, expectServers } of configCases) {
+      it(label, async () => {
+        const cwd = mkdtempSync(join(tmpdir(), "mcp-config-"));
+        try {
+          if (global !== undefined) writeFileSync(globalConfigPath, global);
+          writeFileSync(join(cwd, ".mcp.json"), project);
+
+          const binding = bind();
+          const capture = capturingUi();
+          await sessionStart(cwd, binding, context(cwd, capture.ui));
+
+          assert.equal(capture.notifications.length, 1, "exactly one warning is surfaced");
+          assert.equal(capture.notifications[0].level, "warning");
+          assert.match(capture.notifications[0].message, /^mcp: /);
+          assert.match(capture.notifications[0].message, expectWarning);
+
+          const status = await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd));
+          for (const name of expectServers) {
+            assert.match(status.content[0].text, new RegExp(`\\b${name}\\b`), `server "${name}" must still load`);
+          }
+        } finally {
+          rmSync(globalConfigPath, { force: true });
+        }
+      });
+    }
+
+    it("surfaces no warning when config files are valid or absent", async () => {
+      const cwd = mkdtempSync(join(tmpdir(), "mcp-config-clean-"));
+      writeServerConfig(cwd, ["clean-srv"]);
+
+      const binding = bind();
+      const capture = capturingUi();
+      await sessionStart(cwd, binding, context(cwd, capture.ui));
+
+      assert.deepEqual(capture.notifications, []);
+      const status = await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd));
+      assert.match(status.content[0].text, /clean-srv/);
+    });
+  });
+
   // ---- dispatch / render tests ---------------------------------------------
 
   describe("mcp dispatch", () => {

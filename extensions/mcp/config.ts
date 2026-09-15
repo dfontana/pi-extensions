@@ -2,7 +2,9 @@
  * Config + persistent state for the mcp extension.
  *
  * Servers are read (never written) from standard `.mcp.json` files, merged in
- * precedence order (project wins over global). We honor the standard
+ * precedence order (project wins over global). Read/parse failures of config
+ * files are reported by loadServers (surfaced as session warnings), never
+ * silently discarded. We honor the standard
  * `mcpServers.{name}.{command,args,env}` shape and add a small, clearly-marked
  * set of non-standard fields for HTTP/OAuth (`url`, `headers`, `auth`, `oauth`,
  * `bearerToken*`). The extension's own mutable state (OAuth creds, metadata
@@ -69,12 +71,16 @@ function expandPath(p: string): string {
 
 // ---- config loading (read-only) --------------------------------------------
 
-function readJson(path: string): Record<string, unknown> | undefined {
+/** Read JSON from disk. A missing file is `{ ok: true, value: undefined }`;
+ *  any read or parse failure of an existing file is `{ ok: false, error }`. */
+function readJson(
+  path: string,
+): { ok: true; value: Record<string, unknown> | undefined } | { ok: false; error: string } {
   try {
-    if (!existsSync(path)) return undefined;
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return undefined;
+    if (!existsSync(path)) return { ok: true, value: undefined };
+    return { ok: true, value: JSON.parse(readFileSync(path, "utf8")) };
+  } catch (e) {
+    return { ok: false, error: `failed to read ${path}: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -104,17 +110,34 @@ function normalize(name: string, raw: Record<string, unknown>): ServerDef {
   return def;
 }
 
-/** Merge `~/.pi/agent/mcp.json` (global) then `./.mcp.json` (project overrides global). */
-export function loadServers(cwd: string): Map<string, ServerDef> {
+export interface LoadServersResult {
+  servers: Map<string, ServerDef>;
+  /** Read/parse failures for config files that exist (surfaced as warnings). */
+  errors: string[];
+}
+
+/** Merge `~/.pi/agent/mcp.json` (global) then `./.mcp.json` (project overrides global).
+ *  A corrupt file never hides the other layer's servers; its error is reported instead. */
+export function loadServers(cwd: string): LoadServersResult {
   const merged = new Map<string, ServerDef>();
+  const errors: string[] = [];
   for (const path of [join(getAgentDir(), GLOBAL_CONFIG_FILE), resolve(cwd, ".mcp.json")]) {
-    const servers = readJson(path)?.mcpServers;
+    const res = readJson(path);
+    if (!res.ok) {
+      errors.push(res.error);
+      continue;
+    }
+    const servers = res.value?.mcpServers;
     if (!servers || typeof servers !== "object") continue;
-    for (const [name, raw] of Object.entries(servers as Record<string, Record<string, unknown>>)) {
-      merged.set(name, normalize(name, raw));
+    for (const [name, raw] of Object.entries(servers as Record<string, unknown>)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        errors.push(`invalid server entry "${name}" in ${path}: expected an object`);
+        continue;
+      }
+      merged.set(name, normalize(name, raw as Record<string, unknown>));
     }
   }
-  return merged;
+  return { servers: merged, errors };
 }
 
 export function transportKind(def: ServerDef): "stdio" | "http" | "invalid" {
@@ -130,7 +153,8 @@ export function identity(def: ServerDef): string {
 // ---- mutable state under ~/.pi/agent/mcp/ ----------------------------------
 
 export function readState<T>(file: string, fallback: T): T {
-  return (readJson(join(STATE_DIR, file)) as T) ?? fallback;
+  const res = readJson(join(STATE_DIR, file));
+  return ((res.ok ? res.value : undefined) as T) ?? fallback;
 }
 
 export function writeState(file: string, data: unknown): void {
