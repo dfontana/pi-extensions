@@ -42,6 +42,8 @@ export interface ServerDef {
 const HOME = homedir();
 // Honors the PI_CODING_AGENT_DIR override (same resolution as pi itself).
 export const STATE_DIR = join(getAgentDir(), "mcp");
+/** Global server config file inside the agent dir (~/.pi/agent/mcp.json). */
+export const GLOBAL_CONFIG_FILE = "mcp.json";
 let stateWriteSequence = 0;
 
 // ---- env / path interpolation ----------------------------------------------
@@ -105,7 +107,7 @@ function normalize(name: string, raw: Record<string, unknown>): ServerDef {
 /** Merge `~/.pi/agent/mcp.json` (global) then `./.mcp.json` (project overrides global). */
 export function loadServers(cwd: string): Map<string, ServerDef> {
   const merged = new Map<string, ServerDef>();
-  for (const path of [join(getAgentDir(), "mcp.json"), resolve(cwd, ".mcp.json")]) {
+  for (const path of [join(getAgentDir(), GLOBAL_CONFIG_FILE), resolve(cwd, ".mcp.json")]) {
     const servers = readJson(path)?.mcpServers;
     if (!servers || typeof servers !== "object") continue;
     for (const [name, raw] of Object.entries(servers as Record<string, Record<string, unknown>>)) {

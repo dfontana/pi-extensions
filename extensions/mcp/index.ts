@@ -31,7 +31,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AuthError, authInteractive, clearOAuthCredentials } from "./auth.ts";
-import { loadServers } from "./config.ts";
+import { GLOBAL_CONFIG_FILE, loadServers } from "./config.ts";
 import {
   consumeEnabledSnapshot,
   MCP_ENABLED_SNAPSHOT_ENV,
@@ -44,6 +44,9 @@ interface Runtime {
   manager: Manager;
   ui?: ExtensionUIContext;
 }
+
+/** Where to tell users to add servers; mirrors the paths loadServers() reads. */
+const configHint = `./.mcp.json or ~/.pi/agent/${GLOBAL_CONFIG_FILE}`;
 
 // ---- action definitions ---------------------------------------------------
 
@@ -277,7 +280,7 @@ function statusText(runtime: Runtime): string {
   const { manager } = runtime;
   const names = manager.list();
   if (!names.length) {
-    return "No MCP servers configured. Add them to ./.mcp.json or ~/.config/mcp/mcp.json.";
+    return `No MCP servers configured. Add them to ${configHint}.`;
   }
   const pad = Math.max(...names.map((n) => n.length));
   const rows = names.map((n) => {
@@ -450,7 +453,7 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
   const { manager } = runtime;
   const names = manager.list();
   if (!names.length) {
-    ctx.ui.notify("No MCP servers configured (./.mcp.json or ~/.config/mcp/mcp.json).", "warning");
+    ctx.ui.notify(`No MCP servers configured (${configHint}).`, "warning");
     return;
   }
 
