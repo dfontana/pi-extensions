@@ -77,8 +77,9 @@ interface ModelCandidate extends ModelMetadata {
 // Intelligence is intentionally an ID-only policy. Display names are not
 // stable enough to establish a model's capability tier.
 const TIER_RULES: readonly TierRule[] = [
+  { pattern: /(?:^|[^a-z])astra(?:[^a-z]|$)/i, rank: 5 },
   { pattern: /(?:^|[^a-z])(opus|sol)(?:[^a-z]|$)/i, rank: 4 },
-  { pattern: /(?:^|[^a-z])(sonnet|terra)(?:[^a-z]|$)/i, rank: 3 },
+  { pattern: /(?:^|[^a-z])(sonnet|terra|glm)(?:[^a-z]|$)/i, rank: 3 },
   { pattern: /(?:^|[^a-z])luna(?:[^a-z]|$)/i, rank: 2 },
   { pattern: /(?:^|[^a-z])(mini|haiku|nano)(?:[^a-z]|$)/i, rank: 1 },
 ];
@@ -193,7 +194,7 @@ function parseVersion(id: string): { version: number[]; releaseDate: number } {
 }
 
 function familyForBaseId(id: string): string {
-  // Keep capability-family words (opus, sonnet, sol, etc.) while removing
+  // Keep capability-family words (astra, opus, sonnet, terra, glm, sol, etc.) while removing
   // version/date tokens. This prevents comparing versions across families.
   return id
     .split(/[-_.:]+/)

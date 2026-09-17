@@ -4,7 +4,7 @@ import { MODEL_THINKING_LEVELS, resolveModelQuery, type ModelQueryOptions } from
 
 const IntelligenceSchema = StringEnum(["higher", "same", "lower"] as const, {
   description:
-    'Relative intelligence policy: "higher" prefers a tier above the active model, "same" stays at its tier, and "lower" prefers a tier below it.',
+    'Relative intelligence policy: "higher" prefers a tier above the active model, "same" stays at its tier, and "lower" prefers a tier below it.. Omit or set to "same" when context does not specify.',
 });
 
 const ThinkingSchema = StringEnum(MODEL_THINKING_LEVELS, {
@@ -16,15 +16,16 @@ export default function (pi: ExtensionAPI) {
     name: "model_query",
     label: "Model Query",
     description:
-      "Resolve one currently available authenticated model from Pi's registry. Use exact canonical provider/modelId " +
-      "references or controlled ID short names only; use the separate intelligence field for higher/same/lower policy. " +
-      "Selection applies deterministic thinking, context, vendor, route, intelligence, version, and context-window policy.",
+      "Resolve the full model identity from Pi's registry for providing other tool calls. Use this when the user provides " +
+      "a loose description of what model they want (such as 'luna max' or 'sol high' or 'a higher intelligence model') to " +
+      "transform it into a concerete provide/model identity pluggable to other tool calls. Only supply parameters relevant " +
+      "to the context; omitting optional parameters is required when they aren't actually asked for (like 'intelligence')",
     promptSnippet: "Resolve a usable model by policy without inventing unavailable provider/model references",
     parameters: Type.Object({
       model: Type.Optional(
         Type.String({
           minLength: 1,
-          description: "Canonical provider/modelId or a short name resolved with Pi's fuzzy model search.",
+          description: "Canonical provider/modelId or a short name ('luna') resolved with Pi's fuzzy model search.",
         }),
       ),
       intelligence: Type.Optional(IntelligenceSchema),

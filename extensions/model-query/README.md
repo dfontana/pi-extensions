@@ -27,7 +27,7 @@ must be available, support the requested thinking level, and meet the requested 
 `higher` requires a recognized active tier and prefers a higher tier, then an equal-tier peer, then the
 active model. `same` stays at the active tier and prefers a distinct base model before reusing the active
 base. `lower` requires a recognized active tier and prefers a lower tier, then an equal-tier peer, then the
-active model; it never selects a higher tier. Tiers are inferred from IDs only: Opus/Sol > Sonnet/Terra >
+active model; it never selects a higher tier. Tiers are inferred from IDs only: Astra > Opus/Sol > Sonnet/Terra/GLM >
 Luna > Mini/Haiku/Nano. Direct native or
 subscription routes always beat known aggregators regardless of tier; version/release date, context window, and canonical ID provide
 stable tie-breakers. `excludeCurrentVendor` infers vendors from model IDs (Claude/Anthropic, GPT/OpenAI,

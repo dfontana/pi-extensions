@@ -9,7 +9,7 @@ export default function (pi: ExtensionAPI) {
     label: "Select Review Model",
     description:
       "Deterministically select an available code-review model relative to the active session model. " +
-      "Intelligence tiers, inferred from model IDs, are Opus/Sol > Sonnet/Terra > Luna > Mini/Haiku/Nano; " +
+      "Intelligence tiers, inferred from model IDs, are Astra > Opus/Sol > Sonnet/Terra/GLM > Luna > Mini/Haiku/Nano; " +
       "direct providers beat aggregators such as OpenRouter, and distinct peers beat the current model.",
     promptSnippet: "Select and validate the model and thinking level for an adversarial code review",
     parameters: Type.Object({

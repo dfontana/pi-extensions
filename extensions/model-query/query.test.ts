@@ -36,8 +36,11 @@ describe("model-query query", () => {
   const sol = model("openai-codex", "gpt-5.6-sol");
   const solRoute = model("openrouter", "openai/gpt-5.6-sol");
   const terra = model("anthropic", "claude-sonnet-4-6");
+  const glm = model("zai", "GLM-5.3-Flash");
   const luna = model("openrouter", "google/gemini-3-luna");
+  const directLuna = model("openai-codex", "gpt-5.6-luna");
   const opus = model("anthropic", "claude-opus-4-8");
+  const astra = model("openai-codex", "gpt-5.7-astra");
 
   test("uses exact canonical and raw IDs without inventing models", () => {
     assert.deepEqual(resolveModelQuery({ available: [sol], model: "OPENAI-CODEX/GPT-5.6-SOL" }), {
@@ -65,6 +68,20 @@ describe("model-query query", () => {
       resolveModelQuery({ current: luna, available: [aggregatorOpus, directSonnet], intelligence: "higher" }).model,
       canonicalModel(directSonnet),
     );
+  });
+
+  test("treats astra as a tier above sol", () => {
+    assert.equal(modelTier(astra), 5);
+    assert.equal(modelTier(sol), 4);
+    assert.equal(resolveModelQuery({ current: sol, available: [sol, astra], intelligence: "higher" }).model, canonicalModel(astra));
+    assert.equal(resolveModelQuery({ current: astra, available: [astra, sol], intelligence: "lower" }).model, canonicalModel(sol));
+  });
+
+  test("ranks GLM-5.3-Flash with terra", () => {
+    assert.equal(modelTier(glm), 3);
+    assert.equal(modelTier(glm), modelTier(terra));
+    assert.equal(resolveModelQuery({ current: luna, available: [luna, glm], intelligence: "higher" }).model, canonicalModel(glm));
+    assert.equal(resolveModelQuery({ current: glm, available: [glm, directLuna], intelligence: "lower" }).model, canonicalModel(directLuna));
   });
 
   test("applies relative tier, peer diversity, thinking, and context policy", () => {
