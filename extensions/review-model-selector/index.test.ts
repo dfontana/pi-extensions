@@ -56,6 +56,31 @@ describe("review-model-selector index", () => {
     assert.equal(result.details.thinking, "high");
   });
 
+  test("caps reviewer selection at the sol tier without parameterization", async () => {
+    let tool: RegisteredTool | undefined;
+    extension({ registerTool: (registered: RegisteredTool) => (tool = registered) } as unknown as ExtensionAPI);
+    assert.ok(tool);
+
+    const astra = model("openai", "gpt-5.6-astra");
+    const sol = model("anthropic", "claude-opus-4-8");
+    const result = await tool.execute(
+      "call",
+      { intelligence: "higher", thinking: "high" },
+      new AbortController().signal,
+      undefined,
+      {
+        model: model("openai", "gpt-5.6-terra"),
+        modelRegistry: {
+          refresh: async () => ({ aborted: false, errors: new Map() }),
+          getAvailable: () => [astra, sol],
+        },
+      },
+    );
+
+    assert.equal(result.details.model, "anthropic/claude-opus-4-8");
+    assert.equal(result.details.thinking, "high");
+  });
+
   test("stops before selecting a reviewer when refresh is aborted", async () => {
     let tool: RegisteredTool | undefined;
     extension({ registerTool: (registered: RegisteredTool) => (tool = registered) } as unknown as ExtensionAPI);

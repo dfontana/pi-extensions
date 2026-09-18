@@ -10,7 +10,9 @@ export default function (pi: ExtensionAPI) {
     description:
       "Deterministically select an available code-review model relative to the active session model. " +
       "Intelligence tiers, inferred from model IDs, are Astra > Opus/Sol > Sonnet/Terra/GLM > Luna > Mini/Haiku/Nano; " +
-      "direct providers beat aggregators such as OpenRouter, and distinct peers beat the current model.",
+      "direct providers beat aggregators such as OpenRouter, and distinct peers beat the current model. " +
+      "Selection is hard-capped at the Opus/Sol tier: higher tiers are never selected, and an above-cap " +
+      "session model is clamped down to the best capped tier.",
     promptSnippet: "Select and validate the model and thinking level for an adversarial code review",
     parameters: Type.Object({
       intelligence: Type.Optional(

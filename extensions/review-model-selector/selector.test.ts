@@ -28,6 +28,7 @@ describe("review-model-selector selector", () => {
     } as Model<Api>;
   }
 
+  const astra = model("acme-gateway-openai", "openai/gpt-5.6-astra");
   const sol = model("acme-gateway-openai", "openai/gpt-5.6-sol");
   const terra = model("acme-gateway-openai", "openai/gpt-5.6-terra");
   const luna = model("acme-gateway-openai", "openai/gpt-5.6-luna");
@@ -91,6 +92,30 @@ describe("review-model-selector selector", () => {
 
     const reused = select(sol, [sol]);
     assert.match(reused.reason, /reused the current session model/);
+  });
+
+  test("caps reviewer selection at the sol tier", () => {
+    // Astra would win the uncapped ranking; the cap forces the sol tier.
+    assert.equal(canonicalModel(select(sonnet, [sonnet, terra, sol, astra]).selected), canonicalModel(sol));
+
+    // A sol-tier session never escalates above the cap.
+    assert.equal(canonicalModel(select(sol, [sol, astra]).selected), canonicalModel(sol));
+
+    // An astra session is clamped to the best capped tier for either preference.
+    assert.equal(canonicalModel(select(astra, [astra, sol, terra, luna]).selected), canonicalModel(sol));
+    assert.equal(
+      canonicalModel(select(astra, [astra, sol, terra, luna], { intelligencePreference: "same" }).selected),
+      canonicalModel(sol),
+    );
+  });
+
+  test("falls back to the best available capped tier", () => {
+    assert.equal(canonicalModel(select(sonnet, [sonnet, terra, astra]).selected), canonicalModel(terra));
+    assert.equal(canonicalModel(select(astra, [astra, terra, luna]).selected), canonicalModel(terra));
+  });
+
+  test("reports the tier clamp in the selection reason", () => {
+    assert.match(select(astra, [astra, sol, terra]).reason, /Clamped to the sol review tier/);
   });
 
   test("rejects missing or unrecognized session models", () => {
