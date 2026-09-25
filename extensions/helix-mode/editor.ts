@@ -13,6 +13,7 @@
  *   Selection   s (select regex in selection)
  *   Search      * (selection → pattern), n/N (next/prev), / (→ Insert + "/")
  *   Select mode All Normal movements extend the selection
+ *   Tool rows   , / . (select previous/next), Enter (toggle), Escape (clear); fullscreen only
  */
 
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
@@ -53,6 +54,7 @@ import {
 } from "./label-overlay.js";
 import type { LabelMap } from "./label-overlay.js";
 import { copyToClipboard } from "@earendil-works/pi-coding-agent";
+import { attachToolFocus, clearToolSelection, moveToolSelection, toggleSelectedTool } from "../shared/tool-focus.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -116,6 +118,7 @@ export class HelixEditor extends CustomEditor {
   constructor(tui: TUI, theme: EditorTheme, getTheme: () => Theme, keybindings: KeybindingsManager) {
     super(tui, theme, keybindings);
     this.getTheme = getTheme;
+    attachToolFocus(tui);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -309,8 +312,12 @@ export class HelixEditor extends CustomEditor {
         this.tui.requestRender();
         return;
       }
-      // Normal mode: forward to super so the app can handle Escape
-      // (e.g. abort agent run).
+      // Normal mode: a selected tool row takes Escape first; otherwise
+      // forward to super so the app can handle it (e.g. abort agent run).
+      if (clearToolSelection(this.tui)) {
+        this.tui.requestRender();
+        return;
+      }
       super.handleInput(data);
       return;
     }
@@ -319,6 +326,16 @@ export class HelixEditor extends CustomEditor {
     if (this.pendingPrefix === "g") {
       this.pendingPrefix = null;
       this.handleGPrefix(data);
+      this.tui.requestRender();
+      return;
+    }
+
+    // ── Tool rows (fullscreen only): , / . select, Enter toggles ──────────
+    if ((data === "," || data === ".") && moveToolSelection(this.tui, data === "," ? -1 : 1)) {
+      this.tui.requestRender();
+      return;
+    }
+    if (matchesKey(data, "enter") && toggleSelectedTool(this.tui)) {
       this.tui.requestRender();
       return;
     }

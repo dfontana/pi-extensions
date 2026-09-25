@@ -9,6 +9,9 @@
  * - Parameters always render in the title, including on failure, so the
  *   inputs stay visible without expanding.
  *
+ * - The row can be selected and toggled on its own from the keyboard (see
+ *   tool-focus.ts); a selected row's title starts with a marker.
+ *
  * pi never passes the result to renderCall, but it renders the call slot and
  * then the result slot in the same pass, and a Box re-renders its children on
  * every frame. The title is therefore built lazily at render() time from the
@@ -18,6 +21,7 @@
 
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { isToolRowSelected, toolRowExpanded, toolRowRendered, trackToolRow } from "./tool-focus.ts";
 import { formatTokens } from "./usage-helpers.ts";
 
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -37,6 +41,8 @@ export interface RowTheme {
 /** The subset of pi's ToolRenderContext the row reads. */
 export interface RowContext<Args> {
   args: Args;
+  /** Stable per tool call; rows without one cannot be selected. */
+  toolCallId?: string;
   state: any;
   lastComponent: Component | undefined;
   invalidate: () => void;
@@ -101,11 +107,18 @@ const EMPTY: Component = { render: () => [], invalidate: () => {} };
 class CompactTitle implements Component {
   private build: () => { line: string; animate: boolean } = () => ({ line: "", animate: false });
   private expanded = false;
+  private id: string | undefined;
   private invalidateRow: () => void = () => {};
   private tick: ReturnType<typeof setTimeout> | undefined;
 
-  update(expanded: boolean, invalidateRow: () => void, build: () => { line: string; animate: boolean }): void {
+  update(
+    expanded: boolean,
+    id: string | undefined,
+    invalidateRow: () => void,
+    build: () => { line: string; animate: boolean },
+  ): void {
     this.expanded = expanded;
+    this.id = id;
     this.invalidateRow = invalidateRow;
     this.build = build;
   }
@@ -122,9 +135,14 @@ class CompactTitle implements Component {
       this.tick.unref?.();
     }
     const safeWidth = Math.max(1, width);
-    if (this.expanded) return wrapTextWithAnsi(line, safeWidth);
-    // Segments may carry raw newlines (e.g. a multi-line query); a collapsed row stays one line.
-    return [truncateToWidth(line.replace(/[\r\n\t]+/g, " "), safeWidth, "...")];
+    const lines = this.expanded
+      ? wrapTextWithAnsi(line, safeWidth)
+      : // Segments may carry raw newlines (e.g. a multi-line query); a collapsed row stays one line.
+        [truncateToWidth(line.replace(/[\r\n\t]+/g, " "), safeWidth, "...")];
+    // Added after wrapping/truncation so the invisible probe marker never affects layout.
+    const probe = toolRowRendered(this.id, safeWidth);
+    if (probe && lines.length > 0) lines[0] = probe + lines[0];
+    return lines;
   }
 
   invalidate(): void {}
@@ -171,12 +189,13 @@ export function compactRow<Args, Details = unknown>(spec: CompactRowSpec<Args, D
     renderCall(args, theme, context) {
       const row = rowState<Details>(context.state);
       const title = context.lastComponent instanceof CompactTitle ? context.lastComponent : new CompactTitle();
-      const { isPartial, isError } = context;
+      const { isPartial, isError, toolCallId: id } = context;
+      if (id !== undefined) trackToolRow(id, context.invalidate);
       // Args may still be streaming (partial or `{}`) when the row first draws.
       const current = (args ?? {}) as Args;
-      title.update(context.expanded, context.invalidate, () => {
+      title.update(toolRowExpanded(id, context.expanded), id, context.invalidate, () => {
         const status = resolveStatus({ isPartial, isError }, row.details);
-        const name = theme.fg("toolTitle", theme.bold(spec.name));
+        const name = (isToolRowSelected(id) ? `${theme.fg("accent", "▶")} ` : "") + theme.fg("toolTitle", theme.bold(spec.name));
         // The title is built inside render(), outside pi's renderer guard, so a
         // throwing formatter must degrade to the bare name rather than crash the TUI.
         let segments: string[];
@@ -196,7 +215,8 @@ export function compactRow<Args, Details = unknown>(spec: CompactRowSpec<Args, D
       const row = rowState<Details>(context.state);
       const parsed = parse(result);
       if (parsed !== undefined) row.details = parsed;
-      if (!expanded) return EMPTY;
+      if (context.toolCallId !== undefined) trackToolRow(context.toolCallId, context.invalidate);
+      if (!toolRowExpanded(context.toolCallId, expanded)) return EMPTY;
 
       const status = resolveStatus({ isPartial, isError: context.isError }, row.details);
       const custom = spec.body?.({

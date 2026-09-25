@@ -37,7 +37,7 @@ None.
 | `i`, `a` | Insert before / after cursor |
 | `o`, `O` | Open line below / above, enter Insert |
 | `v` | Enter Select mode (anchor = cursor) |
-| `Escape` | In Normal: abort agent (pi default). In Select: back to Normal. |
+| `Escape` | In Normal: clear a selected tool row (fullscreen), otherwise abort agent (pi default). In Select: back to Normal. |
 | `d` | Delete selection (or char under cursor) |
 | `c` | Change: delete selection, enter Insert |
 | `y` | Yank non-empty selection to the system clipboard |
@@ -55,6 +55,18 @@ None.
 | `/` | Passes through to pi's default search, entering Insert |
 
 Matches are highlighted as Select-mode selections. In Select mode all movement keys extend the selection; `d`, `c`, `y`, `>`, `<`, and `s` operate on the full selection.
+
+### Tool rows (fullscreen only)
+
+In fullscreen mode (`tuiMode: "fullscreen"`), Normal and Select mode can target this repository's compact tool rows (`extensions/shared/tool-row.ts`) individually; other tools are skipped.
+
+| Key | Action |
+|---|---|
+| `,` / `.` | Select previous / next tool row (starts at the most recent; marked `▶`) and scroll it to the top of the transcript |
+| `Enter` | Expand or collapse the selected row only (submits as usual when nothing is selected) |
+| `Escape` | Clear the selection (then behaves as usual) |
+
+A toggled row keeps its state after the selection clears, until Ctrl+O resets all rows. In regular mode these keys behave as if unbound and no marker is shown, because the terminal cannot be scrolled to a row and pi's redraw of an off-screen change jumps to the bottom; switching back to fullscreen restores the selection.
 
 ## Limitations and Technical details
 

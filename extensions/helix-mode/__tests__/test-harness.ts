@@ -37,11 +37,13 @@ export interface CreateEditorOptions {
   cols?: number;
   focused?: boolean;
   paddingX?: number;
+  /** Extra keybinding definitions, e.g. pi's app-level `app.interrupt`. */
+  keybindings?: Record<string, { defaultKeys: string | string[]; description?: string }>;
 }
 
 export function createEditor(options: CreateEditorOptions = {}): TestEditorContext {
   const tui = createMockTui(options);
-  const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
+  const keybindings = new KeybindingsManager({ ...TUI_KEYBINDINGS, ...options.keybindings } as typeof TUI_KEYBINDINGS);
   setKeybindings(keybindings);
 
   const editor = new HelixEditor(

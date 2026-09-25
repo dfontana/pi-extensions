@@ -39,7 +39,7 @@ Each extension has its own README covering configuration, provided tools/command
 
 ### Tool rows
 
-Every tool in this package (`subagent`, `model_query`, `select_review_model`, `web_search`, `web_fetch`, `mcp`, the `pane_*` tools, and YAML-defined scoped tools) shares one compact row renderer (`extensions/shared/tool-row.ts`). Collapsed, each call is one title line: `name <state> <params…> → <result summary>`, truncated with `...` instead of wrapping. The state icon is a spinner while running, `·` while queued, and `✓`/`✗` once settled. Parameters stay in the title on failure. Expanding (Ctrl+O) wraps the full title and shows the result, or the error details.
+Every tool in this package (`subagent`, `model_query`, `select_review_model`, `web_search`, `web_fetch`, `mcp`, the `pane_*` tools, and YAML-defined scoped tools) shares one compact row renderer (`extensions/shared/tool-row.ts`). Collapsed, each call is one title line: `name <state> <params…> → <result summary>`, truncated with `...` instead of wrapping. The state icon is a spinner while running, `·` while queued, and `✓`/`✗` once settled. Parameters stay in the title on failure. Expanding (Ctrl+O) wraps the full title and shows the result, or the error details. In fullscreen mode (`tuiMode: "fullscreen"`) with [helix-mode](extensions/helix-mode/README.md) in Normal mode, `,`/`.` select the previous/next of these rows (marked `▶`) and scroll it to the top of the transcript, `Enter` expands or collapses just that row, and `Escape` clears the selection. A row toggled this way keeps its state until the next Ctrl+O, which resets every row. The keys are inactive in regular mode, which cannot scroll the terminal; switching back to fullscreen restores the selection.
 
 ## Skills
 
