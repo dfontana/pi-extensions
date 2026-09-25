@@ -1,6 +1,16 @@
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { MODEL_THINKING_LEVELS, resolveModelQuery, type ModelQueryOptions } from "./query.ts";
+import { compactRow } from "../shared/tool-row.ts";
+import { MODEL_THINKING_LEVELS, resolveModelQuery, type ModelQueryOptions, type ModelQueryResult } from "./query.ts";
+import { modelParamSegments, resolvedModelSegment } from "./render.ts";
+
+const renderers = compactRow<ModelQueryOptions, ModelQueryResult>({
+  name: "model_query",
+  title: ({ args, details, status, theme }) => [
+    ...modelParamSegments(args, theme),
+    status === "success" && resolvedModelSegment(theme, details),
+  ],
+});
 
 const IntelligenceSchema = StringEnum(["higher", "same", "lower"] as const, {
   description:
@@ -39,6 +49,7 @@ export default function (pi: ExtensionAPI) {
         Type.Integer({ minimum: 1, description: "Minimum context-window size for eligible models." }),
       ),
     }),
+    ...renderers,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       // getAvailable() is a synchronous snapshot. Refresh exactly once per
       // invocation so the pure resolver never performs registry I/O itself.

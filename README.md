@@ -37,6 +37,10 @@ Each extension has its own README covering configuration, provided tools/command
 | [subagent](extensions/subagent/README.md) | Lean synchronous one-call delegation to global agents, with sibling-call parallelism |
 | [web-access](extensions/web-access/README.md) | `web_search` and `web_fetch` tools backed by configurable model providers |
 
+### Tool rows
+
+Every tool in this package (`subagent`, `model_query`, `select_review_model`, `web_search`, `web_fetch`, `mcp`, the `pane_*` tools, and YAML-defined scoped tools) shares one compact row renderer (`extensions/shared/tool-row.ts`). Collapsed, each call is one title line: `name <state> <params…> → <result summary>`, truncated with `...` instead of wrapping. The state icon is a spinner while running, `·` while queued, and `✓`/`✗` once settled. Parameters stay in the title on failure. Expanding (Ctrl+O) wraps the full title and shows the result, or the error details.
+
 ## Skills
 
 - **quick-review** — lightweight review/fix workflow for small, routine, low-risk, or clearly scoped changes: one reviewer covers completeness, correctness, duplication, and simplicity in each bounded round. This is the default for ordinary review requests.

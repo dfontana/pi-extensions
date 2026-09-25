@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { validateToolArguments } from "@earendil-works/pi-ai";
+import { renderRow, textResult, type RowFlags } from "../shared/render-harness.ts";
 
 const testAgentDir = mkdtempSync(join(tmpdir(), "mcp-agent-"));
 process.env.PI_CODING_AGENT_DIR = testAgentDir;
@@ -416,83 +417,57 @@ describe("mcp index", () => {
 
   // ---- render contract tests -----------------------------------------------
   describe("mcp render", () => {
-    function makeRenderCtx(args: Record<string, unknown>): any {
-      return {
-        args,
-        toolCallId: "test-id",
-        invalidate: () => {},
-        lastComponent: undefined,
-        // done=false, spinnerTimer pre-set to a truthy sentinel so the
-        // production code skips creating a real setInterval (and avoids the
-        // keyHint call that requires the interactive theme to be initialized).
-        // clearInterval(1) is a safe no-op for an unknown timer id.
-        state: { done: false, isError: false, frameIdx: 0, spinnerTimer: 1 as any },
-        cwd: "/tmp",
-        executionStarted: true,
-        argsComplete: true,
-        isPartial: false,
-        expanded: true,
-        showImages: false,
-        isError: false,
-      };
+    function render(args: Record<string, unknown>, result: { text: string; details?: unknown } | undefined, flags: RowFlags = {}) {
+      return renderRow(bind().tool, args, result && textResult(result.text, result.details), flags);
     }
 
-    function makeResult(text: string): any {
-      return { content: [{ type: "text", text }], details: undefined };
-    }
-
-    const renderCallCases: Array<[string, Record<string, unknown>, string[]]> = [
-      ["status", { action: "status" }, ["mcp", "status"]],
-      ["list-tools", { action: "list-tools", server: "myserver" }, ["mcp", "list", "myserver"]],
-      ["search-tools", { action: "search-tools", search: "monitor" }, ["mcp", "search", '"monitor"']],
-      ["describe-tool", { action: "describe-tool", tool: "svc_get_x" }, ["mcp", "describe", "svc_get_x"]],
-      ["invoke-tool with args", { action: "invoke-tool", tool: "svc_get_x", args: '{"n":1}' }, ["mcp", "call svc_get_x", '{"n":1}']],
-      ["invoke-tool without args", { action: "invoke-tool", tool: "svc_get_x" }, ["mcp", "call svc_get_x"]],
+    const cases: Array<[string, Record<string, unknown>, { text: string; details?: unknown }, string]> = [
+      ["status", { action: "status" }, { text: "a\nb" }, "mcp ✓ status → 2 lines"],
+      ["list-tools", { action: "list-tools", server: "myserver" }, { text: "tool_a" }, "mcp ✓ list myserver → 1 line"],
+      ["search-tools", { action: "search-tools", search: "monitor", regex: true }, { text: "" }, 'mcp ✓ search "monitor" regex → 0 lines'],
+      ["describe-tool", { action: "describe-tool", tool: "svc_get_x" }, { text: "schema" }, "mcp ✓ describe svc_get_x → 1 line"],
+      [
+        "invoke-tool with args",
+        { action: "invoke-tool", tool: "svc_get_x", args: '{\n  "n": 1\n}' },
+        { text: "done", details: { server: "svc", tool: "get_x" } },
+        'mcp ✓ call svc_get_x { "n": 1 } → svc · 1 line',
+      ],
+      ["invoke-tool without args", { action: "invoke-tool", tool: "svc_get_x", args: "{}" }, { text: "done" }, "mcp ✓ call svc_get_x → 1 line"],
     ];
 
-    for (const [label, args, wantInOutput] of renderCallCases) {
-      it(`renderCall summary: ${label}`, () => {
-        const binding = bind();
-        assert.ok(binding.tool.renderCall, "renderCall must be registered on the mcp tool");
-        const output = binding.tool.renderCall!(args, testTheme, makeRenderCtx(args)).render(160).join(" ");
-        for (const want of wantInOutput) assert.ok(output.includes(want), `"${label}" must include "${want}"`);
+    for (const [label, args, result, title] of cases) {
+      it(`collapsed rows are one title line: ${label}`, () => {
+        assert.deepEqual(render(args, result), { title, body: [] });
       });
     }
 
-    const renderResultCases: Array<[string, Record<string, unknown>, string, string | undefined, string | undefined]> = [
-      ["status — result text rendered, no context line", { action: "status" }, "servers ok", "servers ok", "server:"],
-      ["list-tools — shows server", { action: "list-tools", server: "myserver" }, "tool_a — does a", "server: myserver", undefined],
-      ["search-tools — shows query", { action: "search-tools", search: "monitor" }, '1 match for "monitor"', "query: monitor", undefined],
-      ["describe-tool — shows tool", { action: "describe-tool", tool: "svc_get_x" }, "input schema: {}", "tool: svc_get_x", undefined],
-      ["invoke-tool with args — shows args", { action: "invoke-tool", tool: "svc_get_x", args: '{"n":1}' }, "done", 'args: {"n":1}', undefined],
-      ["invoke-tool without args — no args line", { action: "invoke-tool", tool: "svc_get_x" }, "done", undefined, "args:"],
-    ];
+    it("keeps params on failure and reveals the error only when expanded", () => {
+      const args = { action: "invoke-tool", tool: "svc_get_x", args: '{"n":1}' };
+      const failure = { text: 'Tool "svc_get_x" not found.' };
+      assert.deepEqual(render(args, failure, { isError: true }), { title: 'mcp ✗ call svc_get_x {"n":1}', body: [] });
+      assert.deepEqual(render(args, failure, { isError: true, expanded: true }).body, ['Tool "svc_get_x" not found.']);
+    });
 
-    for (const [label, args, resultText, wantLine, noLine] of renderResultCases) {
-      it(`renderResult expanded: ${label}`, () => {
-        const binding = bind();
-        assert.ok(binding.tool.renderResult, "renderResult must be registered on the mcp tool");
-        const output = binding.tool.renderResult!(
-          makeResult(resultText),
-          { expanded: true, isPartial: false },
-          testTheme,
-          makeRenderCtx(args),
-        ).render(200).join("\n");
-        if (wantLine) assert.ok(output.includes(wantLine), `"${label}" must include "${wantLine}"`);
-        if (noLine) assert.ok(!output.includes(noLine), `"${label}" must not include "${noLine}"`);
-      });
-    }
+    it("reveals only the result text when expanded, since the title already carries params", () => {
+      const { title, body } = render({ action: "list-tools", server: "myserver" }, { text: "tool_a\ntool_b" }, { expanded: true });
+      assert.equal(title, "mcp ✓ list myserver → 2 lines");
+      assert.deepEqual(body, ["tool_a", "tool_b"]);
+    });
 
-    it("renderResult collapsed returns empty component", () => {
-      const binding = bind();
-      assert.ok(binding.tool.renderResult, "renderResult must be registered on the mcp tool");
-      const comp = binding.tool.renderResult!(
-        makeResult("some result"),
-        { expanded: false, isPartial: false },
-        testTheme,
-        makeRenderCtx({ action: "status" }),
-      );
-      assert.deepEqual(comp.render(120), [], "collapsed renderResult must render no lines");
+    it("renders rows whose arguments are still streaming", () => {
+      for (const [args, want] of [
+        [{}, /^mcp [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] …$/],
+        [{ action: "list-tools" }, /^mcp [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] list$/],
+        [{ action: "invoke-tool" }, /^mcp [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] call$/],
+      ] as const) {
+        assert.match(render(args, undefined, { isPartial: true }).title, want);
+      }
+    });
+
+    it("shows a running spinner with no body until the call settles", () => {
+      const { title, body } = render({ action: "status" }, undefined, { isPartial: true });
+      assert.match(title, /^mcp [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] status$/);
+      assert.deepEqual(body, []);
     });
   });
 

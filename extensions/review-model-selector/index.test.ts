@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { renderRow, textResult } from "../shared/render-harness.ts";
 import extension from "./index.ts";
 
 interface RegisteredTool {
@@ -103,5 +104,16 @@ describe("review-model-selector index", () => {
         },
       ),
     );
+  });
+
+
+  test("renders params and the selected reviewer on one line", () => {
+    let tool: any;
+    extension({ registerTool: (registered: unknown) => (tool = registered) } as unknown as ExtensionAPI);
+    const selection = { model: "openai-codex/gpt-5.6-sol", thinking: "high", reason: "peer" };
+    assert.deepEqual(renderRow(tool, { intelligence: "same", minimumContextWindow: 400_000 }, textResult("{}", selection)), {
+      title: "select_review_model ✓ =tier ⧉≥400k → openai-codex/gpt-5.6-sol high",
+      body: [],
+    });
   });
 });

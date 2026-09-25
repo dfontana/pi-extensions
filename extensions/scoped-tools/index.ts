@@ -15,6 +15,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { TSchema } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { compactRow, countLabel, oneLine, param, primary, summary } from "../shared/tool-row.ts";
 import { loadScopedTools, type ToolSpec } from "./config.ts";
 
 const DEFAULT_TIMEOUT_SECONDS = 120;
@@ -37,11 +38,25 @@ function registerScopedTool(pi: ExtensionAPI, spec: ToolSpec) {
         : Type.String({ description: param.description });
   }
 
+  // `<name> <state> key=value … → N lines`, params in declaration order (hidden
+  // parameters never appear); expanding shows the command output or error.
+  const row = compactRow<Record<string, unknown>, { lines?: number }>({
+    name: spec.name,
+    title: ({ args, details, status, theme }) => [
+      ...Object.keys(spec.parameters).map((name) => {
+        const value = args[name];
+        return value !== undefined && value !== null && `${param(theme, `${name}=`)}${primary(theme, oneLine(String(value)))}`;
+      }),
+      status === "success" && details?.lines !== undefined && summary(theme, countLabel(details.lines, "line")),
+    ],
+  });
+
   pi.registerTool({
     name: spec.name,
     label: spec.name,
     description: spec.description,
     parameters: Type.Object(properties),
+    ...row,
     async execute(_id, params, signal, _onUpdate, ctx) {
       const run = (args: string[]) =>
         pi.exec("bash", args, {
@@ -82,7 +97,10 @@ function registerScopedTool(pi: ExtensionAPI, spec: ToolSpec) {
       }
       let text = result.stdout.trimEnd();
       if (result.stderr.trim()) text += `${text ? "\n" : ""}[stderr]\n${result.stderr.trimEnd()}`;
-      return { content: [{ type: "text" as const, text: text || "(no output)" }], details: undefined };
+      return {
+        content: [{ type: "text" as const, text: text || "(no output)" }],
+        details: { lines: text ? text.split("\n").length : 0 },
+      };
     },
   });
 }

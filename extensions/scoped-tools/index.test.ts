@@ -6,9 +6,10 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { CONFIG_DIR_NAME, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { stringify } from "yaml";
+import { renderRow, textResult, type RenderableTool, type RowResult } from "../shared/render-harness.ts";
 import scopedTools, { substitute } from "./index.ts";
 
-interface RegisteredTool {
+interface RegisteredTool extends RenderableTool {
   name: string;
   description: string;
   parameters: { properties: Record<string, unknown> };
@@ -142,6 +143,32 @@ describe("scoped-tools", () => {
       env_echo: { description: "Env", commandTemplate: 'echo "$SCOPED_TOOLS_TEST_ENV"' },
     });
     assert.equal(await text(call("env_echo", {})), "from-env");
+  });
+
+  it("renders one title line of declared params and an output summary, hiding hidden params", async () => {
+    const { tools, call } = await start({
+      lookup: {
+        description: "Lookup",
+        parameters: {
+          env: { type: "string", description: "env" },
+          limit: { type: "number", description: "limit" },
+        },
+        hiddenParameters: { secret: { valueFromCmd: "echo s3cr3t" } },
+        commandTemplate: 'if [ "$ENV" = bad ]; then echo nope >&2; exit 2; fi; printf "a\\nb\\n"; : $SECRET',
+      },
+    });
+    const tool = tools.get("lookup")!;
+    const args = { env: "prod\nus", limit: 5 };
+    const result = await call("lookup", args);
+    assert.deepEqual(renderRow(tool, args, result as RowResult), { title: "lookup ✓ env=prod us limit=5 → 2 lines", body: [] });
+    assert.deepEqual(renderRow(tool, args, result as RowResult, { expanded: true }).body, ["a", "b"]);
+
+    const badArgs = { env: "bad", limit: 1 };
+    const error = await call("lookup", badArgs).then(() => assert.fail("expected failure"), (e: Error) => e.message);
+    const failure = textResult(error);
+    assert.deepEqual(renderRow(tool, badArgs, failure, { isError: true }), { title: "lookup ✗ env=bad limit=1", body: [] });
+    assert.deepEqual(renderRow(tool, badArgs, failure, { isError: true, expanded: true }).body, ["Command failed (exit 2): nope"]);
+    assert.doesNotMatch(JSON.stringify(renderRow(tool, args, result as RowResult, { expanded: true })), /s3cr3t|secret/);
   });
 
   it("warns about invalid definitions instead of registering them", async () => {

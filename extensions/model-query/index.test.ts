@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { renderRow, textResult } from "../shared/render-harness.ts";
 import extension from "./index.ts";
 
 interface RegisteredTool {
@@ -129,5 +130,21 @@ describe("model-query index", () => {
     assert.equal("current" in tool.parameters.properties, false);
     assert.equal("available" in tool.parameters.properties, false);
     assert.equal("vendor" in tool.parameters.properties, false);
+  });
+
+
+  test("renders params and the resolved model on one line, keeping params on failure", () => {
+    let tool: any;
+    extension({ registerTool: (registered: unknown) => (tool = registered) } as unknown as ExtensionAPI);
+    const args = { model: "luna", thinking: "max", intelligence: "higher", excludeCurrentVendor: true, minimumContextWindow: 200_000 };
+    const params = "luna max ▲tier ¬vendor ⧉≥200k";
+    const resolved = { model: "anthropic/claude-luna-5", thinking: "max" };
+    assert.deepEqual(renderRow(tool, args, textResult(JSON.stringify(resolved), resolved)), {
+      title: `model_query ✓ ${params} → anthropic/claude-luna-5 max`,
+      body: [],
+    });
+    const error = 'Model "luna" is not available in the authenticated model registry.';
+    assert.deepEqual(renderRow(tool, args, textResult(error, {}), { isError: true }), { title: `model_query ✗ ${params}`, body: [] });
+    assert.deepEqual(renderRow(tool, args, textResult(error, {}), { isError: true, expanded: true }).body, [error]);
   });
 });

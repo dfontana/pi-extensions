@@ -1,4 +1,4 @@
-import type { Message, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type {
   AgentToolResult,
@@ -30,17 +30,11 @@ import { collectSubagentEnvironment } from "./environment.ts";
 import { SubagentScheduler } from "./scheduler.ts";
 import { emptyTrackedUsage, formatUsage } from "./usage.ts";
 import { MODEL_THINKING_LEVELS, resolveModelReference, thinkingFromModelReference } from "../model-query/query.ts";
+import { compactRow, param, primary, resultText } from "../shared/tool-row.ts";
 
 export { MAX_ACTIVE_CHILDREN, MAX_OUTSTANDING_CALLS } from "./scheduler.ts";
 
-const COLLAPSED_TASK_LENGTH = 120;
 const PER_CALL_OUTPUT_CAP = 50 * 1024;
-
-interface SubagentRowState {
-  result?: AgentResult;
-  headingKey?: string;
-  headingRefreshPending?: boolean;
-}
 
 interface SubagentParams {
   agent: string;
@@ -120,11 +114,6 @@ function truncateOutput(output: string): string {
   return `${value}\n\n[Output truncated: ${bytes - Buffer.byteLength(value, "utf8")} bytes omitted. Retained tool details are separately bounded.]`;
 }
 
-function latestOutputPreview(output: string, color: (name: any, text: string) => string): string {
-  const preview = output.split("\n").slice(0, 3).join("\n");
-  return color("toolOutput", preview.length > 1_000 ? `${preview.slice(0, 1_000)}…` : preview);
-}
-
 function notifyDiagnostics(
   ctx: ExtensionContext,
   diagnostics: readonly AgentDiagnostic[],
@@ -154,26 +143,6 @@ function modelThinkingSummary(model: string | undefined, thinking: ModelThinking
 function isComplete(item: AgentResult): boolean {
   if (item.status === undefined) return item.exitCode !== -1;
   return item.status === "done" || item.status === "aborted" || item.status === "failed" || item.status === "spawn-error";
-}
-
-function isWorking(item: AgentResult, isPartial: boolean): boolean {
-  return item.status === "queued" || item.status === "running" || (isPartial && !isComplete(item));
-}
-
-function agentIcon(
-  item: AgentResult,
-  color: (name: any, text: string) => string,
-  forceError = false,
-): string {
-  if (forceError) return color("error", "✗");
-  if (item.status === "queued") return color("muted", "·");
-  if (item.status === "running" || !isComplete(item)) return color("warning", "●");
-  return resultFailed(item) ? color("error", "✗") : color("success", "✓");
-}
-
-function truncatedTask(task: string): string {
-  const compact = task.replace(/\s+/g, " ").trim();
-  return compact.length > COLLAPSED_TASK_LENGTH ? `${compact.slice(0, COLLAPSED_TASK_LENGTH - 1)}…` : compact;
 }
 
 function expandedContextLines(
@@ -209,20 +178,6 @@ function diagnosticsLines(item: AgentResult, theme: RenderTheme): string {
   if (proc.stdoutBytesIgnored) lines.push(`${fg("muted", "Stdout truncated: ")}${fg("dim", `${proc.stdoutBytesIgnored} bytes`)}`);
   if (proc.stdoutTail) lines.push(`${fg("muted", "Stdout tail:")}\n${fg("dim", proc.stdoutTail)}`);
   return lines.join("\n");
-}
-
-function latestOutput(messages: readonly Message[]): string {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index];
-    if (message.role !== "assistant") continue;
-    const output = message.content
-      .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
-      .map((part) => part.text)
-      .join("\n")
-      .trim();
-    if (output) return output;
-  }
-  return "";
 }
 
 interface RenderTheme {
@@ -267,13 +222,11 @@ class ExpandedActivity {
 
 class ExpandedSubagentResult extends Container {
   private readonly context = new Text("", 0, 0);
-  private readonly usage = new Text("", 0, 0);
   private readonly activity = new ExpandedActivity();
   private readonly output = new Markdown("", 0, 0, getMarkdownTheme());
   private readonly status = new Text("", 0, 0);
   private readonly diagnostics = new Text("", 0, 0);
   private contextText = "";
-  private usageText = "";
   private outputText = "";
   private statusText = "";
   private diagnosticsText = "";
@@ -281,7 +234,6 @@ class ExpandedSubagentResult extends Container {
   constructor() {
     super();
     this.addChild(this.context);
-    this.addChild(this.usage);
     this.addChild(this.activity);
     this.addChild(new Spacer(1));
     this.addChild(this.output);
@@ -293,7 +245,6 @@ class ExpandedSubagentResult extends Container {
     const working = !isComplete(item);
     const running = item.status === "running" || (item.status === undefined && working);
     const context = expandedContextLines(item, theme).join("\n");
-    const usage = `${theme.fg("muted", "Usage: ")}${theme.fg("dim", formatUsage(item.usage) || "usage pending")}`;
     const output = working ? "" : finalOutput(item.messages);
     const error = working ? undefined : renderError(item, theme.fg.bind(theme));
     const status = error
@@ -308,7 +259,6 @@ class ExpandedSubagentResult extends Container {
     const diagnostics = working ? "" : diagnosticsLines(item, theme);
 
     this.contextText = updateText(this.context, this.contextText, context);
-    this.usageText = updateText(this.usage, this.usageText, usage);
     this.activity.update(running, item.latestToolCall ? theme.fg("muted", `→ ${item.latestToolCall}`) : undefined);
     if (this.outputText !== output) {
       this.output.setText(output);
@@ -317,51 +267,6 @@ class ExpandedSubagentResult extends Container {
     this.statusText = updateText(this.status, this.statusText, status);
     this.diagnosticsText = updateText(this.diagnostics, this.diagnosticsText, diagnostics);
   }
-}
-
-class RetainedText extends Text {
-  private value = "";
-
-  update(value: string): void {
-    if (this.value === value) return;
-    this.value = value;
-    this.setText(value);
-  }
-}
-
-function retainedText(lastComponent: unknown, text: string): Text {
-  const component = lastComponent instanceof RetainedText ? lastComponent : new RetainedText("", 0, 0);
-  component.update(text);
-  return component;
-}
-
-function invalidateHeading(state: SubagentRowState, invalidate: () => void): void {
-  if (state.headingRefreshPending) return;
-  state.headingRefreshPending = true;
-  queueMicrotask(() => {
-    state.headingRefreshPending = false;
-    invalidate();
-  });
-}
-
-function syncHeadingState(
-  state: SubagentRowState,
-  item: AgentResult | undefined,
-  isError: boolean,
-  invalidate: () => void,
-): void {
-  if (item) state.result = item;
-  const headingItem = item ?? state.result;
-  const nextKey = [
-    isError ? "error" : "ok",
-    headingItem?.agent ?? "",
-    headingItem?.model ?? "",
-    headingItem?.thinking ?? "",
-    headingItem?.status ?? "",
-  ].join("\0");
-  if (state.headingKey === nextKey) return;
-  state.headingKey = nextKey;
-  invalidateHeading(state, invalidate);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -527,6 +432,46 @@ function prepareArguments(raw: unknown): SubagentParams {
   return raw as SubagentParams;
 }
 
+// `subagent ✓ General opus-4 high (43 turns ↑129 ↓100k CH100.0% 97.3%/400k)`.
+// Stats update live from partial details; expanding shows cwd, task, live
+// activity, the final output, and failure diagnostics.
+const subagentRenderers = compactRow<Record<string, unknown>, AgentResult>({
+  name: "subagent",
+  details: (result) => parseDetails(result.details),
+  queued: (item) => item?.status === "queued",
+  title: ({ args, details: item, theme }) => {
+    if (Object.prototype.hasOwnProperty.call(args, "tasks")) {
+      const count = Array.isArray(args.tasks) ? args.tasks.length : "stored";
+      return [param(theme, `legacy batch (${count})`)];
+    }
+    const model = item?.model ?? (typeof args.model === "string" ? args.model : undefined);
+    const thinking = item?.thinking ?? args.thinking as ModelThinkingLevel | undefined;
+    const stats = item ? formatUsage(item.usage) : "";
+    return [
+      primary(theme, item?.agent ?? String(args.agent ?? "…")),
+      param(theme, modelThinkingSummary(model, thinking)),
+      stats && param(theme, `(${stats})`),
+    ];
+  },
+  body: ({ details: item, status, result, theme, lastComponent }) => {
+    // Old parallel batches parse to no single result and fall back to raw text.
+    if (!item) return undefined;
+    // A native error (thrown setup/runner failure) may arrive with details
+    // that still look healthy; show it as a failed run with the error text.
+    const displayItem = status === "error" && (!isComplete(item) || !resultFailed(item))
+      ? {
+          ...item,
+          exitCode: 1,
+          status: "done" as const,
+          errorMessage: resultText(result) || "Subagent failed",
+        }
+      : item;
+    const component = lastComponent instanceof ExpandedSubagentResult ? lastComponent : new ExpandedSubagentResult();
+    component.update(displayItem, theme);
+    return component;
+  },
+});
+
 export function createSubagentExtension(options: SubagentExtensionOptions = {}) {
   const run = options.run ?? runPiSubagent;
 
@@ -663,74 +608,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
         }
       },
 
-      renderCall(args, theme, context) {
-        const rawArgs = args as unknown as Record<string, unknown>;
-        const state = context.state as SubagentRowState;
-        const failed = context.isError;
-        if (Object.prototype.hasOwnProperty.call(rawArgs, "tasks")) {
-          const count = Array.isArray(rawArgs.tasks) ? rawArgs.tasks.length : "stored";
-          const icon = failed ? theme.fg("error", "✗") : theme.fg("muted", "·");
-          return retainedText(
-            context.lastComponent,
-            `${theme.fg("toolTitle", theme.bold("subagent"))} ${icon} ${theme.fg("muted", `legacy batch (${count})`)}`,
-          );
-        }
-
-        const item = state.result;
-        const icon = item
-          ? agentIcon(item, theme.fg.bind(theme), failed)
-          : failed ? theme.fg("error", "✗") : theme.fg("muted", "·");
-        const agent = item?.agent ?? String(rawArgs.agent ?? "…");
-        const metadata = modelThinkingSummary(item?.model ?? (typeof rawArgs.model === "string" ? rawArgs.model : undefined), item?.thinking ?? rawArgs.thinking as ModelThinkingLevel | undefined);
-        // Keep state in the native row rather than creating a competing widget;
-        // Ctrl+O and the standard Pi shell remain global.
-        return retainedText(
-          context.lastComponent,
-          `${theme.fg("toolTitle", theme.bold("subagent"))} ${icon} ${theme.fg("toolTitle", theme.bold(agent))} ${theme.fg("dim", metadata)}`,
-        );
-      },
-
-      renderResult(result, { expanded, isPartial }, theme, context) {
-        const item = parseDetails(result.details);
-        const state = context.state as SubagentRowState;
-        syncHeadingState(state, item, context.isError, context.invalidate);
-        const nativeError = context.isError;
-        if (item) {
-          const working = !nativeError && isWorking(item, isPartial);
-          const displayItem = nativeError && (!isComplete(item) || !resultFailed(item))
-            ? {
-                ...item,
-                exitCode: 1,
-                status: "done" as const,
-                errorMessage: result.content.find((part) => part.type === "text")?.text ?? "Subagent failed",
-              }
-            : item;
-          if (!expanded) {
-            const renderedError = renderError(displayItem, theme.fg.bind(theme));
-            const latest = latestOutput(item.messages);
-            const output = renderedError ?? (latest
-              ? latestOutputPreview(latest, theme.fg.bind(theme))
-              : theme.fg("muted", working
-                ? item.status === "queued" ? "(waiting for subagent slot)" : "(working…)"
-                : "(no output)"));
-            return retainedText(context.lastComponent, [
-              theme.fg("dim", formatUsage(item.usage) || "usage pending"),
-              `${theme.fg("muted", "Prompt: ")}${theme.fg("dim", truncatedTask(item.task))}`,
-              output,
-            ].join("\n"));
-          }
-
-          const component = context.lastComponent instanceof ExpandedSubagentResult
-            ? context.lastComponent
-            : new ExpandedSubagentResult();
-          component.update(displayItem, theme);
-          return component;
-        }
-
-        const first = result.content[0];
-        const text = first?.type === "text" ? first.text : "(no output)";
-        return retainedText(context.lastComponent, nativeError ? theme.fg("error", text) : text);
-      },
+      ...subagentRenderers,
     });
   };
 }

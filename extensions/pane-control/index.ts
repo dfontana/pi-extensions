@@ -19,23 +19,61 @@
 
 import { Type, StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { compactRow, countLabel, oneLine, param, primary, resultText, summary } from "../shared/tool-row.ts";
 import { detectBackend, type DetectResult, type PaneBackend, type Run } from "./backends.ts";
 
-function ok(text: string) {
-  return { content: [{ type: "text" as const, text }], details: undefined };
+function ok<Details = undefined>(text: string, details?: Details) {
+  return { content: [{ type: "text" as const, text }], details: details as Details };
 }
 
-function preview(s: string, max = 40): string {
-  return truncateToWidth(s.replace(/\s+/g, " "), max, "…");
-}
+// One-line rows: `pane_<op> <state> <params…> [→ summary]`; expanding shows
+// the tool's text result (or the error).
 
-/** Reuse the tool row's Text component across renders (standard renderCall pattern). */
-function renderLine(context: { lastComponent: unknown }, content: string): Text {
-  const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-  text.setText(content);
-  return text;
-}
+const openRow = compactRow<{ direction?: string; name?: string; command?: string }, { paneId?: string }>({
+  name: "pane_open",
+  title: ({ args, details, status, theme }) => [
+    param(theme, args.direction ?? "right"),
+    args.name && primary(theme, args.name),
+    args.command && param(theme, `$ ${oneLine(args.command)}`),
+    status === "success" && details?.paneId && summary(theme, `pane ${details.paneId}`),
+  ],
+});
+
+const sendRow = compactRow<{ pane_id?: string; text?: string; enter?: boolean; keys?: string[] }>({
+  name: "pane_send",
+  title: ({ args, theme }) => [
+    args.pane_id && primary(theme, args.pane_id),
+    args.text !== undefined && param(theme, JSON.stringify(args.text)),
+    args.enter && param(theme, "⏎"),
+    args.keys?.length && param(theme, `[${args.keys.join(" ")}]`),
+  ],
+});
+
+const readRow = compactRow<{ pane_id?: string; scrollback?: boolean; ansi?: boolean }, { lines: number }>({
+  name: "pane_read",
+  details: (result) => {
+    const text = resultText(result);
+    return { lines: text ? text.split("\n").length : 0 };
+  },
+  title: ({ args, details, status, theme }) => [
+    args.pane_id && primary(theme, args.pane_id),
+    args.scrollback && param(theme, "scrollback"),
+    args.ansi && param(theme, "ansi"),
+    status === "success" && details && summary(theme, countLabel(details.lines, "line")),
+  ],
+});
+
+const closeRow = compactRow<{ pane_id?: string }>({
+  name: "pane_close",
+  title: ({ args, theme }) => [args.pane_id && primary(theme, args.pane_id)],
+});
+
+const listRow = compactRow<object, { panes?: number }>({
+  name: "pane_list",
+  title: ({ details, status, theme }) => [
+    status === "success" && details?.panes !== undefined && summary(theme, countLabel(details.panes, "pane")),
+  ],
+});
 
 function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
   // Pane operations are stateful and order-dependent (type, then read), so
@@ -70,13 +108,7 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
       ),
     }),
     executionMode: "sequential",
-    renderCall(args, theme, context) {
-      let content = theme.fg("toolTitle", theme.bold("pane_open"));
-      content += " " + theme.fg("muted", args?.direction ?? "right");
-      if (args?.name) content += " " + theme.fg("muted", args.name);
-      if (args?.command) content += " " + theme.fg("dim", `$ ${preview(args.command)}`);
-      return renderLine(context, content);
-    },
+    ...openRow,
     async execute(_id, params, signal, _onUpdate, ctx) {
       const paneId = await backend.open(
         {
@@ -86,7 +118,7 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
         },
         signal ?? ctx.signal,
       );
-      return ok(`Opened ${backend.name} pane ${paneId}. Target it via pane_id "${paneId}".`);
+      return ok(`Opened ${backend.name} pane ${paneId}. Target it via pane_id "${paneId}".`, { paneId });
     },
   });
 
@@ -115,14 +147,7 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
       ),
     }),
     executionMode: "sequential",
-    renderCall(args, theme, context) {
-      let content = theme.fg("toolTitle", theme.bold("pane_send"));
-      if (args?.pane_id) content += " " + theme.fg("muted", args.pane_id);
-      if (args?.text !== undefined) content += " " + theme.fg("dim", `"${preview(args.text)}"`);
-      if (args?.enter) content += " " + theme.fg("dim", "⏎");
-      if (args?.keys?.length) content += " " + theme.fg("dim", `[${args.keys.join(" ")}]`);
-      return renderLine(context, content);
-    },
+    ...sendRow,
     async execute(_id, params, signal, _onUpdate, ctx) {
       if (params.text === undefined && !params.enter && !params.keys?.length) {
         throw new Error("Nothing to send: provide text, enter, and/or keys.");
@@ -164,13 +189,7 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
       ),
     }),
     executionMode: "sequential",
-    renderCall(args, theme, context) {
-      let content = theme.fg("toolTitle", theme.bold("pane_read"));
-      if (args?.pane_id) content += " " + theme.fg("muted", args.pane_id);
-      const bits = [args?.scrollback && "scrollback", args?.ansi && "ansi"].filter(Boolean);
-      if (bits.length) content += " " + theme.fg("dim", `(${bits.join(", ")})`);
-      return renderLine(context, content);
-    },
+    ...readRow,
     async execute(_id, params, signal, _onUpdate, ctx) {
       const screen = await backend.read(
         params.pane_id,
@@ -191,11 +210,7 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
       pane_id: Type.String({ description: "Pane id from pane_open or pane_list." }),
     }),
     executionMode: "sequential",
-    renderCall(args, theme, context) {
-      let content = theme.fg("toolTitle", theme.bold("pane_close"));
-      if (args?.pane_id) content += " " + theme.fg("muted", args.pane_id);
-      return renderLine(context, content);
-    },
+    ...closeRow,
     async execute(_id, params, signal, _onUpdate, ctx) {
       await backend.close(params.pane_id, signal ?? ctx.signal);
       return ok(`Closed pane ${params.pane_id}.`);
@@ -212,12 +227,10 @@ function registerPaneTools(pi: ExtensionAPI, backend: PaneBackend) {
     promptSnippet: "List terminal panes in the current session",
     parameters: Type.Object({}),
     executionMode: "sequential",
-    renderCall(_args, theme, context) {
-      return renderLine(context, theme.fg("toolTitle", theme.bold("pane_list")));
-    },
+    ...listRow,
     async execute(_id, _params, signal, _onUpdate, ctx) {
       const panes = await backend.list(signal ?? ctx.signal);
-      return ok(JSON.stringify(panes, null, 2));
+      return ok(JSON.stringify(panes, null, 2), { panes: panes.length });
     },
   });
 }

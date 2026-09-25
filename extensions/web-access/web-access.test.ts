@@ -3,8 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, initTheme } from "@earendil-works/pi-coding-agent";
 
+import { renderRow, type RowFlags } from "../shared/render-harness.ts";
 import extension from "./index.ts";
 import { loadConfig } from "./config.ts";
 import { extractChatGptAccountId, getAdapter, parseResponse, readSseResponse } from "./providers.ts";
@@ -227,6 +228,78 @@ describe("web-access web-access", () => {
         /auth failed for anthropic \(credentials unavailable\)/,
       );
       assert.equal(refreshOptions[2]?.signal, fetchSignal);
+    } finally {
+      if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = before;
+    }
+  });
+
+  it("renders one-line rows with params and a result summary, keeping params on failure", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-render-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "wa-render-cwd-"));
+    const before = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({
+        search: { provider: "openai", model: "gpt-5.5" },
+        fetch: { provider: "anthropic", model: "claude-opus-4-8" },
+      }),
+    );
+    try {
+      let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+      const tools = new Map<string, any>();
+      const models = new Map([
+        ["openai/gpt-5.5", { provider: "openai", id: "gpt-5.5" }],
+        ["anthropic/claude-opus-4-8", { provider: "anthropic", id: "claude-opus-4-8" }],
+      ]);
+      extension({
+        on: (_event: string, handler: (event: unknown, ctx: any) => Promise<void>) => (sessionStart = handler),
+        registerTool: (tool: { name: string }) => tools.set(tool.name, tool),
+      } as any);
+      await sessionStart!({}, {
+        cwd,
+        modelRegistry: {
+          refresh: async () => ({ aborted: false, errors: new Map() }),
+          find: (provider: string, model: string) => models.get(`${provider}/${model}`),
+        },
+        ui: { notify() {} },
+      });
+
+      const render = (name: string, args: unknown, res: any, flags: RowFlags = {}) => renderRow(tools.get(name), args, res, flags);
+
+      const searchArgs = { query: "pi  tui", max_results: 5, search_context_size: "high", allowed_domains: ["a.dev", "b.dev"] };
+      const fetchArgs = { url: "https://example.test", prompt: "summarize" };
+      const cases = [
+        {
+          name: "web_search",
+          args: searchArgs,
+          res: { content: [{ type: "text", text: "answer" }], details: { annotations: [{ url: "https://a.dev" }, { url: "https://b.dev" }, { url: "https://a.dev" }, { title: "no url" }] } },
+          title: 'web_search ✓ "pi tui" 5 results ⧉high @a.dev,b.dev → 2 sources',
+        },
+        {
+          name: "web_fetch",
+          args: fetchArgs,
+          res: { content: [{ type: "text", text: "page" }], details: { result: { url: fetchArgs.url, title: "Example", content: { kind: "text", data: "x".repeat(12_000), mediaType: "text/plain" } } } },
+          title: 'web_fetch ✓ https://example.test "summarize" → Example · 12k chars',
+        },
+      ];
+      for (const { name, args, res, title } of cases) {
+        assert.deepEqual(render(name, args, res), { title, body: [] });
+
+        const failure = { content: [{ type: "text", text: `${name} request failed (500)` }], details: {} };
+        const failedTitle = title.replace("✓", "✗").replace(/ → .*$/, "");
+        assert.deepEqual(render(name, args, failure, { isError: true }), { title: failedTitle, body: [] });
+        assert.deepEqual(render(name, args, failure, { isError: true, expanded: true }).body, [`${name} request failed (500)`]);
+      }
+
+      // Expanded success renders every text block: the page, then its citations.
+      initTheme();
+      const fetched = cases[1].res as any;
+      const withCitations = { ...fetched, content: [...fetched.content, { type: "text", text: "Citations:\n[1]" }] };
+      const expanded = render("web_fetch", fetchArgs, withCitations, { expanded: true }).body;
+      assert.ok(expanded.includes("page"));
+      assert.ok(expanded.some((line: string) => line.includes("Citations:")));
     } finally {
       if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = before;

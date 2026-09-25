@@ -24,12 +24,10 @@ import {
   type ExtensionCommandContext,
   type ExtensionUIContext,
   formatSize,
-  keyHint,
-  type Theme,
   type ThemeColor,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
-import { decodeKittyPrintable, Key, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AuthError, authInteractive, clearOAuthCredentials } from "./auth.ts";
 import { GLOBAL_CONFIG_FILE, loadServers } from "./config.ts";
 import {
@@ -39,6 +37,17 @@ import {
 } from "./handoff.ts";
 import { Manager, type ServerState } from "./manager.ts";
 import { registerSubagentEnvironmentProvider } from "../subagent/environment.ts";
+import {
+  compactRow,
+  countLabel,
+  oneLine,
+  param,
+  primary,
+  resultText,
+  summary,
+  type RowTheme,
+  type Segment,
+} from "../shared/tool-row.ts";
 
 interface Runtime {
   manager: Manager;
@@ -147,67 +156,46 @@ const mcpParameters = Type.Unsafe<McpArgs>({
 
 // ---- compact single-line rendering for the mcp tool -----------------------
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-interface McpRowState {
-  done: boolean;
-  isError: boolean;
-  frameIdx: number;
-  spinnerTimer?: ReturnType<typeof setInterval>;
-  invalidateFn?: () => void;
+interface McpRowDetails {
+  server?: string;
+  lines: number;
 }
 
-class SingleLine {
-  private content = "";
-  private cachedWidth?: number;
-  private cachedLine?: string;
-
-  setText(content: string) {
-    if (this.content !== content) {
-      this.content = content;
-      this.cachedWidth = undefined;
-      this.cachedLine = undefined;
-    }
-  }
-
-  render(width: number): string[] {
-    if (this.cachedLine !== undefined && this.cachedWidth === width) return [this.cachedLine];
-    this.cachedLine = truncateToWidth(this.content, width);
-    this.cachedWidth = width;
-    return [this.cachedLine];
-  }
-
-  invalidate() {
-    this.cachedWidth = undefined;
-    this.cachedLine = undefined;
-  }
-}
-
-const EMPTY_COMPONENT = { render: (_w: number): string[] => [], invalidate: () => {} };
-
-function buildMcpLineParts(a: McpArgs | undefined): { mode: string; params: string } {
-  if (!a) return { mode: "status", params: "" };
+function mcpSubject(a: McpArgs, theme: RowTheme): Segment[] {
   switch (a.action) {
     case "status":
-      return { mode: "status", params: "" };
+      return [param(theme, "status")];
     case "list-tools":
-      return { mode: "list", params: a.server };
+      return [param(theme, "list"), a.server && primary(theme, a.server)];
     case "search-tools":
-      return { mode: "search", params: `"${a.search}"` };
+      return [param(theme, "search"), a.search !== undefined && primary(theme, `"${a.search}"`), a.regex && param(theme, "regex")];
     case "describe-tool":
-      return { mode: "describe", params: a.tool };
+      return [param(theme, "describe"), a.tool && primary(theme, a.tool)];
     case "invoke-tool":
-      return { mode: `call ${a.tool}`, params: a.args ?? "" };
+      return [param(theme, "call"), a.tool && primary(theme, a.tool), a.args && a.args !== "{}" && param(theme, oneLine(a.args))];
     default:
-      return assertNever(a);
+      // Arguments are still streaming (or invalid): show whatever action is known.
+      return [param(theme, String((a as { action?: unknown }).action ?? "…"))];
   }
 }
 
-function buildMcpLine(prefix: string, mode: string, params: string, theme: Theme): string {
-  let line = prefix + " " + theme.fg("toolTitle", theme.bold("mcp")) + " " + theme.fg("muted", mode);
-  if (params) line += " " + theme.fg("dim", params);
-  return line;
-}
+// `mcp ✓ call svc_get_x {"n":1} → datadog · 12 lines`; expanding shows the
+// raw result text (or the error).
+const mcpRenderers = compactRow<McpArgs, McpRowDetails>({
+  name: "mcp",
+  details: (result) => {
+    const text = resultText(result);
+    const server = (result.details as { server?: unknown } | undefined)?.server;
+    return { server: typeof server === "string" ? server : undefined, lines: text ? text.split("\n").length : 0 };
+  },
+  title: ({ args, details, status, theme }) => [
+    ...mcpSubject(args, theme),
+    status === "success" && details && summary(
+      theme,
+      [details.server, countLabel(details.lines, "line")].filter(Boolean).join(" · "),
+    ),
+  ],
+});
 
 const ICON: Record<ServerState, string> = {
   off: "·",
@@ -226,7 +214,6 @@ const STATE_COLOR: Record<ServerState, ThemeColor> = {
   failed: "error",
 };
 
-const oneLine = (s?: string) => (s ?? "").replace(/\s+/g, " ").trim();
 const asText = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined });
 
 function parseArgs(s?: string): Record<string, unknown> {
@@ -530,7 +517,7 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
         await manager.connect(name);
         busy.delete(name); // success: clear status immediately
       } catch (e) {
-        busy.set(name, `✗ ${oneLine((e as Error).message).slice(0, 40)}`);
+        busy.set(name, `✗ ${oneLine(String((e as Error)?.message ?? e)).slice(0, 40)}`);
         // Leave the error visible; schedule cleanup after a short display window.
         setTimeout(() => (busy.delete(name), tui.requestRender()), 4000);
       } finally {
@@ -639,87 +626,7 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
     ],
     parameters: mcpParameters,
 
-    renderCall(args, theme, context) {
-      const state = context.state as McpRowState;
-      state.done ??= false;
-      state.isError ??= false;
-      state.frameIdx ??= 0;
-
-      const comp = (context.lastComponent as SingleLine | undefined) ?? new SingleLine();
-      state.invalidateFn = context.invalidate;
-
-      const a = args as McpArgs | undefined;
-      const { mode, params } = buildMcpLineParts(a);
-
-      if (!state.done) {
-        if (!state.spinnerTimer) {
-          state.frameIdx = 0;
-          state.spinnerTimer = setInterval(() => {
-            state.frameIdx = (state.frameIdx + 1) % SPINNER_FRAMES.length;
-            comp.invalidate();
-            state.invalidateFn?.();
-          }, 80);
-        }
-        const spinChar = theme.fg("dim", SPINNER_FRAMES[state.frameIdx] ?? SPINNER_FRAMES[0]);
-        comp.setText(buildMcpLine(spinChar, mode, params, theme));
-      } else {
-        const icon = state.isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-        const hint = keyHint("app.tools.expand", "expand");
-        comp.setText(buildMcpLine(icon, mode, params, theme) + " " + theme.fg("dim", hint));
-      }
-
-      return comp;
-    },
-
-    renderResult(result, { expanded, isPartial }, theme, context) {
-      const state = context.state as McpRowState;
-
-      if (!isPartial && !state.done) {
-        state.done = true;
-        state.isError = context.isError;
-        if (state.spinnerTimer) {
-          clearInterval(state.spinnerTimer);
-          state.spinnerTimer = undefined;
-        }
-        context.invalidate();
-      }
-
-      if (!expanded) return EMPTY_COMPONENT;
-
-      const a = context.args as McpArgs | undefined;
-      const lines: string[] = [];
-
-      if (a) {
-        switch (a.action) {
-          case "status":
-            break;
-          case "list-tools":
-            lines.push(theme.fg("muted", "server: ") + theme.fg("dim", a.server));
-            break;
-          case "search-tools":
-            lines.push(theme.fg("muted", "query: ") + theme.fg("dim", a.search));
-            break;
-          case "describe-tool":
-            lines.push(theme.fg("muted", "tool: ") + theme.fg("dim", a.tool));
-            break;
-          case "invoke-tool":
-            if (a.args && a.args !== "{}") {
-              lines.push(theme.fg("muted", "args: ") + theme.fg("dim", a.args));
-            }
-            break;
-          default:
-            assertNever(a);
-        }
-      }
-
-      const content = result.content[0];
-      if (content?.type === "text") {
-        const color = state.isError ? "error" : "dim";
-        lines.push(...content.text.split("\n").map((l) => theme.fg(color, l)));
-      }
-
-      return new Text(lines.join("\n"), 0, 0);
-    },
+    ...mcpRenderers,
 
     async execute(_id, p: McpArgs, signal, _onUpdate, ctx) {
       runtime.ui = ctx.ui;

@@ -21,12 +21,11 @@
 import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import { Type, StringEnum } from "@earendil-works/pi-ai";
 import { getMarkdownTheme, type ExtensionAPI, type ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { Markdown, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Markdown } from "@earendil-works/pi-tui";
+import { CONTEXT_ICON, compactRow, countLabel, oneLine, param, primary, summary } from "../shared/tool-row.ts";
 import { loadConfig, type FetchToolConfig, type SearchToolConfig } from "./config.ts";
 import { getAdapter, parseResponse, readSseResponse } from "./providers.ts";
 import { getFetchAdapter, type FetchResult } from "./web-fetch.ts";
-
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 // Markdown theme reads the active theme lazily through its closures, so a single
 // module-level instance stays correct across runtime theme switches.
@@ -98,54 +97,109 @@ function mergeHeaders(...sources: Array<ProviderHeaders | undefined>): Record<st
   return Object.fromEntries(Array.from(merged.values(), ({ name, value }) => [name, value]));
 }
 
-type ToolUpdate = { content: Array<{ type: "text"; text: string }>; details: undefined };
-
 /**
- * POST a JSON body, animating a spinner through onUpdate while the request is
- * in flight (the partial content re-renders the result row — see the tools'
- * renderResult). Shared by web_search and web_fetch. Throws on non-2xx.
+ * POST a JSON body. Shared by web_search and web_fetch. Throws on non-2xx.
  *
  * With `sse` set the endpoint replies with an event stream instead of a JSON
  * body (openai-codex is SSE-only); the final response object is reassembled
  * from the stream by `readSseResponse`.
  */
-async function postJsonWithThrobber(opts: {
+async function postJson(opts: {
   toolName: string;
   url: string;
   headers: Record<string, string>;
   body: unknown;
   signal: AbortSignal | undefined;
-  onUpdate: ((update: ToolUpdate) => void) | undefined;
-  workingText: string;
   sse?: boolean;
 }): Promise<unknown> {
-  let frame = 0;
-  const throbber = setInterval(() => {
-    frame = (frame + 1) % SPINNER_FRAMES.length;
-    opts.onUpdate?.({
-      content: [{ type: "text", text: `${SPINNER_FRAMES[frame]} ${opts.workingText}` }],
-      details: undefined,
-    });
-  }, 120);
-  try {
-    const res = await fetch(opts.url, {
-      method: "POST",
-      headers: opts.headers,
-      body: JSON.stringify(opts.body),
-      signal: opts.signal,
-    });
-    if (!res.ok) {
-      throw new Error(`${opts.toolName} request failed (${res.status}): ${await res.text()}`);
-    }
-    if (opts.sse) {
-      if (!res.body) throw new Error(`${opts.toolName}: response has no body`);
-      return await readSseResponse(res.body as unknown as AsyncIterable<Uint8Array>);
-    }
-    return await res.json();
-  } finally {
-    clearInterval(throbber);
+  const res = await fetch(opts.url, {
+    method: "POST",
+    headers: opts.headers,
+    body: JSON.stringify(opts.body),
+    signal: opts.signal,
+  });
+  if (!res.ok) {
+    throw new Error(`${opts.toolName} request failed (${res.status}): ${await res.text()}`);
   }
+  if (opts.sse) {
+    if (!res.body) throw new Error(`${opts.toolName}: response has no body`);
+    return await readSseResponse(res.body as unknown as AsyncIterable<Uint8Array>);
+  }
+  return await res.json();
 }
+
+interface SearchArgs {
+  query?: string;
+  max_results?: number;
+  search_context_size?: string;
+  allowed_domains?: string[];
+}
+
+interface SearchDetails {
+  annotations?: Array<{ url?: string; title?: string }>;
+}
+
+/** Distinct, nonempty source URLs in annotation order (shared by the title count and Sources list). */
+function distinctSources(details: SearchDetails | undefined): Array<{ url: string; title?: string }> {
+  const seen = new Set<string>();
+  const sources: Array<{ url: string; title?: string }> = [];
+  for (const a of details?.annotations ?? []) {
+    if (!a?.url || seen.has(a.url)) continue;
+    seen.add(a.url);
+    sources.push({ url: a.url, title: a.title });
+  }
+  return sources;
+}
+
+// `web_search ✓ "query" 5 results ⧉high @openai.com → 3 sources`; expanding
+// shows the markdown answer followed by a deduped Sources list.
+const searchRenderers = compactRow<SearchArgs, SearchDetails>({
+  name: "web_search",
+  title: ({ args, details, status, theme }) => [
+    args.query && primary(theme, `"${oneLine(args.query)}"`),
+    args.max_results && param(theme, countLabel(args.max_results, "result")),
+    args.search_context_size && param(theme, `${CONTEXT_ICON}${args.search_context_size}`),
+    args.allowed_domains?.length && param(theme, `@${args.allowed_domains.join(",")}`),
+    status === "success" && summary(theme, countLabel(distinctSources(details).length, "source")),
+  ],
+  body: ({ result, details, status }) => {
+    if (status !== "success") return undefined;
+    const first = result.content[0];
+    const body = first?.type === "text" ? first.text : "";
+    const sources = distinctSources(details).map((s, i) => `${i + 1}. [${s.title ?? s.url}](${s.url})`);
+    const md = sources.length ? `${body}\n\n**Sources**\n${sources.join("\n")}` : body;
+    return new Markdown(md, 0, 0, MARKDOWN_THEME);
+  },
+});
+
+interface FetchArgs {
+  url?: string;
+  prompt?: string;
+}
+
+// `web_fetch ✓ https://… "prompt" → Page title · 12k chars`; expanding shows
+// the fetched page as markdown.
+const fetchRenderers = compactRow<FetchArgs, { result?: FetchResult }>({
+  name: "web_fetch",
+  title: ({ args, details, status, theme }) => {
+    const fetched = details?.result;
+    return [
+      args.url && primary(theme, args.url),
+      args.prompt && param(theme, `"${oneLine(args.prompt)}"`),
+      status === "success" && fetched && summary(
+        theme,
+        [fetched.title && oneLine(fetched.title), countLabel(fetched.content.data.length, "char")].filter(Boolean).join(" · "),
+      ),
+    ];
+  },
+  body: ({ result, status }) => {
+    if (status !== "success") return undefined;
+    // The first block is the page; any further blocks (citations) render verbatim.
+    const [page = "", ...extra] = result.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+    const md = [page, ...extra.map((text) => `\`\`\`\n${text}\n\`\`\``)].join("\n\n");
+    return new Markdown(md, 0, 0, MARKDOWN_THEME);
+  },
+});
 
 function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
   const adapter = getAdapter(cfg.provider);
@@ -177,68 +231,9 @@ function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
       ),
     }),
 
-    // Show the query + params in the tool row instead of a bare "web_search".
-    renderCall(args, theme, context) {
-      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      let content = theme.fg("toolTitle", theme.bold("web_search"));
-      if (args?.query) content += " " + theme.fg("muted", `"${args.query}"`);
-      const bits: string[] = [];
-      if (args?.max_results) bits.push(`${args.max_results} results`);
-      if (args?.search_context_size) bits.push(String(args.search_context_size));
-      if (args?.allowed_domains?.length) bits.push(`@ ${args.allowed_domains.join(", ")}`);
-      if (bits.length) content += " " + theme.fg("dim", `(${bits.join(", ")})`);
-      text.setText(content);
-      return text;
-    },
+    ...searchRenderers,
 
-    // Foldable result: collapsed shows a one-line preview + stats; the built-in
-    // expand toggle (ctrl+o) flips `expanded` to reveal the full response. While
-    // executing, `execute` streams spinner frames as partial content (isPartial).
-    renderResult(result, { expanded, isPartial }, theme, context) {
-      const first = result.content?.[0];
-      const body = first?.type === "text" ? first.text : "";
-
-      if (isPartial) {
-        return new Text(theme.fg("accent", body || "Searching the web…"), 0, 0);
-      }
-
-      if (context.isError) {
-        return new Text(theme.fg("error", body || "web_search failed"), 0, 0);
-      }
-
-      const annotations =
-        (result.details as { annotations?: Array<{ url?: string; title?: string }> } | undefined)
-          ?.annotations ?? [];
-
-      if (expanded) {
-        // Render the markdown answer, then a deduped Sources list from annotations.
-        const seen = new Set<string>();
-        const sources: string[] = [];
-        for (const a of annotations) {
-          const url = a?.url;
-          if (!url || seen.has(url)) continue;
-          seen.add(url);
-          sources.push(`${sources.length + 1}. [${a.title ?? url}](${url})`);
-        }
-        const md = sources.length ? `${body}\n\n**Sources**\n${sources.join("\n")}` : body;
-        return new Markdown(md, 1, 0, MARKDOWN_THEME);
-      }
-
-      const n = annotations.length;
-      const oneLine = body.replace(/\s+/g, " ").trim();
-      // Width-aware: truncate the preview to the row width so it never wraps.
-      // `width` is supplied by the TUI at render time (Component.render(width)).
-      return {
-        render(width: number) {
-          const preview = theme.fg("muted", truncateToWidth(oneLine, width, "…"));
-          const stats = theme.fg("dim", `${body.length} chars · ${n} source${n === 1 ? "" : "s"}`);
-          return [preview, truncateToWidth(stats, width)];
-        },
-        invalidate() {},
-      };
-    },
-
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       // Re-resolve per call so a mid-session credential/registry change is honored.
       const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model, signal);
       if (!resolved.ok) throw new Error(resolved.error);
@@ -256,14 +251,12 @@ function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
         cfg.providerParams,
       );
 
-      const json = await postJsonWithThrobber({
+      const json = await postJson({
         toolName: "web_search",
         url: adapter.endpoint(baseUrl),
         headers: mergeHeaders({ "Content-Type": "application/json" }, adapter.headers(apiKey), headers),
         body,
         signal: signal ?? ctx.signal,
-        onUpdate,
-        workingText: "Searching the web…",
         sse: adapter.stream,
       });
 
@@ -298,48 +291,9 @@ function registerWebFetch(pi: ExtensionAPI, cfg: FetchToolConfig) {
       ),
     }),
 
-    renderCall(args, theme, context) {
-      const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      let content = theme.fg("toolTitle", theme.bold("web_fetch"));
-      if (args?.url) content += " " + theme.fg("muted", args.url);
-      if (args?.prompt) content += " " + theme.fg("dim", `("${args.prompt}")`);
-      text.setText(content);
-      return text;
-    },
+    ...fetchRenderers,
 
-    renderResult(result, { expanded, isPartial }, theme, context) {
-      const first = result.content?.[0];
-      const body = first?.type === "text" ? first.text : "";
-
-      if (isPartial) {
-        return new Text(theme.fg("accent", body || "Fetching…"), 0, 0);
-      }
-      if (context.isError) {
-        return new Text(theme.fg("error", body || "web_fetch failed"), 0, 0);
-      }
-
-      const details = result.details as { result?: FetchResult } | undefined;
-      const fetched = details?.result;
-
-      if (expanded) {
-        return new Markdown(body, 1, 0, MARKDOWN_THEME);
-      }
-
-      const oneLine = body.replace(/\s+/g, " ").trim();
-      return {
-        render(width: number) {
-          const preview = theme.fg("muted", truncateToWidth(oneLine, width, "…"));
-          const bits = [`${fetched?.content.data.length ?? body.length} chars`];
-          if (fetched?.title) bits.push(fetched.title);
-          if (fetched?.retrievedAt) bits.push(fetched.retrievedAt);
-          const stats = theme.fg("dim", bits.join(" · "));
-          return [preview, truncateToWidth(stats, width)];
-        },
-        invalidate() {},
-      };
-    },
-
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       // Re-resolve per call so a mid-session credential/registry change is honored.
       const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model, signal);
       if (!resolved.ok) throw new Error(resolved.error);
@@ -347,14 +301,12 @@ function registerWebFetch(pi: ExtensionAPI, cfg: FetchToolConfig) {
 
       const body = adapter.buildBody(model.id, params.url, params.prompt, cfg.params);
 
-      const json = await postJsonWithThrobber({
+      const json = await postJson({
         toolName: "web_fetch",
         url: adapter.endpoint(baseUrl),
         headers: mergeHeaders({ "Content-Type": "application/json" }, adapter.headers(apiKey), headers),
         body,
         signal: signal ?? ctx.signal,
-        onUpdate,
-        workingText: `Fetching ${params.url}…`,
       });
 
       const result = adapter.parseResult(json, { url: params.url });

@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { renderRow } from "../shared/render-harness.ts";
 import { registerSubagentEnvironmentProvider } from "./environment.ts";
 import { createSubagentExtension, MAX_ACTIVE_CHILDREN, MAX_OUTSTANDING_CALLS } from "./index.ts";
 import { SUBAGENT_CHILD_ENV, type AgentResult, type RunRequest, type SubagentRunner } from "./process.ts";
@@ -536,54 +537,44 @@ describe("subagent render", () => {
     };
   }
 
-  it("renders queued, running, success, and failure states in one native row", () => {
+  it("renders queued, running, success, and failure states as one title line with stats at the end", () => {
     const { tool } = setup();
     assert.ok(tool.renderCall && tool.renderResult);
+    const args = { agent: "worker", task: "Inspect the project" };
     const queued = successful(request(), "queued");
     queued.exitCode = -1;
     queued.status = "queued";
     queued.messages = [];
-    const state = {};
-    const queuedResult = { content: [{ type: "text", text: "waiting" }], details: { result: queued } };
-    const queuedHeading = tool.renderCall!({ agent: "worker", task: queued.task }, testTheme, renderContext(state)).render(120).join("\n");
-    assert.match(queuedHeading, /subagent · worker/);
-    const queuedBody = tool.renderResult!(queuedResult, { expanded: false, isPartial: true }, testTheme, renderContext(state)).render(120).join("\n");
-    assert.match(queuedBody, /waiting for subagent slot/);
-
-    const running = { ...queued, status: "running" as const };
-    const runningResult = { ...queuedResult, details: { ...queuedResult.details, result: running } };
-    const runningBody = tool.renderResult!(runningResult, { expanded: false, isPartial: true }, testTheme, renderContext(state)).render(120).join("\n");
-    assert.match(runningBody, /working…/);
-
+    queued.usage = emptyTrackedUsage();
+    const running = { ...successful(request(), "partial"), exitCode: -1, status: "running" as const };
     const complete = successful(request(), "Final response");
-    const completeResult = { content: [{ type: "text", text: "Final response" }], details: { result: complete } };
-    const completeBody = tool.renderResult!(completeResult, { expanded: false, isPartial: false }, testTheme, renderContext(state)).render(120).join("\n");
-    assert.match(completeBody, /Final response/);
-    const successHeading = tool.renderCall!({ agent: "worker", task: complete.task }, testTheme, renderContext(state)).render(120).join("\n");
-    assert.match(successHeading, /✓ worker/);
+    const failed = { ...successful(request(), "boom"), exitCode: 1, status: "failed" as const, errorMessage: "boom" };
+
+    const cases = [
+      { label: "queued", item: queued, flags: { isPartial: true }, heading: /^subagent · worker model high$/ },
+      { label: "running", item: running, flags: { isPartial: true }, heading: /^subagent [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] worker model high \(1 turn .*\)$/ },
+      { label: "success", item: complete, flags: {}, heading: /^subagent ✓ worker model high \(1 turn .*\)$/ },
+      { label: "failure", item: failed, flags: { isError: true }, heading: /^subagent ✗ worker model high \(1 turn .*\)$/ },
+    ];
+    for (const { label, item, flags, heading } of cases) {
+      const rendered = renderRow(tool, args, { content: [{ type: "text", text: "x" }], details: { result: item } }, flags);
+      assert.match(rendered.title, heading, label);
+      assert.deepEqual(rendered.body, [], `${label}: collapsed rows have no body`);
+    }
   });
 
   it("uses canonical case-insensitive thinking suffix metadata in queued headings", () => {
     const { tool } = setup();
     assert.ok(tool.renderCall);
-    const heading = tool.renderCall!(
-      { agent: "worker", task: "queued", model: "provider/model:HIGH" },
-      testTheme,
-      renderContext(),
-    ).render(120).join("\n");
-    assert.match(heading, /model high/);
+    const { title: heading } = renderRow(tool, { agent: "worker", task: "queued", model: "provider/model:HIGH" }, undefined, { isPartial: true });
+    assert.match(heading, /worker model high$/);
   });
 
-  it("marks native setup and runner errors as failed headings, including replayed rows", () => {
+  it("keeps requested params in failed headings and shows native errors only when expanded", () => {
     const { tool } = setup();
     assert.ok(tool.renderCall && tool.renderResult);
-
-    const directHeading = tool.renderCall!(
-      { agent: "worker", task: "setup" },
-      testTheme,
-      { ...renderContext({}), isError: true },
-    ).render(120).join("\n");
-    assert.match(directHeading, /✗ worker/);
+    const args = { agent: "worker", task: "setup", model: "provider/model", thinking: "low" };
+    assert.equal(renderRow(tool, args, undefined, { isError: true }).title, "subagent ✗ worker model low");
 
     const queued = successful(request(), "queued");
     queued.exitCode = -1;
@@ -595,20 +586,12 @@ describe("subagent render", () => {
       { text: "admission failed", details: undefined },
       { text: "runner failed", details: { result: queued } },
     ]) {
-      const state = {};
-      const rendered = tool.renderResult!(
-        { content: [{ type: "text", text: message.text }], details: message.details },
-        { expanded: false, isPartial: false },
-        testTheme,
-        { ...renderContext(state), isError: true },
-      ).render(120).join("\n");
-      assert.match(rendered, new RegExp(message.text));
-      const heading = tool.renderCall!(
-        { agent: "worker", task: "replay" },
-        testTheme,
-        { ...renderContext(state), isError: true },
-      ).render(120).join("\n");
-      assert.match(heading, /✗ worker/);
+      const result = { content: [{ type: "text" as const, text: message.text }], details: message.details };
+      const collapsed = renderRow(tool, args, result, { isError: true });
+      assert.match(collapsed.title, /^subagent ✗ worker model/);
+      assert.deepEqual(collapsed.body, []);
+      const expanded = renderRow(tool, args, result, { isError: true, expanded: true });
+      assert.match(expanded.body.join("\n"), new RegExp(message.text));
     }
   });
 
@@ -683,18 +666,7 @@ describe("subagent render", () => {
     }
   });
 
-  it("leaves collapsed rendering independent of expanded activity", () => {
-    const { tool } = setup();
-    assert.ok(tool.renderResult);
-    const item = successful(request(), "Final response");
-    const state = {};
-    const base = tool.renderResult!({ content: [{ type: "text", text: "Final response" }], details: { result: item } }, { expanded: false, isPartial: false }, testTheme, renderContext(state)).render(120).join("\n");
-    item.latestToolCall = "read /tmp/history.ts";
-    const withActivity = tool.renderResult!({ content: [{ type: "text", text: "Final response" }], details: { result: item } }, { expanded: false, isPartial: false }, testTheme, { ...renderContext(state), lastComponent: undefined }).render(120).join("\n");
-    assert.equal(withActivity, base);
-  });
-
-  it("renders a synthesized message when collapsed and process diagnostics when expanded", () => {
+  it("reveals a synthesized failure message and process diagnostics only when expanded", () => {
     const { tool } = setup();
     assert.ok(tool.renderResult);
     const item: AgentResult = {
@@ -702,11 +674,12 @@ describe("subagent render", () => {
       messages: [], stderr: "", usage: emptyTrackedUsage(),
       process: { pid: 4242, durationMs: 5432, termination: { exitCode: 1 }, protocolErrors: 2, stdoutTail: "garbage\n" },
     };
-    const collapsed = tool.renderResult!({ content: [{ type: "text", text: "" }], details: { result: item } }, { expanded: false, isPartial: false }, testTheme, renderContext({})).render(120).join("\n");
-    assert.match(collapsed, /exited with code 1 before producing a Pi response/);
-    assert.doesNotMatch(collapsed, /garbage/);
+    const result = { content: [{ type: "text" as const, text: "" }], details: { result: item } };
+    const args = { agent: "worker", task: "silent fail" };
+    assert.deepEqual(renderRow(tool, args, result, { isError: true }).body, []);
 
-    const expanded = tool.renderResult!({ content: [{ type: "text", text: "" }], details: { result: item } }, { expanded: true, isPartial: false }, testTheme, renderContext({})).render(120).join("\n");
+    const expanded = renderRow(tool, args, result, { isError: true, expanded: true }).body.join("\n");
+    assert.match(expanded, /exited with code 1 before producing a Pi response/);
     assert.match(expanded, /Status: failed/);
     assert.match(expanded, /Exit code: 1/);
     assert.match(expanded, /garbage/);
@@ -717,17 +690,16 @@ describe("subagent render", () => {
     assert.ok(tool.renderCall && tool.renderResult);
     const item = successful(request(), "Legacy final");
     const oldSingle = { mode: "single", agentsDirectory: "/tmp", diagnostics: [], results: [item] };
-    const single = tool.renderResult!({ content: [{ type: "text", text: "Legacy final" }], details: oldSingle }, { expanded: false, isPartial: false }, testTheme, renderContext()).render(120).join("\n");
-    assert.match(single, /Legacy final/);
+    const single = renderRow(tool, { agent: "worker", task: item.task }, { content: [{ type: "text", text: "Legacy final" }], details: oldSingle }, { expanded: true });
+    assert.match(single.title, /^subagent ✓ worker model high \(1 turn/);
+    assert.match(single.body.join("\n"), /Legacy final/);
 
     const oldParallel = { mode: "parallel", results: [item, { ...item, task: "second" }] };
-    const batch = tool.renderResult!({ content: [{ type: "text", text: "old" }], details: oldParallel }, { expanded: false, isPartial: false }, testTheme, renderContext()).render(120).join("\n");
-    assert.equal(batch.trimEnd(), "old");
-    const expandedBatch = tool.renderResult!({ content: [{ type: "text", text: "old" }], details: oldParallel }, { expanded: true, isPartial: false }, testTheme, renderContext()).render(120).join("\n");
-    assert.match(expandedBatch, /^old/);
-    assert.doesNotMatch(expandedBatch, /worker/);
-    const heading = tool.renderCall!({ tasks: [{ agent: "worker", task: "old" }] }, testTheme, renderContext({})).render(120).join("\n");
-    assert.match(heading, /legacy batch/);
+    const batchArgs = { tasks: [{ agent: "worker", task: "old" }] };
+    const batch = renderRow(tool, batchArgs, { content: [{ type: "text", text: "old" }], details: oldParallel });
+    assert.deepEqual(batch, { title: "subagent ✓ legacy batch (1)", body: [] });
+    const expandedBatch = renderRow(tool, batchArgs, { content: [{ type: "text", text: "old" }], details: oldParallel }, { expanded: true });
+    assert.deepEqual(expandedBatch.body, ["old"]);
   });
 });
 

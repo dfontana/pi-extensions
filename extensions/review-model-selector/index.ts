@@ -1,7 +1,23 @@
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { modelParamSegments, resolvedModelSegment } from "../model-query/render.ts";
+import { compactRow } from "../shared/tool-row.ts";
 import { REVIEW_INTELLIGENCE_PREFERENCES, REVIEW_THINKING_LEVELS, canonicalModel, selectReviewModel } from "./selector.ts";
+
+interface ReviewArgs {
+  intelligence?: "higher" | "same";
+  thinking?: string;
+  minimumContextWindow?: number;
+}
+
+const renderers = compactRow<ReviewArgs, { model?: string; thinking?: string }>({
+  name: "select_review_model",
+  title: ({ args, details, status, theme }) => [
+    ...modelParamSegments(args, theme),
+    status === "success" && resolvedModelSegment(theme, details),
+  ],
+});
 
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
@@ -32,6 +48,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
+    ...renderers,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       // Since pi 0.80.8 model loading is async and getAvailable() reads a
       // snapshot; refresh so the selection sees the current registry state.
