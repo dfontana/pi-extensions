@@ -66,7 +66,7 @@ The Markdown body is appended to the child Pi system prompt. Invalid files are s
 2. agent frontmatter
 3. dispatching session defaults
 
-The working directory defaults to the dispatching session's current directory. Explicit model values are resolved against Pi's refreshed authenticated registry. Canonical provider/model references and Pi-style short/fuzzy names are accepted; unavailable, ambiguous, or synthetic models fail only their native row. A `:thinking` suffix remains compatible, and an explicit call `thinking` wins over that suffix.
+The working directory defaults to the dispatching session's current directory. Explicit model values are resolved against Pi's refreshed authenticated registry, limited to the session's scoped models when scoping is configured. Canonical provider/model references and Pi-style short/fuzzy names are accepted; unavailable, ambiguous, or synthetic models fail only their native row. A `:thinking` suffix remains compatible, and an explicit call `thinking` wins over that suffix.
 
 To run independent work in parallel, emit all independent sibling `subagent` calls in the same assistant response, up to eight calls. Do not issue unrelated sequential tools between those calls. Then consume every complete synchronous result before continuing. Each native Pi tool row remains separate, and Ctrl+O remains Pi's global expansion toggle.
 

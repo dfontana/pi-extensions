@@ -82,6 +82,32 @@ describe("review-model-selector index", () => {
     assert.equal(result.details.thinking, "high");
   });
 
+  test("selects only from session-scoped models when scoping is configured", async () => {
+    let tool: RegisteredTool | undefined;
+    extension({ registerTool: (registered: RegisteredTool) => (tool = registered) } as unknown as ExtensionAPI);
+    assert.ok(tool);
+
+    const current = model("openai", "gpt-5.6-terra");
+    const unscopedSol = model("anthropic", "claude-opus-4-8");
+    const scopedPeer = model("anthropic", "claude-sonnet-4-6");
+    const result = await tool.execute(
+      "call",
+      { intelligence: "higher", thinking: "high" },
+      new AbortController().signal,
+      undefined,
+      {
+        model: current,
+        scopedModels: [{ model: current }, { model: scopedPeer }],
+        modelRegistry: {
+          refresh: async () => ({ aborted: false, errors: new Map() }),
+          getAvailable: () => [current, unscopedSol, scopedPeer],
+        },
+      },
+    );
+
+    assert.equal(result.details.model, "anthropic/claude-sonnet-4-6");
+  });
+
   test("stops before selecting a reviewer when refresh is aborted", async () => {
     let tool: RegisteredTool | undefined;
     extension({ registerTool: (registered: RegisteredTool) => (tool = registered) } as unknown as ExtensionAPI);

@@ -2,6 +2,7 @@ import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { modelParamSegments, resolvedModelSegment } from "../model-query/render.ts";
+import { selectableModels } from "../shared/model-pool.ts";
 import { compactRow } from "../shared/tool-row.ts";
 import { REVIEW_INTELLIGENCE_PREFERENCES, REVIEW_THINKING_LEVELS, canonicalModel, selectReviewModel } from "./selector.ts";
 
@@ -60,7 +61,7 @@ export default function (pi: ExtensionAPI) {
       signal?.throwIfAborted();
       const selection = selectReviewModel({
         current: ctx.model,
-        available: ctx.modelRegistry.getAvailable(),
+        available: selectableModels(ctx),
         intelligencePreference: params.intelligence,
         minimumContextWindow: params.minimumContextWindow,
         thinking: params.thinking ?? "high",

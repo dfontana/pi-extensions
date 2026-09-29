@@ -2,7 +2,8 @@
 
 Provides `select_review_model`, a reviewer-facing adapter around the shared [`model-query`](../model-query/README.md)
 resolver. It refreshes Pi's authenticated model registry and selects one deterministic reviewer relative to the
-active session model.
+active session model. Like `model_query`, candidates are limited to the session's scoped models when scoping is
+configured.
 
 ```jsonc
 {

@@ -30,6 +30,7 @@ import { collectSubagentEnvironment } from "./environment.ts";
 import { SubagentScheduler } from "./scheduler.ts";
 import { emptyTrackedUsage, formatUsage } from "./usage.ts";
 import { MODEL_THINKING_LEVELS, resolveModelReference, thinkingFromModelReference } from "../model-query/query.ts";
+import { selectableModels } from "../shared/model-pool.ts";
 import { compactRow, param, primary, resultText } from "../shared/tool-row.ts";
 
 export { MAX_ACTIVE_CHILDREN, MAX_OUTSTANDING_CALLS } from "./scheduler.ts";
@@ -538,7 +539,7 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
           const defaults = parentDefaults(ctx);
           await refreshModels(ctx.modelRegistry, signal);
           throwIfAborted(signal);
-          const modelSnapshot = { current: ctx.model, available: ctx.modelRegistry.getAvailable() };
+          const modelSnapshot = { current: ctx.model, available: selectableModels(ctx) };
           const agent =
             discovery.agents.find((candidate) => candidate.name.toLowerCase() === params.agent.toLowerCase())
             ?? discovery.agents.find((candidate) => candidate.name === GENERAL_AGENT_NAME)!;

@@ -1,5 +1,6 @@
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { selectableModels } from "../shared/model-pool.ts";
 import { compactRow } from "../shared/tool-row.ts";
 import { MODEL_THINKING_LEVELS, resolveModelQuery, type ModelQueryOptions, type ModelQueryResult } from "./query.ts";
 import { modelParamSegments, resolvedModelSegment } from "./render.ts";
@@ -63,7 +64,7 @@ export default function (pi: ExtensionAPI) {
       const result = resolveModelQuery({
         ...options,
         current: ctx.model,
-        available: ctx.modelRegistry.getAvailable(),
+        available: selectableModels(ctx),
       });
 
       return {

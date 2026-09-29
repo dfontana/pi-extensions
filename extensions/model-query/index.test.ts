@@ -94,6 +94,34 @@ describe("model-query index", () => {
     assert.deepEqual(result.details, { model: "openrouter/google/gemini-3-luna" });
   });
 
+  describe("restricts candidates to session-scoped models when scoping is configured", () => {
+    const current = model("openai-codex", "gpt-5.6-sol");
+    const sonnet = model("anthropic", "claude-sonnet-4-6");
+    const cases: { name: string; available: Model<Api>[]; scoped: Model<Api>[]; expected: string | RegExp }[] = [
+      { name: "no scoping uses every available model", available: [current, sonnet], scoped: [], expected: "anthropic/claude-sonnet-4-6" },
+      { name: "scoped model resolves", available: [current, sonnet], scoped: [current, sonnet], expected: "anthropic/claude-sonnet-4-6" },
+      { name: "available but unscoped model is rejected", available: [current, sonnet], scoped: [current], expected: /not available/ },
+      { name: "scoped model without auth is rejected", available: [current], scoped: [current, sonnet], expected: /not available/ },
+    ];
+    for (const { name, available, scoped, expected } of cases) {
+      test(name, async () => {
+        let tool: RegisteredTool | undefined;
+        extension({ registerTool: (registered: RegisteredTool) => (tool = registered) } as unknown as ExtensionAPI);
+        assert.ok(tool);
+        const run = tool.execute("call", { model: "anthropic/claude-sonnet-4-6" }, undefined, undefined, {
+          model: current,
+          scopedModels: scoped.map((scopedModel) => ({ model: scopedModel })),
+          modelRegistry: {
+            refresh: async () => ({ aborted: false, errors: new Map() }),
+            getAvailable: () => available,
+          },
+        });
+        if (typeof expected === "string") assert.equal((await run).details.model, expected);
+        else await assert.rejects(run, expected);
+      });
+    }
+  });
+
   test("stops before selecting a model when refresh is aborted", async () => {
     let tool: RegisteredTool | undefined;
     extension({ registerTool: (registered: RegisteredTool) => (tool = registered) } as unknown as ExtensionAPI);

@@ -101,6 +101,7 @@ function setup(options: {
   run?: SubagentRunner;
   refresh?: (options: { signal: AbortSignal }) => Promise<{ aborted?: boolean }>;
   getAvailable?: () => any[];
+  scopedModels?: string[];
   onSpawn?: (environment: Record<string, string>) => void;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "subagent-extension-"));
@@ -163,6 +164,7 @@ function setup(options: {
   const ctx = {
     cwd: "/parent/worktree",
     model: current,
+    scopedModels: (options.scopedModels ?? []).map((reference, index) => ({ model: makeAvailable(reference, index) })),
     thinkingLevel: "medium",
     modelRegistry: {
       refresh: async (options_: { signal: AbortSignal }) => {
@@ -470,6 +472,17 @@ describe("subagent", () => {
     await assert.rejects(setupFailure.call({ agent: "worker", task: "bad setup" }), /registry setup failed/);
     await setupFailure.call({ agent: "worker", task: "recovered" });
     assert.equal(reads, 2);
+  });
+
+  it("resolves model overrides only against session-scoped models when scoping is configured", async () => {
+    const requests: RunRequest[] = [];
+    const { call } = setup({
+      scopedModels: ["parent-provider/parent-model", "override/model"],
+      run: async (request) => { requests.push(request); return successful(request); },
+    });
+    await assert.rejects(call({ agent: "worker", task: "unscoped", model: "agent/model" }), /not available/);
+    await call({ agent: "worker", task: "scoped", model: "override/model" });
+    assert.deepEqual(requests.map((request) => [request.task, request.model]), [["scoped", "override/model"]]);
   });
 
   it("lets one invalid model row fail while a sibling resolves and runs", async () => {

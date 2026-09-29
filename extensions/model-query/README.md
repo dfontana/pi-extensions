@@ -14,6 +14,9 @@ Provides the `model_query` tool for resolving one usable model from Pi's authent
 
 All fields are policy. The tool refreshes Pi's registry and obtains the active model and authenticated
 available-model snapshot from its extension context; callers cannot provide or override that runtime state.
+When the session has scoped models (`/scoped-models`, `--models`, or `enabledModels`), candidates are limited to
+scoped models that are still authenticated; otherwise every authenticated model is eligible
+(`extensions/shared/model-pool.ts`).
 It returns only:
 
 ```json
