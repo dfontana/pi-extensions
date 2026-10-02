@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Text, visibleWidth } from "@earendil-works/pi-tui";
-import { compactRow, SPINNER_FRAMES, summary } from "./tool-row.ts";
+import { compactRow, SPINNER_FRAMES, summary, tail } from "./tool-row.ts";
 
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
@@ -117,6 +117,46 @@ describe("shared tool-row", () => {
     const body = custom.renderResult(result("thrown"), { expanded: true, isPartial: false }, theme, failed);
     assert.deepEqual(body.render(80).map((line) => line.trimEnd()), ["error:7"]);
     assert.match(custom.renderCall(ctx.args, theme, failed).render(80)[0], /^demo ✗ 7 hits$/);
+  });
+
+  it("shrinks a tail segment from its start when collapsed and shows it in full when expanded", () => {
+    const path = "/very/long/directory/structure/src/file.ts";
+    // Styling is zero-width and applied after truncation, so escape codes are never cut.
+    const underline = (text: string) => `\x1b[4m${text}\x1b[24m`;
+    const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+    const pathRow = compactRow<{ path?: string; flag?: string; note?: string }>({
+      name: "read",
+      title: ({ args }) => [args.flag, args.path && tail(args.path, underline), args.note],
+    });
+    const render = (args: { path?: string; flag?: string; note?: string }, width: number, expanded = false) =>
+      pathRow.renderCall(args, theme, { ...context({}, { expanded }), args }).render(width);
+    const cases = [
+      { label: "fits", args: { path }, width: 80, expected: [`read ✓ ${path}`] },
+      { label: "start-truncated", args: { path }, width: 30, expected: ["read ✓ ...tructure/src/file.ts"] },
+      {
+        label: "fixed segments on both sides stay whole",
+        args: { path, flag: "L5", note: "+3" },
+        width: 33,
+        expected: ["read ✓ L5 ...cture/src/file.ts +3"],
+      },
+      {
+        label: "no room for the tail falls back to end truncation",
+        args: { path, flag: "x".repeat(30) },
+        width: 40,
+        expected: [`read ✓ ${"x".repeat(30)}...`],
+      },
+      { label: "multi-line tail stays on one line", args: { path: "a\nb" }, width: 80, expected: ["read ✓ a b"] },
+    ];
+    for (const { label, args, width, expected } of cases) {
+      const lines = render(args, width);
+      assert.deepEqual(lines.map(plain), expected, label);
+      assert.ok(visibleWidth(lines[0]) <= width, `${label}: fits width`);
+    }
+
+    const expanded = render({ path, note: "+3" }, 30, true);
+    assert.ok(expanded.length > 1);
+    assert.equal(plain(expanded.join("")).replace(/\s+/g, ""), `read✓${path}+3`);
+    assert.match(render({ path }, 30)[0], /\x1b\[4m\.\.\.[^\x1b]+\x1b\[24m$/);
   });
 
   it("degrades to the bare name when a title formatter throws, since the title renders outside pi's guard", () => {

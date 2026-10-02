@@ -3,7 +3,9 @@
  * this repo draws the same way.
  *
  * - The title line is `name <status> <segments…>`. Collapsed, it is a single
- *   line truncated with "..."; expanded, it wraps so nothing is hidden.
+ *   line truncated with "..."; expanded, it wraps so nothing is hidden. One
+ *   segment may be a `tail()` (e.g. a file path) that gives up its leading end
+ *   first, so the most specific part stays visible.
  * - Collapsed rows have no body. Expanded rows show the tool's body on success
  *   (or while running, if the tool opts in) and the error text on failure.
  * - Parameters always render in the title, including on failure, so the
@@ -20,7 +22,7 @@
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { isToolRowSelected, toolRowExpanded, toolRowRendered, trackToolRow } from "./tool-focus.ts";
 import { formatTokens } from "./usage-helpers.ts";
 
@@ -41,6 +43,8 @@ export interface RowTheme {
 /** The subset of pi's ToolRenderContext the row reads. */
 export interface RowContext<Args> {
   args: Args;
+  /** Working directory of the call, when the host provides one. */
+  cwd?: string;
   /** Stable per tool call; rows without one cannot be selected. */
   toolCallId?: string;
   state: any;
@@ -57,6 +61,7 @@ export interface TitleInput<Args, Details> {
   details: Details | undefined;
   status: RowStatus;
   theme: RowTheme;
+  cwd?: string;
 }
 
 export interface BodyInput<Args, Details> extends TitleInput<Args, Details> {
@@ -65,7 +70,22 @@ export interface BodyInput<Args, Details> extends TitleInput<Args, Details> {
   lastComponent: Component | undefined;
 }
 
-export type Segment = string | false | 0 | null | undefined;
+/** A segment that, when the collapsed title overflows, is truncated from its start ("..." + end). */
+export interface TailSegment {
+  tail: string;
+  style: (text: string) => string;
+}
+
+export type Segment = string | TailSegment | false | 0 | null | undefined;
+
+/**
+ * Mark the segment that shrinks first, from its leading end. `style` is applied
+ * after truncation so escape codes are never cut. Only the first tail in a
+ * title shrinks; later ones render as plain segments.
+ */
+export function tail(text: string, style: (text: string) => string = (s) => s): TailSegment {
+  return { tail: text, style };
+}
 
 export interface CompactRowSpec<Args, Details> {
   /** Tool name shown first in the title. */
@@ -103,9 +123,52 @@ interface RowState<Details> {
 
 const EMPTY: Component = { render: () => [], invalidate: () => {} };
 
+interface TitleLine {
+  /** Name, status, and segments before the tail. */
+  before: string;
+  tail?: TailSegment;
+  after: string;
+  animate: boolean;
+}
+
+const ELLIPSIS = "...";
+/** Below this many columns a shrunken tail would be little more than "...", so the line end-truncates instead. */
+const MIN_TAIL_WIDTH = ELLIPSIS.length + 1;
+
+function joinTitle(...parts: (string | undefined)[]): string {
+  return parts.filter((part) => part).join(" ");
+}
+
+/** Keep the end of `text`, prefixed with "...", within `width` columns. */
+function truncateStart(text: string, width: number): string {
+  if (visibleWidth(text) <= width) return text;
+  const chars = [...text];
+  let kept = "";
+  for (let i = chars.length - 1; i >= 0; i--) {
+    if (visibleWidth(chars[i] + kept) + ELLIPSIS.length > width) break;
+    kept = chars[i] + kept;
+  }
+  return ELLIPSIS + kept;
+}
+
+/** One collapsed line: the tail shrinks from its start first, then the whole line truncates at its end. */
+function collapsedLine({ before, tail, after }: TitleLine, width: number): string {
+  // Segments may carry raw newlines (e.g. a multi-line query); a collapsed row stays one line.
+  const flat = (text: string) => text.replace(/[\r\n\t]+/g, " ");
+  let line = flat(joinTitle(before, after));
+  if (tail) {
+    const text = flat(tail.tail);
+    const fixed = visibleWidth(flat(before)) + 1 + (after ? visibleWidth(flat(after)) + 1 : 0);
+    const room = width - fixed;
+    const shown = room >= MIN_TAIL_WIDTH ? truncateStart(text, room) : text;
+    line = flat(joinTitle(before, tail.style(shown), after));
+  }
+  return truncateToWidth(line, width, ELLIPSIS);
+}
+
 /** Title line: truncated with "..." when collapsed, wrapped when expanded. */
 class CompactTitle implements Component {
-  private build: () => { line: string; animate: boolean } = () => ({ line: "", animate: false });
+  private build: () => TitleLine = () => ({ before: "", after: "", animate: false });
   private expanded = false;
   private id: string | undefined;
   private invalidateRow: () => void = () => {};
@@ -115,7 +178,7 @@ class CompactTitle implements Component {
     expanded: boolean,
     id: string | undefined,
     invalidateRow: () => void,
-    build: () => { line: string; animate: boolean },
+    build: () => TitleLine,
   ): void {
     this.expanded = expanded;
     this.id = id;
@@ -124,7 +187,8 @@ class CompactTitle implements Component {
   }
 
   render(width: number): string[] {
-    const { line, animate } = this.build();
+    const title = this.build();
+    const { animate } = title;
     // Animate only while mounted: each render schedules at most one tick, so a
     // row that is no longer drawn stops ticking on its own.
     if (animate && !this.tick) {
@@ -136,9 +200,8 @@ class CompactTitle implements Component {
     }
     const safeWidth = Math.max(1, width);
     const lines = this.expanded
-      ? wrapTextWithAnsi(line, safeWidth)
-      : // Segments may carry raw newlines (e.g. a multi-line query); a collapsed row stays one line.
-        [truncateToWidth(line.replace(/[\r\n\t]+/g, " "), safeWidth, "...")];
+      ? wrapTextWithAnsi(joinTitle(title.before, title.tail && title.tail.style(title.tail.tail), title.after), safeWidth)
+      : [collapsedLine(title, safeWidth)];
     // Added after wrapping/truncation so the invisible probe marker never affects layout.
     const probe = toolRowRendered(this.id, safeWidth);
     if (probe && lines.length > 0) lines[0] = probe + lines[0];
@@ -198,15 +261,22 @@ export function compactRow<Args, Details = unknown>(spec: CompactRowSpec<Args, D
         const name = (isToolRowSelected(id) ? `${theme.fg("accent", "▶")} ` : "") + theme.fg("toolTitle", theme.bold(spec.name));
         // The title is built inside render(), outside pi's renderer guard, so a
         // throwing formatter must degrade to the bare name rather than crash the TUI.
-        let segments: string[];
+        let segments: Segment[];
         try {
-          segments = spec.title({ args: current, details: row.details, status, theme }).filter(
-            (segment): segment is string => typeof segment === "string" && segment.length > 0,
-          );
+          segments = spec.title({ args: current, details: row.details, status, theme, cwd: context.cwd });
         } catch {
           segments = [];
         }
-        return { line: [name, statusIcon(status, theme), ...segments].join(" "), animate: status === "running" };
+        const before = [name, statusIcon(status, theme)];
+        const after: string[] = [];
+        let tailSegment: TailSegment | undefined;
+        for (const segment of segments) {
+          if (!segment) continue;
+          if (typeof segment === "string") (tailSegment ? after : before).push(segment);
+          else if (!tailSegment && segment.tail) tailSegment = segment;
+          else if (segment.tail) after.push(segment.style(segment.tail));
+        }
+        return { before: before.join(" "), tail: tailSegment, after: after.join(" "), animate: status === "running" };
       });
       return title;
     },
@@ -224,6 +294,7 @@ export function compactRow<Args, Details = unknown>(spec: CompactRowSpec<Args, D
         details: row.details,
         status,
         theme,
+        cwd: context.cwd,
         result,
         isPartial,
         lastComponent: context.lastComponent,

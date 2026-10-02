@@ -156,7 +156,7 @@ async function assertEnabledCount(binding: Binding, cwd: string, count: number, 
 function validate(binding: Binding, args: Record<string, unknown>) {
   return validateToolArguments(
     { name: "mcp", description: binding.tool.description, parameters: binding.tool.parameters } as any,
-    { type: "toolCall" as const, id: "1", name: "mcp", arguments: args },
+    { type: "toolCall" as const, id: "1", name: "mcp", arguments: args as any },
   );
 }
 

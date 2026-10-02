@@ -22,6 +22,7 @@ Each extension has its own README covering configuration, provided tools/command
 
 | Extension | Purpose |
 |---|---|
+| [builtin-rows](extensions/builtin-rows/README.md) | Compact one-line rows for pi's built-in read, write, bash, grep, find, and ls tools |
 | [claude-marketplace](extensions/claude-marketplace/README.md) | Pull skills from Claude Code plugin marketplaces into Pi, auto-synced on a schedule |
 | [copy-response](extensions/copy-response/README.md) | `/cp` to copy the last response or a code block, whitespace-normalized so formatting survives pasting |
 | [gateway](extensions/gateway/README.md) | Register existing model providers against a locally configured internal gateway without defining model catalogs |
@@ -40,7 +41,7 @@ Each extension has its own README covering configuration, provided tools/command
 
 ### Tool rows
 
-Every tool in this package (`subagent`, `model_query`, `select_review_model`, `web_search`, `web_fetch`, `mcp`, the `pane_*` tools, and YAML-defined scoped tools) shares one compact row renderer (`extensions/shared/tool-row.ts`). Collapsed, each call is one title line: `name <state> <params…> → <result summary>`, truncated with `...` instead of wrapping. The state icon is a spinner while running, `·` while queued, and `✓`/`✗` once settled. Parameters stay in the title on failure. Expanding (Ctrl+O) wraps the full title and shows the result, or the error details. In fullscreen mode (`tuiMode: "fullscreen"`) with [helix-mode](extensions/helix-mode/README.md) in Normal mode, `,`/`.` select the previous/next of these rows (marked `▶`) and scroll it to the top of the transcript, `Enter` expands or collapses just that row, and `Escape` clears the selection. A row toggled this way keeps its state until the next Ctrl+O, which resets every row. The keys are inactive in regular mode, which cannot scroll the terminal; switching back to fullscreen restores the selection.
+Every tool in this package (`subagent`, `model_query`, `select_review_model`, `web_search`, `web_fetch`, `mcp`, the `pane_*` tools, YAML-defined scoped tools, and, through [builtin-rows](extensions/builtin-rows/README.md), pi's built-in tools other than `edit`) shares one compact row renderer (`extensions/shared/tool-row.ts`). Collapsed, each call is one title line: `name <state> <params…> → <result summary>`, truncated with `...` instead of wrapping. The state icon is a spinner while running, `·` while queued, and `✓`/`✗` once settled. Parameters stay in the title on failure. Expanding (Ctrl+O) wraps the full title and shows the result, or the error details. In fullscreen mode (`tuiMode: "fullscreen"`) with [helix-mode](extensions/helix-mode/README.md) in Normal mode, `,`/`.` select the previous/next of these rows (marked `▶`) and scroll it to the top of the transcript, `Enter` expands or collapses just that row, and `Escape` clears the selection. A row toggled this way keeps its state until the next Ctrl+O, which resets every row. The keys are inactive in regular mode, which cannot scroll the terminal; switching back to fullscreen restores the selection.
 
 ## Skills
 
@@ -48,7 +49,7 @@ Every tool in this package (`subagent`, `model_query`, `select_review_model`, `w
 - **run-review** — full adversarial review/fix workflow for explicitly deep, comprehensive, multi-agent, broad, or high-risk reviews: four sibling subagent investigations emitted in one response, an independent synthesis reviewer, and a bounded fix/re-review loop.
 - **run-plan** — consolidates review feedback, delegates implementation to a persistent large-context agent, then invokes the full `run-review` workflow with that implementer as the fixer.
 
-A repo-local **web-access-smoke-test** skill (in `.pi/skills/`, not shipped with the package) provides an end-to-end check of the web-access tools after code changes.
+Repo-local skills (in `.pi/skills/`, not shipped with the package): **web-access-smoke-test** provides an end-to-end check of the web-access tools after code changes, and **bump-pi-version** bumps the pi dependencies and re-verifies builtin-rows against the new version.
 
 `quick-review`, `run-review`, and `run-plan` require this package's `subagent` and review-model selection tools; they preflight those tools and return enablement guidance rather than silently degrading.
 
