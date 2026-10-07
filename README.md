@@ -37,11 +37,12 @@ Each extension has its own README covering configuration, provided tools/command
 | [review-model-selector](extensions/review-model-selector/README.md) | `select_review_model` tool: deterministic adversarial-reviewer selection |
 | [scoped-tools](extensions/scoped-tools/README.md) | YAML-specified bash commands as validated agent tools with hidden, call-time computed parameters |
 | [subagent](extensions/subagent/README.md) | Lean synchronous one-call delegation to global agents, with sibling-call parallelism |
+| [todo](extensions/todo/README.md) | Minimal session-backed task list: one `todo` tool, a widget, and `/todo clear` / `/todo completed` |
 | [web-access](extensions/web-access/README.md) | `web_search` and `web_fetch` tools backed by configurable model providers |
 
 ### Tool rows
 
-Every tool in this package (`subagent`, `model_query`, `select_review_model`, `web_search`, `web_fetch`, `mcp`, the `pane_*` tools, YAML-defined scoped tools, and, through [builtin-rows](extensions/builtin-rows/README.md), pi's built-in tools other than `edit`) shares one compact row renderer (`extensions/shared/tool-row.ts`). Collapsed, each call is one title line: `name <state> <params…> → <result summary>`, truncated with `...` instead of wrapping. The state icon is a spinner while running, `·` while queued, and `✓`/`✗` once settled. Parameters stay in the title on failure. Expanding (Ctrl+O) wraps the full title and shows the result, or the error details. In fullscreen mode (`tuiMode: "fullscreen"`) with [helix-mode](extensions/helix-mode/README.md) in Normal mode, `,`/`.` select the previous/next of these rows (marked `▶`) and scroll it to the top of the transcript, `Enter` expands or collapses just that row, and `Escape` clears the selection. A row toggled this way keeps its state until the next Ctrl+O, which resets every row. The keys are inactive in regular mode, which cannot scroll the terminal; switching back to fullscreen restores the selection.
+Every tool in this package (`subagent`, `todo`, `model_query`, `select_review_model`, `web_search`, `web_fetch`, `mcp`, the `pane_*` tools, YAML-defined scoped tools, and, through [builtin-rows](extensions/builtin-rows/README.md), pi's built-in tools other than `edit`) shares one compact row renderer (`extensions/shared/tool-row.ts`). Collapsed, each call is one title line: `name <state> <params…> → <result summary>`, truncated with `...` instead of wrapping. The state icon is a spinner while running, `·` while queued, and `✓`/`✗` once settled. Parameters stay in the title on failure. Expanding (Ctrl+O) wraps the full title and shows the result, or the error details. In fullscreen mode (`tuiMode: "fullscreen"`) with [helix-mode](extensions/helix-mode/README.md) in Normal mode, `,`/`.` select the previous/next of these rows (marked `▶`) and scroll it to the top of the transcript, `Enter` expands or collapses just that row, and `Escape` clears the selection. A row toggled this way keeps its state until the next Ctrl+O, which resets every row. The keys are inactive in regular mode, which cannot scroll the terminal; switching back to fullscreen restores the selection.
 
 ## Skills
 
@@ -67,6 +68,5 @@ Repo-local skills (in `.pi/skills/`, not shipped with the package): **web-access
 ## Installed Packages
 
 - npm:@juicesharp/rpiv-ask-user-question
-- npm:@tintinweb/pi-tasks
 - npm:@plannotator/pi-extension
 - git:github.com/dfontana/pi-extensions
