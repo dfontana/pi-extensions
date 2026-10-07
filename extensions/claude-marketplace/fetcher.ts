@@ -76,6 +76,17 @@ async function execGit(runner: ExecRunner, args: string[], cwd: string): Promise
   );
 }
 
+/** Fetch just the configured ref so FETCH_HEAD cannot select another remote branch. */
+async function fetchAndReset(
+  entry: MarketplaceEntry,
+  runner: ExecRunner,
+  dest: string,
+): Promise<void> {
+  const branch = entry.branch ?? "main";
+  await execGit(runner, ["fetch", "--depth=1", "origin", branch], dest);
+  await execGit(runner, ["reset", "--hard", "FETCH_HEAD"], dest);
+}
+
 // ─── Clone ────────────────────────────────────────────────────────────────────
 
 /**
@@ -124,9 +135,11 @@ export async function ensureCloned(entry: MarketplaceEntry, runner: ExecRunner):
  * Pull the latest changes for a marketplace if it is stale.
  *
  * - Local paths: always a no-op.
- * - Remote sources: `git fetch --depth=1 origin && git reset --hard FETCH_HEAD`
- *   inside the clone dir.  Using `reset --hard` rather than `pull --ff-only`
- *   keeps shallow clones working even when the remote history has been rewritten.
+ * - Remote sources: fetch the configured ref (default `main`), then reset to
+ *   `FETCH_HEAD`. Fetching a single ref prevents another remote branch from
+ *   becoming the selected `FETCH_HEAD` commit in repositories with many branches.
+ *   Using `reset --hard` rather than `pull --ff-only` keeps shallow clones
+ *   working even when the remote history has been rewritten.
  *
  * @param entry          Marketplace config entry.
  * @param intervalHours  Hours between refreshes (0 = never).
@@ -149,8 +162,7 @@ export async function pullIfStale(
   }
 
   try {
-    await execGit(runner, ["fetch", "--depth=1", "origin"], dest);
-    await execGit(runner, ["reset", "--hard", "FETCH_HEAD"], dest);
+    await fetchAndReset(entry, runner, dest);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -167,7 +179,8 @@ export async function pullIfStale(
  * staleness.  Used by the `/marketplace update` command.
  *
  * - Local paths: no-op.
- * - Remote sources: `git fetch --depth=1 origin && git reset --hard FETCH_HEAD`.
+ * - Remote sources: fetch the configured ref (default `main`), then reset to
+ *   `FETCH_HEAD`.
  *
  * @throws if the fetch/reset command fails.
  */
@@ -181,8 +194,7 @@ export async function forcePull(entry: MarketplaceEntry, runner: ExecRunner): Pr
   }
 
   try {
-    await execGit(runner, ["fetch", "--depth=1", "origin"], dest);
-    await execGit(runner, ["reset", "--hard", "FETCH_HEAD"], dest);
+    await fetchAndReset(entry, runner, dest);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(

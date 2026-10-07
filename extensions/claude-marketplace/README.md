@@ -56,7 +56,7 @@ The minimum configuration is:
 - Cache layout under `~/.pi/agent/` (respects `PI_CODING_AGENT_DIR`):
   - `marketplace-cache/<name>/` — shallow clone of each remote marketplace
   - `marketplace-state.json` — last-updated timestamps
-- Clones are `--depth=1`; updates run `git fetch --depth=1 && git reset --hard FETCH_HEAD`, so any local edits inside the cache are discarded. If you need full history or local edits, clone manually and use a local `source`.
+- Clones are `--depth=1`; updates fetch only the configured ref (default `main`) before resetting to `FETCH_HEAD`, so unrelated branches in a large repository cannot be selected accidentally. Updates discard local edits inside the cache. If you need full history or local edits, clone manually and use a local `source`.
 - Only **skills** (`skills/*/SKILL.md`) are surfaced. Claude Code `agents/`, `commands/`, `hooks/`, and MCP server configs have no Pi equivalent and are ignored.
 - After a background update or plugin toggle, run `/reload` (or restart Pi) to pick up changes.
 - Plugin `source` paths inside `marketplace.json` that resolve outside the marketplace root are skipped (path-traversal guard, mirroring Claude Code's installer).

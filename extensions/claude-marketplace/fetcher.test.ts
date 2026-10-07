@@ -88,7 +88,7 @@ describe("claude-marketplace fetcher", () => {
     }]);
   });
 
-  test("fetches before resetting and keeps the Git timeout", async () => {
+  test("fetches the default main ref before resetting and keeps the Git timeout", async () => {
     const marketplace = entry();
     mkdirSync(marketplaceCacheDir(marketplace.name), { recursive: true });
     const { calls, runner } = fakeRunner();
@@ -98,7 +98,7 @@ describe("claude-marketplace fetcher", () => {
     assert.deepEqual(calls, [
       {
         command: "git",
-        args: ["fetch", "--depth=1", "origin"],
+        args: ["fetch", "--depth=1", "origin", "main"],
         options: { cwd: marketplaceCacheDir(marketplace.name), timeout: 120_000 },
       },
       {
@@ -106,6 +106,18 @@ describe("claude-marketplace fetcher", () => {
         args: ["reset", "--hard", "FETCH_HEAD"],
         options: { cwd: marketplaceCacheDir(marketplace.name), timeout: 120_000 },
       },
+    ]);
+  });
+
+  test("fetches the configured ref for stale updates", async () => {
+    const marketplace = entry({ branch: "release/2026.10" });
+    mkdirSync(marketplaceCacheDir(marketplace.name), { recursive: true });
+    const { calls, runner } = fakeRunner();
+
+    assert.equal(await pullIfStale(marketplace, 24, runner), true);
+    assert.deepEqual(calls.map((call) => call.args), [
+      ["fetch", "--depth=1", "origin", "release/2026.10"],
+      ["reset", "--hard", "FETCH_HEAD"],
     ]);
   });
 
