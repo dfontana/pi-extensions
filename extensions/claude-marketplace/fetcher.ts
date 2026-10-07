@@ -283,9 +283,6 @@ export function resolvePluginPaths(entry: MarketplaceEntry): ResolvedPaths {
 
   for (const pluginName of entry.plugins) {
     if (disabledSet.has(pluginName)) {
-      console.info(
-        `[claude-marketplace] [${entry.name}] Plugin "${pluginName}" is disabled — skipping.`,
-      );
       continue;
     }
 
