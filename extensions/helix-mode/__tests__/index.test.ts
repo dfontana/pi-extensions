@@ -77,16 +77,18 @@ describe("helix-mode", () => {
     assert.equal(getKeybindings(), harness.keybindings);
     assert.equal(harness.keybindings.matches(home, "tui.altScreen.top"), false);
     assert.equal(harness.keybindings.matches(end, "tui.altScreen.bottom"), false);
-    assert.deepEqual(harness.keybindings.getKeys("tui.altScreen.top"), ["alt+home"]);
-    assert.deepEqual(harness.keybindings.getKeys("tui.altScreen.bottom"), ["alt+end"]);
+    assert.deepEqual(harness.keybindings.getKeys("tui.altScreen.top"), ["ctrl+home"]);
+    assert.deepEqual(harness.keybindings.getKeys("tui.altScreen.bottom"), ["ctrl+end"]);
 
     harness.keybindings.reload();
     assert.equal(harness.keybindings.matches(home, "tui.altScreen.top"), false);
     assert.equal(harness.keybindings.matches(end, "tui.altScreen.bottom"), false);
 
     pressLifecycleEvent(harness, "session_shutdown");
-    assert.equal(harness.keybindings.matches(home, "tui.altScreen.top"), true);
-    assert.equal(harness.keybindings.matches(end, "tui.altScreen.bottom"), true);
+    assert.equal(harness.keybindings.matches(home, "tui.altScreen.top"), false);
+    assert.equal(harness.keybindings.matches(end, "tui.altScreen.bottom"), false);
+    assert.deepEqual(harness.keybindings.getKeys("tui.altScreen.top"), ["ctrl+home"]);
+    assert.deepEqual(harness.keybindings.getKeys("tui.altScreen.bottom"), ["ctrl+end"]);
 
     pressLifecycleEvent(harness, "session_start");
     assert.equal(harness.keybindings.matches(home, "tui.altScreen.top"), false);
@@ -101,7 +103,9 @@ describe("helix-mode", () => {
     assert.ok(helixCommand);
     await helixCommand.handler("", harness.ctx);
 
-    assert.equal(harness.keybindings.matches("\x1b[H", "tui.altScreen.top"), true);
-    assert.equal(harness.keybindings.matches("\x1b[F", "tui.altScreen.bottom"), true);
+    assert.equal(harness.keybindings.matches("\x1b[H", "tui.altScreen.top"), false);
+    assert.equal(harness.keybindings.matches("\x1b[F", "tui.altScreen.bottom"), false);
+    assert.deepEqual(harness.keybindings.getKeys("tui.altScreen.top"), ["ctrl+home"]);
+    assert.deepEqual(harness.keybindings.getKeys("tui.altScreen.bottom"), ["ctrl+end"]);
   });
 });

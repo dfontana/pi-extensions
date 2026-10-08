@@ -8,9 +8,10 @@
  * loaded from pi's (non-exported) renderer module, so upstream rendering
  * changes still appear there.
  *
- * Both the factory options and the renderer module are pi internals, so the
- * override applies only on the pi version it was verified against; any other
- * version keeps pi's own rendering and warns. See .pi/skills/bump-pi-version.
+ * The factory options, shell-path normalization, and renderer module are pi
+ * internals, so the override applies only on the pi version it was verified
+ * against; any other version keeps pi's own rendering and warns. See
+ * .pi/skills/bump-pi-version.
  */
 
 import { homedir } from "node:os";
@@ -43,11 +44,12 @@ import {
 import { Container, type Component } from "@earendil-works/pi-tui";
 // Type-only, so it is erased at runtime: typecheck fails if pi moves or reshapes the renderer module.
 import type * as StockRendererModule from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/renderers/index.js";
+import type * as StockPathModule from "../../node_modules/@earendil-works/pi-coding-agent/dist/utils/paths.js";
 import { toolRowExpanded } from "../shared/tool-focus.ts";
 import { compactRow, countLabel, param, primary, tail, type Segment, type TitleInput } from "../shared/tool-row.ts";
 
 /** The pi version whose tool options and renderer module were last checked by hand. */
-const VERIFIED_PI_VERSION = "0.99.1";
+const VERIFIED_PI_VERSION = "1.1.0";
 
 // If pi adds a factory option, typecheck fails here: check whether pi now
 // passes it from settings (AgentSession._buildRuntime) and mirror it below.
@@ -60,6 +62,10 @@ const knownOptions: [
 void knownOptions;
 
 type Renderers = Pick<ToolDefinition<any, any>, "renderCall" | "renderResult">;
+type StockInternals = {
+  renderers: Record<keyof typeof titles, Renderers>;
+  normalizePath: typeof StockPathModule.normalizePath;
+};
 type Title<Args> = (input: TitleInput<Args, unknown>) => Segment[];
 
 /** cwd-relative inside the cwd, `~`-relative under home, absolute otherwise. */
@@ -166,11 +172,14 @@ function compactWithStockBody(name: string, stock: Renderers, title: Title<any>)
   };
 }
 
-async function loadStockRenderers(): Promise<Record<keyof typeof titles, Renderers> | string> {
+async function loadStockRenderers(): Promise<StockInternals | string> {
   if (VERSION !== VERIFIED_PI_VERSION) return `pi ${VERSION} is unverified (last verified ${VERIFIED_PI_VERSION})`;
   try {
-    const url = pathToFileURL(join(getPackageDir(), "dist/core/tools/renderers/index.js")).href;
-    const stock: typeof StockRendererModule = await import(url);
+    const packageDir = getPackageDir();
+    const rendererUrl = pathToFileURL(join(packageDir, "dist/core/tools/renderers/index.js")).href;
+    const pathUrl = pathToFileURL(join(packageDir, "dist/utils/paths.js")).href;
+    const stock: typeof StockRendererModule = await import(rendererUrl);
+    const paths: typeof StockPathModule = await import(pathUrl);
     const renderers = {
       read: stock.readRenderers,
       write: stock.writeRenderers,
@@ -180,9 +189,11 @@ async function loadStockRenderers(): Promise<Record<keyof typeof titles, Rendere
       ls: stock.lsRenderers,
     };
     const missing = Object.entries(renderers).filter(([, r]) => typeof r?.renderCall !== "function" || typeof r?.renderResult !== "function");
-    return missing.length ? `pi's renderers are missing for ${missing.map(([n]) => n).join(", ")}` : renderers;
+    return missing.length
+      ? `pi's renderers are missing for ${missing.map(([n]) => n).join(", ")}`
+      : { renderers, normalizePath: paths.normalizePath };
   } catch (error) {
-    return `could not load pi's renderers (${error instanceof Error ? error.message : String(error)})`;
+    return `could not load pi internals (${error instanceof Error ? error.message : String(error)})`;
   }
 }
 
@@ -199,12 +210,15 @@ export default function (pi: ExtensionAPI) {
     // Mirror the options pi builds its own tools with (AgentSession._buildRuntime).
     const settings = pi.getSettings();
     const read = { autoResizeImages: settings.images?.autoResize ?? true };
-    const bash = { commandPrefix: settings.shellCommandPrefix, shellPath: settings.shellPath?.replace(/^~(?=\/|$)/, homedir()) };
+    const bash = {
+      commandPrefix: settings.shellCommandPrefix,
+      shellPath: settings.shellPath ? stock.normalizePath(settings.shellPath) : settings.shellPath,
+    };
 
     const override = (definition: ToolDefinition<any, any>, name: keyof typeof titles, inactive = false) =>
       pi.registerTool({
         ...definition,
-        ...compactWithStockBody(name, stock[name], titles[name]),
+        ...compactWithStockBody(name, stock.renderers[name], titles[name]),
         // Registering activates a tool by default; grep/find/ls are off unless the user enables them.
         ...(inactive && { defaultActive: false }),
       });

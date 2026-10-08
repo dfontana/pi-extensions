@@ -5,20 +5,20 @@ import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { remapFullscreenScrollBindings } from "../keybindings.js";
 
 describe("helix-mode keybindings", () => {
-  it("moves fullscreen top/bottom jumps off Home/End and restores defaults", () => {
+  it("preserves Pi's Ctrl+Home/End fullscreen bindings and frees Home/End", () => {
     const keybindings = new KeybindingsManager({ ...TUI_KEYBINDINGS } as typeof TUI_KEYBINDINGS);
     const restore = remapFullscreenScrollBindings(keybindings);
 
-    assert.deepEqual(keybindings.getKeys("tui.altScreen.top"), ["alt+home"]);
-    assert.deepEqual(keybindings.getKeys("tui.altScreen.bottom"), ["alt+end"]);
+    assert.deepEqual(keybindings.getKeys("tui.altScreen.top"), ["ctrl+home"]);
+    assert.deepEqual(keybindings.getKeys("tui.altScreen.bottom"), ["ctrl+end"]);
     assert.equal(keybindings.matches("\x1b[H", "tui.altScreen.top"), false);
     assert.equal(keybindings.matches("\x1b[F", "tui.altScreen.bottom"), false);
 
     restore();
-    assert.deepEqual(keybindings.getKeys("tui.altScreen.top"), ["home"]);
-    assert.deepEqual(keybindings.getKeys("tui.altScreen.bottom"), ["end"]);
-    assert.equal(keybindings.matches("\x1b[H", "tui.altScreen.top"), true);
-    assert.equal(keybindings.matches("\x1b[F", "tui.altScreen.bottom"), true);
+    assert.deepEqual(keybindings.getKeys("tui.altScreen.top"), ["ctrl+home"]);
+    assert.deepEqual(keybindings.getKeys("tui.altScreen.bottom"), ["ctrl+end"]);
+    assert.equal(keybindings.matches("\x1b[H", "tui.altScreen.top"), false);
+    assert.equal(keybindings.matches("\x1b[F", "tui.altScreen.bottom"), false);
   });
 
   it("preserves other user-defined fullscreen scroll shortcuts", () => {
