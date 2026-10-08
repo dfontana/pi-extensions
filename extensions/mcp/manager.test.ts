@@ -4,26 +4,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { UnauthorizedError } from "@modelcontextprotocol/client";
 import { Manager, AuthError, type McpEnabledSnapshot, type ToolMeta } from "./manager.ts";
 import type { ServerDef } from "./config.ts";
 import { identity } from "./config.ts";
 
-const serverModule = pathToFileURL(fileURLToPath(import.meta.resolve("@modelcontextprotocol/sdk/server/index.js"))).href;
-const stdioModule = pathToFileURL(fileURLToPath(import.meta.resolve("@modelcontextprotocol/sdk/server/stdio.js"))).href;
+const serverModule = pathToFileURL(fileURLToPath(import.meta.resolve("@modelcontextprotocol/server"))).href;
+const stdioModule = pathToFileURL(fileURLToPath(import.meta.resolve("@modelcontextprotocol/server/stdio"))).href;
+const zodModule = pathToFileURL(fileURLToPath(import.meta.resolve("zod"))).href;
 
 function fixture(counter: string): string {
   const path = join(mkdtempSync(join(tmpdir(), "mcp-fixture-")), "server.mjs");
   writeFileSync(
     path,
     `import { appendFileSync } from "node:fs";
-     import { Server } from ${JSON.stringify(serverModule)};
+     import { McpServer } from ${JSON.stringify(serverModule)};
      import { StdioServerTransport } from ${JSON.stringify(stdioModule)};
-     import { ListToolsRequestSchema, CallToolRequestSchema } from ${JSON.stringify(pathToFileURL(fileURLToPath(import.meta.resolve("@modelcontextprotocol/sdk/types.js"))).href)};
+     import { z } from ${JSON.stringify(zodModule)};
      appendFileSync(${JSON.stringify(counter)}, "started\\n");
-     const server = new Server({ name: "fixture", version: "1" }, { capabilities: { tools: {} } });
-     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", inputSchema: { type: "object" } }] }));
-     server.setRequestHandler(CallToolRequestSchema, async (request) => ({ content: [{ type: "text", text: String(request.params.arguments?.value ?? "ok") }] }));
+     const server = new McpServer({ name: "fixture", version: "1" });
+     server.registerTool("echo", { inputSchema: z.object({ value: z.unknown().optional() }) }, async ({ value }) => ({ content: [{ type: "text", text: String(value ?? "ok") }] }));
      await server.connect(new StdioServerTransport());`,
   );
   return path;

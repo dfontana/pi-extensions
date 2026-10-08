@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
+import { auth as sdkAuth } from "@modelcontextprotocol/client";
 import { describe, it } from "node:test";
 
 // config.ts resolves the agent directory while it loads, so this must be set
@@ -115,9 +115,124 @@ describe("mcp auth", () => {
       assert.equal(await sdkAuth(provider, { serverUrl: url }), "AUTHORIZED");
       assert.equal(refreshGrantCount, 1);
       assert.equal(browserAuthorizationCount, 0);
-      assert.equal((readAuthState() as Record<string, { tokens: { access_token: string } }>)[url].tokens.access_token, "replacement-access");
+      const saved = (readAuthState() as Record<string, {
+        client: { issuer?: string };
+        tokens: { access_token: string; issuer?: string };
+      }>)[url];
+      assert.equal(saved.tokens.access_token, "replacement-access");
+      assert.equal(saved.tokens.issuer, url);
+      assert.equal(saved.client.issuer, url);
     } finally {
       server.close();
+    }
+  });
+
+  it("does not return OAuth credentials bound to a different issuer", async () => {
+    const url = "https://issuer-bound.example.test/mcp";
+    const issuer = "https://auth.example.test";
+    writeAuthState({
+      [url]: {
+        client: { client_id: "bound-client", issuer },
+        tokens: { access_token: "bound-token", issuer },
+      },
+    });
+    const provider = oauthProvider({ name: "issuer-bound", url, auth: "oauth" });
+
+    assert.equal(await provider.clientInformation({ issuer: "https://other-auth.example.test" }), undefined);
+    assert.equal(await provider.tokens({ issuer: "https://other-auth.example.test" }), undefined);
+    assert.equal((await provider.tokens())?.access_token, "bound-token");
+  });
+
+  it("completes browser OAuth and persists issuer-stamped credentials", async () => {
+    let codeGrantCount = 0;
+    const server = createServer((req, res) => {
+      const port = (server.address() as { port: number }).port;
+      const base = `http://localhost:${port}`;
+      const path = new URL(req.url ?? "/", base).pathname;
+      if (req.method === "GET" && path === "/.well-known/oauth-authorization-server") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          issuer: base,
+          authorization_endpoint: `${base}/authorize`,
+          token_endpoint: `${base}/token`,
+          registration_endpoint: `${base}/register`,
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          code_challenge_methods_supported: ["S256"],
+          authorization_response_iss_parameter_supported: true,
+        }));
+        return;
+      }
+      if (req.method === "POST" && path === "/register") {
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+        req.on("end", () => {
+          const metadata = JSON.parse(body) as Record<string, unknown>;
+          res.writeHead(201, { "content-type": "application/json" });
+          res.end(JSON.stringify({
+            client_id: "browser-client",
+            redirect_uris: metadata.redirect_uris ?? [],
+            grant_types: metadata.grant_types ?? ["authorization_code", "refresh_token"],
+            response_types: metadata.response_types ?? ["code"],
+            token_endpoint_auth_method: metadata.token_endpoint_auth_method ?? "none",
+          }));
+        });
+        return;
+      }
+      if (req.method === "POST" && path === "/token") {
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+        req.on("end", () => {
+          const params = new URLSearchParams(body);
+          assert.equal(params.get("grant_type"), "authorization_code");
+          assert.equal(params.get("code"), "browser-code");
+          codeGrantCount++;
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ access_token: "browser-access", refresh_token: "browser-refresh", token_type: "bearer" }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    const port = (server.address() as { port: number }).port;
+    const url = `http://localhost:${port}`;
+    let browserOpenCount = 0;
+    let submitWrongState = true;
+    const openBrowserFn = async (authorizationUrl: string): Promise<void> => {
+      browserOpenCount++;
+      const authorization = new URL(authorizationUrl);
+      const redirect = authorization.searchParams.get("redirect_uri");
+      assert.ok(redirect, "authorization URL includes the callback URI");
+      const callback = new URL(redirect);
+      callback.hostname = "127.0.0.1";
+      callback.searchParams.set("code", "browser-code");
+      callback.searchParams.set("iss", url);
+      const state = authorization.searchParams.get("state");
+      assert.ok(state, "authorization URL includes a CSRF state");
+      callback.searchParams.set("state", submitWrongState ? "wrong-state" : state);
+      const response = await fetch(callback);
+      assert.equal(response.status, 200);
+    };
+
+    try {
+      const def = { name: "browser-server", url, auth: "oauth" as const };
+      await assert.rejects(
+        () => authInteractive(def, { openBrowserFn, deadlineMs: 5_000 }),
+        (error) => error instanceof AuthError && /callback state did not match/.test(error.message),
+      );
+      assert.equal(codeGrantCount, 0, "a mismatched state must not exchange the authorization code");
+      submitWrongState = false;
+      await authInteractive(def, { openBrowserFn, deadlineMs: 5_000 });
+      assert.equal(browserOpenCount, 2);
+      assert.equal(codeGrantCount, 1);
+      const saved = (readAuthState() as Record<string, { client?: { issuer?: string }; tokens?: { access_token: string; issuer?: string } }>)[url];
+      assert.equal(saved.tokens?.access_token, "browser-access");
+      assert.equal(saved.tokens?.issuer, url);
+      assert.equal(saved.client?.issuer, url);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 

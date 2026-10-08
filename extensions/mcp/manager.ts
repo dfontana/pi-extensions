@@ -13,10 +13,8 @@
  * on a latched server fail fast; Shift+R and Shift+A clear the latch first.
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport, UnauthorizedError } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { AuthError, authImplicit, bearerHeaders, oauthProvider } from "./auth.ts";
 import { identity, readState, type ServerDef, transportKind, writeState } from "./config.ts";
 
@@ -438,7 +436,7 @@ export class Manager {
     if (!this.conns.has(name)) await this.connect(name, signal);
     const client = this.conns.get(name)!.client;
     this.touch(name);
-    const res = (await client.callTool({ name: tool, arguments: args }, undefined, { signal })) as {
+    const res = (await client.callTool({ name: tool, arguments: args }, { signal })) as {
       content?: Array<{ type: string; text?: string }>;
       isError?: boolean;
     };

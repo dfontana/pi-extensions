@@ -1,14 +1,14 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { z } from "zod";
 
-const server = new Server({ name: "echo", version: "1" }, { capabilities: { tools: {} } });
-server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [{
-  name: "echo",
-  description: "Echo text back unchanged",
-  inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-}] }));
-server.setRequestHandler(CallToolRequestSchema, ({ params }) => ({
-  content: [{ type: "text", text: String(params.arguments?.text ?? "") }],
-}));
+const server = new McpServer({ name: "echo", version: "1" });
+server.registerTool(
+  "echo",
+  {
+    description: "Echo text back unchanged",
+    inputSchema: z.object({ text: z.string() }),
+  },
+  async ({ text }) => ({ content: [{ type: "text", text }] }),
+);
 await server.connect(new StdioServerTransport());

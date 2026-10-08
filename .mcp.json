@@ -3,6 +3,10 @@
     "echo": {
       "command": "node",
       "args": ["extensions/mcp/echo-server.mjs"]
+    },
+    "doist": {
+      "type": "http",
+      "url": "https://ai.todoist.net/mcp"
     }
   }
 }

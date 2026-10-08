@@ -21,13 +21,16 @@
 
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { auth, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import type {
-  OAuthClientInformationFull,
-  OAuthClientInformationMixed,
-  OAuthClientMetadata,
-  OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  auth,
+  type OAuthClientInformationContext,
+  type OAuthClientMetadata,
+  type OAuthDiscoveryState,
+  type OAuthClientProvider,
+  type StoredOAuthClientInformation,
+  type StoredOAuthTokens,
+} from "@modelcontextprotocol/client";
 import { readState, type ServerDef, writeState } from "./config.ts";
 
 const AUTH_FILE = "auth.json";
@@ -61,11 +64,13 @@ export class AuthError extends Error {
 // ---- Storage ---------------------------------------------------------------
 
 interface AuthRecord {
-  client?: OAuthClientInformationFull;
+  client?: StoredOAuthClientInformation;
   /** Unix-ms timestamp recorded when the DCR response was saved. */
   registeredAt?: number;
-  tokens?: OAuthTokens;
+  tokens?: StoredOAuthTokens;
   codeVerifier?: string;
+  authorizationState?: string;
+  discoveryState?: OAuthDiscoveryState;
 }
 type AuthStore = Record<string, AuthRecord>;
 
@@ -101,21 +106,36 @@ class FileProvider implements OAuthClientProvider {
     };
   }
 
-  clientInformation(): OAuthClientInformationMixed | undefined {
+  clientInformation(ctx?: OAuthClientInformationContext): StoredOAuthClientInformation | undefined {
     const stored = this.read().client;
-    if (stored) return stored;
+    if (stored) {
+      if (!ctx || stored.issuer === ctx.issuer) return stored;
+      if (stored.issuer) return undefined;
+      const migrated = { ...stored, issuer: ctx.issuer };
+      this.write({ client: migrated });
+      return migrated;
+    }
     if (this.def.oauth?.clientId) {
-      return { client_id: this.def.oauth.clientId, client_secret: this.def.oauth.clientSecret };
+      return {
+        client_id: this.def.oauth.clientId,
+        client_secret: this.def.oauth.clientSecret,
+        ...(ctx ? { issuer: ctx.issuer } : {}),
+      };
     }
     return undefined;
   }
-  saveClientInformation(info: OAuthClientInformationFull): void {
+  saveClientInformation(info: StoredOAuthClientInformation): void {
     this.write({ client: info, registeredAt: Date.now() });
   }
-  tokens(): OAuthTokens | undefined {
-    return this.read().tokens;
+  tokens(ctx?: OAuthClientInformationContext): StoredOAuthTokens | undefined {
+    const stored = this.read().tokens;
+    if (!stored || !ctx || stored.issuer === ctx.issuer) return stored;
+    if (stored.issuer) return undefined;
+    const migrated = { ...stored, issuer: ctx.issuer };
+    this.write({ tokens: migrated });
+    return migrated;
   }
-  saveTokens(tokens: OAuthTokens): void {
+  saveTokens(tokens: StoredOAuthTokens): void {
     this.write({ tokens });
   }
   saveCodeVerifier(v: string): void {
@@ -125,6 +145,29 @@ class FileProvider implements OAuthClientProvider {
     const v = this.read().codeVerifier;
     if (!v) throw new Error("missing PKCE code verifier — restart authentication");
     return v;
+  }
+  state(): string {
+    const state = randomUUID();
+    this.write({ authorizationState: state });
+    return state;
+  }
+  consumeAuthorizationState(actual: string | undefined): boolean {
+    const store = readState<AuthStore>(AUTH_FILE, {});
+    const rec = store[this.key];
+    const expected = rec?.authorizationState;
+    if (!expected || !actual) return false;
+    const expectedBytes = Buffer.from(expected);
+    const actualBytes = Buffer.from(actual);
+    if (expectedBytes.length !== actualBytes.length || !timingSafeEqual(expectedBytes, actualBytes)) return false;
+    delete rec.authorizationState;
+    writeState(AUTH_FILE, store);
+    return true;
+  }
+  saveDiscoveryState(state: OAuthDiscoveryState): void {
+    this.write({ discoveryState: state });
+  }
+  discoveryState(): OAuthDiscoveryState | undefined {
+    return this.read().discoveryState;
   }
   redirectToAuthorization(url: URL): void {
     this.authUrl = url;
@@ -137,7 +180,10 @@ class FileProvider implements OAuthClientProvider {
     if (scope === "all") delete store[this.key];
     else if (scope === "tokens") delete rec.tokens;
     else if (scope === "client") delete rec.client;
-    else if (scope === "verifier") delete rec.codeVerifier;
+    else if (scope === "verifier") {
+      delete rec.codeVerifier;
+      delete rec.authorizationState;
+    } else if (scope === "discovery") delete rec.discoveryState;
     writeState(AUTH_FILE, store);
   }
 }
@@ -177,14 +223,14 @@ const RESULT_PAGE = (ok: boolean, detail: string) =>
 /** Localhost callback server that resolves with the `code` from the redirect. */
 async function startCallback(redirectUri?: string): Promise<{
   redirect: string;
-  code: Promise<string>;
+  code: Promise<{ code: string; iss?: string; state?: string }>;
   close: () => void;
 }> {
   const target = redirectUri ? new URL(redirectUri) : undefined;
   const path = target?.pathname || "/callback";
-  let resolveCode!: (c: string) => void;
+  let resolveCode!: (result: { code: string; iss?: string; state?: string }) => void;
   let rejectCode!: (e: Error) => void;
-  const code = new Promise<string>((res, rej) => {
+  const code = new Promise<{ code: string; iss?: string; state?: string }>((res, rej) => {
     resolveCode = res;
     rejectCode = rej;
   });
@@ -198,7 +244,11 @@ async function startCallback(redirectUri?: string): Promise<{
     const err = u.searchParams.get("error");
     res.writeHead(200, { "content-type": "text/html" });
     res.end(RESULT_PAGE(!!c, c ? "You can close this tab and return to pi." : (err ?? "no code returned")));
-    if (c) resolveCode(c);
+    if (c) resolveCode({
+      code: c,
+      iss: u.searchParams.get("iss") ?? undefined,
+      state: u.searchParams.get("state") ?? undefined,
+    });
     else rejectCode(new Error(err ?? "authorization failed"));
   });
   await new Promise<void>((res) => server.listen(target ? Number(target.port) || 0 : 0, "127.0.0.1", res));
@@ -347,11 +397,12 @@ async function runOAuthFlow(def: ServerDef, options: AuthFlowOptions): Promise<v
     await guard("browser launch failed", () => withAbort(openBrowserFn(provider.authUrl!.href), composed));
 
     // Wait for the browser callback with the authorization code.
-    const code = await guard("authorization callback failed", () => withAbort(cb.code, composed));
+    const { code, iss, state } = await guard("authorization callback failed", () => withAbort(cb.code, composed));
+    if (!provider.consumeAuthorizationState(state)) throw authErr("authorization callback state did not match");
 
-    // Exchange the code for tokens.
+    // Exchange the code for tokens, validating the authorization-server issuer when supplied.
     const finalResult = await guard("token exchange failed", () =>
-      auth(provider, { serverUrl: url, authorizationCode: code, fetchFn: abortFetch }),
+      auth(provider, { serverUrl: url, authorizationCode: code, iss, fetchFn: abortFetch }),
     );
     if (finalResult !== "AUTHORIZED") throw authErr("token exchange did not complete");
   } finally {
@@ -367,12 +418,13 @@ export function bearerHeaders(def: ServerDef): Record<string, string> {
 
 /** Provider attached to the live transport so it can refresh tokens on its own. */
 export function oauthProvider(def: ServerDef): OAuthClientProvider {
+  const storedClient = readState<AuthStore>(AUTH_FILE, {})[def.url!]?.client;
+  const storedRedirectUri =
+    storedClient && "redirect_uris" in storedClient ? storedClient.redirect_uris?.[0] : undefined;
   const redirectUrl =
     def.oauth?.grantType === "client_credentials"
       ? undefined
-      : def.oauth?.redirectUri ??
-        readState<AuthStore>(AUTH_FILE, {})[def.url!]?.client?.redirect_uris?.[0] ??
-        "http://localhost/";
+      : def.oauth?.redirectUri ?? storedRedirectUri ?? "http://localhost/";
   return new FileProvider(def.url!, redirectUrl, def);
 }
 
