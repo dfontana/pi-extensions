@@ -16,8 +16,6 @@ export const Keys = {
   right: "\x1b[C",
   up: "\x1b[A",
   down: "\x1b[B",
-  home: "\x1b[H",
-  end: "\x1b[F",
   deleteForward: "\x1b[3~",
   lineStart: "\x01",
   lineEnd: "\x05",

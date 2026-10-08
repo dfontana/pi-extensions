@@ -4,7 +4,6 @@ import { describe, it } from "node:test";
 import {
   createEditor,
   editorSnapshot,
-  Keys,
   enterNormal,
   moveToCol,
   press,
@@ -222,19 +221,6 @@ describe("HelixEditor black-box edit commands", () => {
 });
 
 describe("HelixEditor black-box navigation assumptions", () => {
-  it("Home and End move to the current logical line boundaries", () => {
-    const { editor } = createEditor({ rows: 20 });
-    editor.setText("first line\nsecond line");
-    enterNormal(editor);
-    press(editor, "g", "e");
-
-    press(editor, Keys.home);
-    assert.deepEqual(editor.getCursor(), { line: 1, col: 0 });
-
-    press(editor, Keys.end);
-    assert.deepEqual(editor.getCursor(), { line: 1, col: 11 });
-  });
-
   it("0 and $ move to logical line start and end on a wrapped line", () => {
     const { editor } = createEditor({ rows: 20 });
     editor.setText("alpha beta gamma delta epsilon zeta");

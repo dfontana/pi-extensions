@@ -15,15 +15,8 @@
  *   - Selection:   s (regex within selection)
  */
 
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-  ExtensionCommandContext,
-  ExtensionUIContext,
-  KeybindingsManager,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { HelixEditor } from "./editor.js";
-import { remapFullscreenScrollBindings } from "./keybindings.js";
 
 export default function (pi: ExtensionAPI): void {
   let helixEnabled = true;
@@ -31,28 +24,18 @@ export default function (pi: ExtensionAPI): void {
   // Saved factory from before we installed our own.
   let previousFactory: ReturnType<ExtensionUIContext["getEditorComponent"]>;
   let helixInstalled = false;
-  let patchedKeybindings: KeybindingsManager | undefined;
-  let restoreFullscreenScrollBindings: (() => void) | undefined;
 
   function installHelix(ctx: ExtensionContext | ExtensionCommandContext): void {
     if (helixInstalled) return;
     previousFactory = ctx.ui.getEditorComponent();
-    ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-      if (patchedKeybindings !== keybindings) {
-        restoreFullscreenScrollBindings?.();
-        patchedKeybindings = keybindings;
-        restoreFullscreenScrollBindings = remapFullscreenScrollBindings(keybindings);
-      }
-      return new HelixEditor(tui, theme, () => ctx.ui.theme, keybindings);
-    });
+    ctx.ui.setEditorComponent(
+      (tui, theme, keybindings) => new HelixEditor(tui, theme, () => ctx.ui.theme, keybindings),
+    );
     helixInstalled = true;
   }
 
   function uninstallHelix(ctx: ExtensionContext | ExtensionCommandContext): void {
     if (!helixInstalled) return;
-    restoreFullscreenScrollBindings?.();
-    restoreFullscreenScrollBindings = undefined;
-    patchedKeybindings = undefined;
     ctx.ui.setEditorComponent(previousFactory);
     helixInstalled = false;
     previousFactory = undefined;

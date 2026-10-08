@@ -30,8 +30,6 @@ None.
 | `gg`, `ge` | Buffer start / end |
 | `gw` | Jump-to-word: labels appear on word starts — type a label to jump |
 
-In fullscreen mode, Helix moves transcript top/bottom jumps to `Alt+Home`/`Alt+End`, leaving `Home`/`End` available for line navigation.
-
 ### Normal mode — mode entry and changes
 
 | Key | Action |
