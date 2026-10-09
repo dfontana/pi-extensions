@@ -1,10 +1,11 @@
 /**
  * OAuth + bearer auth for HTTP MCP servers.
  *
- * A file-backed `OAuthClientProvider` persists per-server credentials (client
- * registration, tokens, PKCE verifier) under `~/.pi/agent/mcp/auth.json`, keyed
- * by server URL. The SDK's `auth()` helper drives PKCE + dynamic client
- * registration + token exchange/refresh against that provider.
+ * An `OAuthClientProvider` persists per-server credentials (client registration,
+ * tokens, PKCE verifier) through an injectable storage backend. The default
+ * backend uses Keychain on macOS and plaintext auth.json elsewhere. The
+ * SDK's `auth()` helper drives PKCE + dynamic client registration + token
+ * exchange/refresh against that provider.
  *
  * Two entry points for callers:
  *   - `authImplicit` — coalesced implicit flow used by the manager when a lazy
@@ -31,9 +32,8 @@ import {
   type StoredOAuthClientInformation,
   type StoredOAuthTokens,
 } from "@modelcontextprotocol/client";
-import { readState, type ServerDef, writeState } from "./config.ts";
-
-const AUTH_FILE = "auth.json";
+import { defaultAuthStorage, type AuthRecord, type AuthStorage } from "./auth-storage.ts";
+import type { ServerDef } from "./config.ts";
 
 /** End-to-end deadline for a complete auth operation (discovery → browser → callback → token). */
 export const AUTH_DEADLINE_MS = 120_000;
@@ -61,36 +61,23 @@ export class AuthError extends Error {
   }
 }
 
-// ---- Storage ---------------------------------------------------------------
+// ---- Storage-independent OAuth provider -----------------------------------
 
-interface AuthRecord {
-  client?: StoredOAuthClientInformation;
-  /** Unix-ms timestamp recorded when the DCR response was saved. */
-  registeredAt?: number;
-  tokens?: StoredOAuthTokens;
-  codeVerifier?: string;
-  authorizationState?: string;
-  discoveryState?: OAuthDiscoveryState;
-}
-type AuthStore = Record<string, AuthRecord>;
-
-class FileProvider implements OAuthClientProvider {
+class OAuthProvider implements OAuthClientProvider {
   authUrl?: URL;
 
   constructor(
     private key: string,
     readonly redirectUrl: string | undefined,
     private def: ServerDef,
-    private onRedirect?: (url: URL) => void,
+    private storage: AuthStorage,
   ) {}
 
-  private read(): AuthRecord {
-    return readState<AuthStore>(AUTH_FILE, {})[this.key] ?? {};
+  private async read(): Promise<AuthRecord> {
+    return (await this.storage.read(this.key)) ?? {};
   }
-  private write(patch: Partial<AuthRecord>): void {
-    const store = readState<AuthStore>(AUTH_FILE, {});
-    store[this.key] = { ...store[this.key], ...patch };
-    writeState(AUTH_FILE, store);
+  private async write(patch: Partial<AuthRecord>): Promise<void> {
+    await this.storage.update(this.key, (record) => ({ ...record, ...patch }));
   }
 
   get clientMetadata(): OAuthClientMetadata {
@@ -106,13 +93,13 @@ class FileProvider implements OAuthClientProvider {
     };
   }
 
-  clientInformation(ctx?: OAuthClientInformationContext): StoredOAuthClientInformation | undefined {
-    const stored = this.read().client;
+  async clientInformation(ctx?: OAuthClientInformationContext): Promise<StoredOAuthClientInformation | undefined> {
+    const stored = (await this.read()).client;
     if (stored) {
       if (!ctx || stored.issuer === ctx.issuer) return stored;
       if (stored.issuer) return undefined;
       const migrated = { ...stored, issuer: ctx.issuer };
-      this.write({ client: migrated });
+      await this.write({ client: migrated });
       return migrated;
     }
     if (this.def.oauth?.clientId) {
@@ -124,67 +111,70 @@ class FileProvider implements OAuthClientProvider {
     }
     return undefined;
   }
-  saveClientInformation(info: StoredOAuthClientInformation): void {
-    this.write({ client: info, registeredAt: Date.now() });
+  async saveClientInformation(info: StoredOAuthClientInformation): Promise<void> {
+    await this.write({ client: info, registeredAt: Date.now() });
   }
-  tokens(ctx?: OAuthClientInformationContext): StoredOAuthTokens | undefined {
-    const stored = this.read().tokens;
+  async tokens(ctx?: OAuthClientInformationContext): Promise<StoredOAuthTokens | undefined> {
+    const stored = (await this.read()).tokens;
     if (!stored || !ctx || stored.issuer === ctx.issuer) return stored;
     if (stored.issuer) return undefined;
     const migrated = { ...stored, issuer: ctx.issuer };
-    this.write({ tokens: migrated });
+    await this.write({ tokens: migrated });
     return migrated;
   }
-  saveTokens(tokens: StoredOAuthTokens): void {
-    this.write({ tokens });
+  async saveTokens(tokens: StoredOAuthTokens): Promise<void> {
+    await this.write({ tokens });
   }
-  saveCodeVerifier(v: string): void {
-    this.write({ codeVerifier: v });
+  async saveCodeVerifier(v: string): Promise<void> {
+    await this.write({ codeVerifier: v });
   }
-  codeVerifier(): string {
-    const v = this.read().codeVerifier;
+  async codeVerifier(): Promise<string> {
+    const v = (await this.read()).codeVerifier;
     if (!v) throw new Error("missing PKCE code verifier — restart authentication");
     return v;
   }
-  state(): string {
+  async state(): Promise<string> {
     const state = randomUUID();
-    this.write({ authorizationState: state });
+    await this.write({ authorizationState: state });
     return state;
   }
-  consumeAuthorizationState(actual: string | undefined): boolean {
-    const store = readState<AuthStore>(AUTH_FILE, {});
-    const rec = store[this.key];
-    const expected = rec?.authorizationState;
-    if (!expected || !actual) return false;
-    const expectedBytes = Buffer.from(expected);
-    const actualBytes = Buffer.from(actual);
-    if (expectedBytes.length !== actualBytes.length || !timingSafeEqual(expectedBytes, actualBytes)) return false;
-    delete rec.authorizationState;
-    writeState(AUTH_FILE, store);
-    return true;
+  async consumeAuthorizationState(actual: string | undefined): Promise<boolean> {
+    let consumed = false;
+    await this.storage.update(this.key, (record) => {
+      const expected = record?.authorizationState;
+      if (!record || !expected || !actual) return record;
+      const expectedBytes = Buffer.from(expected);
+      const actualBytes = Buffer.from(actual);
+      if (expectedBytes.length !== actualBytes.length || !timingSafeEqual(expectedBytes, actualBytes)) return record;
+      const next = { ...record };
+      delete next.authorizationState;
+      consumed = true;
+      return next;
+    });
+    return consumed;
   }
-  saveDiscoveryState(state: OAuthDiscoveryState): void {
-    this.write({ discoveryState: state });
+  async saveDiscoveryState(state: OAuthDiscoveryState): Promise<void> {
+    await this.write({ discoveryState: state });
   }
-  discoveryState(): OAuthDiscoveryState | undefined {
-    return this.read().discoveryState;
+  async discoveryState(): Promise<OAuthDiscoveryState | undefined> {
+    return (await this.read()).discoveryState;
   }
   redirectToAuthorization(url: URL): void {
     this.authUrl = url;
-    this.onRedirect?.(url);
   }
-  invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): void {
-    const store = readState<AuthStore>(AUTH_FILE, {});
-    const rec = store[this.key];
-    if (!rec) return;
-    if (scope === "all") delete store[this.key];
-    else if (scope === "tokens") delete rec.tokens;
-    else if (scope === "client") delete rec.client;
-    else if (scope === "verifier") {
-      delete rec.codeVerifier;
-      delete rec.authorizationState;
-    } else if (scope === "discovery") delete rec.discoveryState;
-    writeState(AUTH_FILE, store);
+  async invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): Promise<void> {
+    await this.storage.update(this.key, (record) => {
+      if (!record) return record;
+      if (scope === "all") return undefined;
+      const next = { ...record };
+      if (scope === "tokens") delete next.tokens;
+      else if (scope === "client") delete next.client;
+      else if (scope === "verifier") {
+        delete next.codeVerifier;
+        delete next.authorizationState;
+      } else if (scope === "discovery") delete next.discoveryState;
+      return next;
+    });
   }
 }
 
@@ -287,9 +277,8 @@ function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
  * CLIENT_REGISTRATION_MAX_AGE_MS. Callers should invalidate the stored client
  * before starting a new authorization flow so fresh DCR runs.
  */
-function isDcrStale(serverUrl: string): boolean {
-  const store = readState<Record<string, AuthRecord>>(AUTH_FILE, {});
-  const rec = store[serverUrl];
+async function isDcrStale(serverUrl: string, storage: AuthStorage): Promise<boolean> {
+  const rec = await storage.read(serverUrl);
   if (!rec?.client) return false;
   if (!rec.registeredAt) return true;
   return Date.now() - rec.registeredAt > CLIENT_REGISTRATION_MAX_AGE_MS;
@@ -298,17 +287,20 @@ function isDcrStale(serverUrl: string): boolean {
 // ---- Coalesced auth flows --------------------------------------------------
 
 /**
- * One active auth flow per server URL. Concurrent callers wait for the same
- * flow rather than each opening a browser. If the flow succeeds, waiters
- * return normally (and the caller re-attempts the connection). If it fails,
- * waiters receive the same error and each latch their own session independently.
+ * One active auth flow per server URL and selected backend. Concurrent callers
+ * sharing a backend wait for the same flow rather than each opening a browser.
+ * If the flow succeeds, waiters return normally (and the caller re-attempts the
+ * connection). If it fails, waiters receive the same error and each latch their
+ * own session independently.
  */
-const activeAuthFlows = new Map<string, Promise<void>>();
+const activeAuthFlows = new WeakMap<AuthStorage, Map<string, Promise<void>>>();
 
 // ---- Core auth flow --------------------------------------------------------
 
 /** Options accepted by both authImplicit and authInteractive. */
 export interface AuthFlowOptions {
+  /** Override the platform-selected storage backend (for tests/explicit compatibility). */
+  storage?: AuthStorage;
   signal?: AbortSignal;
   /** End-to-end deadline in ms. Default: AUTH_DEADLINE_MS (120 s). */
   deadlineMs?: number;
@@ -333,6 +325,7 @@ export interface AuthFlowOptions {
  */
 async function runOAuthFlow(def: ServerDef, options: AuthFlowOptions): Promise<void> {
   const { signal, deadlineMs = AUTH_DEADLINE_MS, openBrowserFn = openBrowser } = options;
+  const storage = options.storage ?? defaultAuthStorage;
   const url = def.url!;
 
   // Compose deadline with caller signal.
@@ -365,10 +358,13 @@ async function runOAuthFlow(def: ServerDef, options: AuthFlowOptions): Promise<v
     }
   };
 
+  // Reject unavailable/corrupt storage before OAuth network or callback setup.
+  await guard("credential storage failed", () => storage.read(url));
+
   // ---- client_credentials (browserless) ------------------------------------
   if (def.oauth?.grantType === "client_credentials") {
     if (composed.aborted) throw authErr("authentication timed out or was cancelled");
-    const provider = new FileProvider(url, undefined, def);
+    const provider = new OAuthProvider(url, undefined, def, storage);
     const result = await guard("authentication failed", () => auth(provider, { serverUrl: url, fetchFn: abortFetch }));
     if (result !== "AUTHORIZED") throw authErr("client_credentials grant did not complete");
     return;
@@ -378,13 +374,13 @@ async function runOAuthFlow(def: ServerDef, options: AuthFlowOptions): Promise<v
   if (composed.aborted) throw authErr("authentication timed out or was cancelled");
   const cb = await startCallback(def.oauth?.redirectUri);
   try {
-    const provider = new FileProvider(url, cb.redirect, def);
+    const provider = new OAuthProvider(url, cb.redirect, def, storage);
 
     // For dynamic-port callbacks, any stored DCR client is tied to a stale
     // redirect URI — always re-register to get a valid client for the new port.
     // For configured stable URIs, only re-register when the age threshold passes.
-    if (!def.oauth?.redirectUri || isDcrStale(url)) {
-      provider.invalidateCredentials("client");
+    if (!def.oauth?.redirectUri || await isDcrStale(url, storage)) {
+      await provider.invalidateCredentials("client");
     }
 
     // First call: returns AUTHORIZED if stored credentials are valid/refreshable.
@@ -398,7 +394,7 @@ async function runOAuthFlow(def: ServerDef, options: AuthFlowOptions): Promise<v
 
     // Wait for the browser callback with the authorization code.
     const { code, iss, state } = await guard("authorization callback failed", () => withAbort(cb.code, composed));
-    if (!provider.consumeAuthorizationState(state)) throw authErr("authorization callback state did not match");
+    if (!(await provider.consumeAuthorizationState(state))) throw authErr("authorization callback state did not match");
 
     // Exchange the code for tokens, validating the authorization-server issuer when supplied.
     const finalResult = await guard("token exchange failed", () =>
@@ -417,24 +413,30 @@ export function bearerHeaders(def: ServerDef): Record<string, string> {
 }
 
 /** Provider attached to the live transport so it can refresh tokens on its own. */
-export function oauthProvider(def: ServerDef): OAuthClientProvider {
-  const storedClient = readState<AuthStore>(AUTH_FILE, {})[def.url!]?.client;
+export async function oauthProvider(
+  def: ServerDef,
+  storage: AuthStorage = defaultAuthStorage,
+): Promise<OAuthClientProvider> {
+  const storedClient = (await storage.read(def.url!))?.client;
   const storedRedirectUri =
     storedClient && "redirect_uris" in storedClient ? storedClient.redirect_uris?.[0] : undefined;
   const redirectUrl =
     def.oauth?.grantType === "client_credentials"
       ? undefined
       : def.oauth?.redirectUri ?? storedRedirectUri ?? "http://localhost/";
-  return new FileProvider(def.url!, redirectUrl, def);
+  return new OAuthProvider(def.url!, redirectUrl, def, storage);
 }
 
 /**
  * Forget all locally persisted OAuth state for this server. The next
  * authorization attempt obtains fresh credentials rather than refreshing.
  */
-export function clearOAuthCredentials(def: ServerDef): void {
+export async function clearOAuthCredentials(
+  def: ServerDef,
+  storage: AuthStorage = defaultAuthStorage,
+): Promise<void> {
   if (!def.url) return;
-  new FileProvider(def.url, def.oauth?.redirectUri, def).invalidateCredentials("all");
+  await storage.update(def.url, () => undefined);
 }
 
 /**
@@ -448,7 +450,14 @@ export function clearOAuthCredentials(def: ServerDef): void {
  */
 export async function authImplicit(def: ServerDef, options?: AuthFlowOptions): Promise<void> {
   const url = def.url!;
-  const existing = activeAuthFlows.get(url);
+  const resolvedOptions = options ?? {};
+  const storage = resolvedOptions.storage ?? defaultAuthStorage;
+  let flows = activeAuthFlows.get(storage);
+  if (!flows) {
+    flows = new Map();
+    activeAuthFlows.set(storage, flows);
+  }
+  const existing = flows.get(url);
   if (existing) {
     // Waiter: block until the first caller's flow resolves or rejects.
     await existing;
@@ -457,10 +466,11 @@ export async function authImplicit(def: ServerDef, options?: AuthFlowOptions): P
     return;
   }
 
-  const flow = runOAuthFlow(def, options ?? {}).finally(() => {
-    if (activeAuthFlows.get(url) === flow) activeAuthFlows.delete(url);
+  const flow = runOAuthFlow(def, { ...resolvedOptions, storage }).finally(() => {
+    if (flows.get(url) === flow) flows.delete(url);
+    if (flows.size === 0) activeAuthFlows.delete(storage);
   });
-  activeAuthFlows.set(url, flow);
+  flows.set(url, flow);
   await flow;
 }
 

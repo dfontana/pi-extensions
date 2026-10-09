@@ -571,11 +571,16 @@ async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: str
   // then run a fresh interactive flow.
   await manager.disconnect(name);
   manager.clearAuthLatch(name);
-  clearOAuthCredentials(def);
+  try {
+    await clearOAuthCredentials(def, manager.authStorage);
+  } catch (error) {
+    ctx.ui.notify(`"${name}" credential clearing failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    return;
+  }
   const ok = await ctx.ui.custom<boolean>((tui, theme, _kb, done) => {
     const loader = new BorderedLoader(tui, theme, `Re-authorizing "${name}" — a browser window should open…`);
     loader.onAbort = () => done(false);
-    authInteractive(def, { signal: loader.signal })
+    authInteractive(def, { signal: loader.signal, storage: manager.authStorage })
       .then(() => done(true))
       .catch((e) => (ctx.ui.notify(`"${name}" auth failed: ${(e as Error).message}`, "error"), done(false)));
     return loader;

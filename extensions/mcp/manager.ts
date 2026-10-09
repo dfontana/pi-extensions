@@ -16,6 +16,7 @@
 import { Client, StreamableHTTPClientTransport, UnauthorizedError } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { AuthError, authImplicit, bearerHeaders, oauthProvider } from "./auth.ts";
+import { defaultAuthStorage, type AuthStorage } from "./auth-storage.ts";
 import { identity, readState, type ServerDef, transportKind, writeState } from "./config.ts";
 
 export { AuthError };
@@ -127,6 +128,8 @@ export class Manager {
    */
   _authImplicit: typeof authImplicit = authImplicit;
 
+  constructor(readonly authStorage: AuthStorage = defaultAuthStorage) {}
+
   /**
    * Reset this session-local manager for a new extension session.
    *
@@ -218,7 +221,7 @@ export class Manager {
 
   // ---- connect / disconnect -------------------------------------------------
 
-  private transport(def: ServerDef, kind: "stdio" | "http") {
+  private async transport(def: ServerDef, kind: "stdio" | "http") {
     if (kind === "stdio") {
       return new StdioClientTransport({
         command: def.command!,
@@ -229,7 +232,7 @@ export class Manager {
       });
     }
     const opts: ConstructorParameters<typeof StreamableHTTPClientTransport>[1] = {};
-    if (def.auth === "oauth") opts.authProvider = oauthProvider(def);
+    if (def.auth === "oauth") opts.authProvider = await oauthProvider(def, this.authStorage);
     const headers = { ...def.headers, ...(def.auth === "bearer" ? bearerHeaders(def) : {}) };
     if (Object.keys(headers).length) opts.requestInit = { headers };
     return new StreamableHTTPClientTransport(new URL(def.url!), opts);
@@ -264,7 +267,7 @@ export class Manager {
       const establish = async (): Promise<ToolMeta[]> => {
         await this.disconnect(name);
         const client = new Client({ name: "pi-mcp", version: "1.0.0" });
-        const transport = this.transport(def, kind);
+        const transport = await this.transport(def, kind);
         const conn: Conn = { client };
         transport.onclose = () => {
           if (this.conns.get(name) === conn) void this.disconnect(name, conn);
@@ -314,7 +317,7 @@ export class Manager {
 
     // Run the coalesced browser flow.
     try {
-      await this._authImplicit(def, { signal });
+      await this._authImplicit(def, { signal, storage: this.authStorage });
     } catch (authErr) {
       const detail = authErr instanceof Error ? authErr.message : String(authErr);
       const message = authErr instanceof AuthError ? authErr.message : authFailedMessage(name, detail);

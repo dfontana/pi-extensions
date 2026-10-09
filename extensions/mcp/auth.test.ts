@@ -5,12 +5,21 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { auth as sdkAuth } from "@modelcontextprotocol/client";
 import { describe, it } from "node:test";
+import type { AuthRecord, AuthStorage } from "./auth-storage.ts";
 
 // config.ts resolves the agent directory while it loads, so this must be set
 // before dynamically importing the OAuth module under test.
 const agentDir = mkdtempSync(join(tmpdir(), "mcp-auth-agent-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
-const { clearOAuthCredentials, authImplicit, authInteractive, oauthProvider, AuthError } = await import("./auth.ts");
+const oauth = await import("./auth.ts");
+const { AuthError } = oauth;
+const { FileAuthStorage } = await import("./auth-storage.ts");
+// Compatibility tests explicitly opt into plaintext storage; never use real Keychain.
+const fileStorage = new FileAuthStorage();
+const clearOAuthCredentials: typeof oauth.clearOAuthCredentials = (def, storage = fileStorage) => oauth.clearOAuthCredentials(def, storage);
+const oauthProvider: typeof oauth.oauthProvider = (def, storage = fileStorage) => oauth.oauthProvider(def, storage);
+const authImplicit: typeof oauth.authImplicit = (def, options) => oauth.authImplicit(def, { storage: fileStorage, ...options });
+const authInteractive: typeof oauth.authInteractive = (def, options) => oauth.authInteractive(def, { storage: fileStorage, ...options });
 
 const authFile = join(agentDir, "mcp", "auth.json");
 
@@ -23,8 +32,27 @@ function readAuthState(): unknown {
   return JSON.parse(readFileSync(authFile, "utf8"));
 }
 
+class MemoryAuthStorage implements AuthStorage {
+  readonly records = new Map<string, AuthRecord>();
+
+  async read(serverUrl: string): Promise<AuthRecord | undefined> {
+    return this.records.get(serverUrl);
+  }
+
+  async update(
+    serverUrl: string,
+    transform: (current: AuthRecord | undefined) => AuthRecord | undefined,
+  ): Promise<void> {
+    const current = this.records.get(serverUrl);
+    const next = transform(current);
+    if (next === current) return;
+    if (next === undefined) this.records.delete(serverUrl);
+    else this.records.set(serverUrl, next);
+  }
+}
+
 describe("mcp auth", () => {
-  it("clears every saved OAuth field for only the selected server", () => {
+  it("clears every saved OAuth field for only the selected server", async () => {
     const url = "https://reauth.example.test/mcp";
     const otherUrl = "https://other.example.test/mcp";
     const other = { tokens: { access_token: "keep" } };
@@ -38,9 +66,79 @@ describe("mcp auth", () => {
       [otherUrl]: other,
     });
 
-    clearOAuthCredentials({ name: "reauth", url, auth: "oauth" });
+    await clearOAuthCredentials({ name: "reauth", url, auth: "oauth" });
 
     assert.deepEqual(readAuthState(), { [otherUrl]: other });
+  });
+
+  it("provider and credential helpers use the injected asynchronous storage", async () => {
+    const url = "https://in-memory.example.test/mcp";
+    const otherUrl = "https://other-in-memory.example.test/mcp";
+    const diskState = { "https://file-only.example.test/mcp": { tokens: { access_token: "file-token" } } };
+    writeAuthState(diskState);
+
+    const storage = new MemoryAuthStorage();
+    const record: AuthRecord = {
+      client: { client_id: "memory-client", redirect_uris: ["http://localhost:1234/callback"], issuer: url },
+      registeredAt: Date.now(),
+      tokens: { access_token: "memory-access", token_type: "bearer", issuer: url },
+    };
+    storage.records.set(url, record);
+    storage.records.set(otherUrl, { tokens: { access_token: "other-access", token_type: "bearer" } });
+
+    const provider = await oauthProvider({ name: "memory", url, auth: "oauth" }, storage);
+    assert.equal(provider.redirectUrl, "http://localhost:1234/callback");
+    assert.equal((await provider.clientInformation({ issuer: url }))?.client_id, "memory-client");
+    assert.equal((await provider.tokens({ issuer: url }))?.access_token, "memory-access");
+
+    await provider.saveClientInformation?.({ client_id: "replacement-client", issuer: url });
+    assert.equal(storage.records.get(url)?.client?.client_id, "replacement-client");
+    await provider.saveTokens({ access_token: "replacement-access", token_type: "bearer", issuer: url });
+    assert.equal(storage.records.get(url)?.tokens?.access_token, "replacement-access");
+    await provider.invalidateCredentials?.("tokens");
+    assert.equal(storage.records.get(url)?.tokens, undefined);
+    assert.equal(storage.records.get(url)?.client?.client_id, "replacement-client");
+
+    await clearOAuthCredentials({ name: "memory", url, auth: "oauth" }, storage);
+    assert.equal(storage.records.has(url), false);
+    assert.equal(storage.records.get(otherUrl)?.tokens?.access_token, "other-access");
+    assert.deepEqual(readAuthState(), diskState, "injected storage helpers must not read or write auth.json");
+  });
+
+  it("registration-age checks read and invalidate credentials through injected storage", async () => {
+    const diskState = { "https://file-only.example.test/mcp": { tokens: { access_token: "file-token" } } };
+    writeAuthState(diskState);
+    const cases = [
+      { label: "fresh", registeredAt: Date.now(), expectedRegistrations: 0, expectedClient: "saved-client" },
+      { label: "stale", registeredAt: 1, expectedRegistrations: 1, expectedClient: "test-client" },
+    ];
+
+    for (const test of cases) {
+      let registrationCount = 0;
+      const { server, port } = await startMockOAuthServer({ onDcr: () => registrationCount++ });
+      const url = `http://localhost:${port}`;
+      const redirectUri = "http://localhost:4321/callback";
+      const storage = new MemoryAuthStorage();
+      storage.records.set(url, {
+        client: { client_id: "saved-client", redirect_uris: [redirectUri], issuer: url },
+        registeredAt: test.registeredAt,
+      });
+      try {
+        await assert.rejects(
+          () => authInteractive(
+            { name: `age-${test.label}`, url, auth: "oauth", oauth: { redirectUri } },
+            { storage, deadlineMs: 5_000, openBrowserFn: async () => { throw new Error("stop after authorization URL"); } },
+          ),
+          (error) => error instanceof AuthError && /browser launch failed/.test(error.message),
+        );
+        assert.equal(registrationCount, test.expectedRegistrations, test.label);
+        assert.equal(storage.records.get(url)?.client?.client_id, test.expectedClient, test.label);
+      } finally {
+        server.close();
+      }
+    }
+
+    assert.deepEqual(readAuthState(), diskState, "auth flow storage injection must not fall back to auth.json");
   });
 
   it("AuthError carries server name and isAuthError flag", () => {
@@ -55,47 +153,15 @@ describe("mcp auth", () => {
     let requestCount = 0;
     let refreshGrantCount = 0;
     let browserAuthorizationCount = 0;
-    const server = createServer((req, res) => {
-      requestCount++;
-      const path = new URL(req.url ?? "/", "http://localhost").pathname;
-      if (req.method === "GET" && path === "/.well-known/oauth-authorization-server") {
-        const port = (server.address() as { port: number }).port;
-        const base = `http://localhost:${port}`;
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            issuer: base,
-            authorization_endpoint: `${base}/authorize`,
-            token_endpoint: `${base}/token`,
-            response_types_supported: ["code"],
-            grant_types_supported: ["authorization_code", "refresh_token"],
-            code_challenge_methods_supported: ["S256"],
-          }),
-        );
-        return;
-      }
-      if (req.method === "GET" && path === "/.well-known/oauth-protected-resource") {
-        res.writeHead(404).end();
-        return;
-      }
-      if (req.method === "POST" && path === "/token") {
-        let body = "";
-        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
-        req.on("end", () => {
-          const params = new URLSearchParams(body);
-          assert.equal(params.get("grant_type"), "refresh_token");
-          assert.equal(params.get("refresh_token"), "saved-refresh");
-          refreshGrantCount++;
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ access_token: "replacement-access", token_type: "bearer", refresh_token: "replacement-refresh" }));
-        });
-        return;
-      }
-      res.writeHead(404).end();
+    const { server, port } = await startMockOAuthServer({
+      onRequest: () => requestCount++,
+      tokenHandler: (params) => {
+        assert.equal(params.get("grant_type"), "refresh_token");
+        assert.equal(params.get("refresh_token"), "saved-refresh");
+        refreshGrantCount++;
+        return { access_token: "replacement-access", token_type: "bearer", refresh_token: "replacement-refresh" };
+      },
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-    const port = (server.address() as { port: number }).port;
     const url = `http://localhost:${port}`;
     const redirectUri = "http://localhost:4321/callback";
     writeAuthState({
@@ -107,7 +173,7 @@ describe("mcp auth", () => {
 
     try {
       const def = { name: "refresh-server", url, auth: "oauth" as const };
-      const provider = oauthProvider(def);
+      const provider = await oauthProvider(def);
       assert.equal(requestCount, 0, "constructing the provider must not make a request");
       assert.equal(provider.redirectUrl, redirectUri);
       provider.redirectToAuthorization = () => { browserAuthorizationCount++; };
@@ -115,10 +181,17 @@ describe("mcp auth", () => {
       assert.equal(await sdkAuth(provider, { serverUrl: url }), "AUTHORIZED");
       assert.equal(refreshGrantCount, 1);
       assert.equal(browserAuthorizationCount, 0);
-      const saved = (readAuthState() as Record<string, {
+      const fileState = readAuthState() as Record<string, {
         client: { issuer?: string };
         tokens: { access_token: string; issuer?: string };
-      }>)[url];
+      }>;
+      assert.deepEqual(Object.keys(fileState), [url], "auth.json remains keyed directly by server URL");
+      const saved = fileState[url];
+      assert.deepEqual(
+        Object.keys(saved).sort(),
+        ["client", "discoveryState", "tokens"],
+        "auth.json entries retain the SDK v2 record shape",
+      );
       assert.equal(saved.tokens.access_token, "replacement-access");
       assert.equal(saved.tokens.issuer, url);
       assert.equal(saved.client.issuer, url);
@@ -136,7 +209,7 @@ describe("mcp auth", () => {
         tokens: { access_token: "bound-token", issuer },
       },
     });
-    const provider = oauthProvider({ name: "issuer-bound", url, auth: "oauth" });
+    const provider = await oauthProvider({ name: "issuer-bound", url, auth: "oauth" });
 
     assert.equal(await provider.clientInformation({ issuer: "https://other-auth.example.test" }), undefined);
     assert.equal(await provider.tokens({ issuer: "https://other-auth.example.test" }), undefined);
@@ -145,58 +218,16 @@ describe("mcp auth", () => {
 
   it("completes browser OAuth and persists issuer-stamped credentials", async () => {
     let codeGrantCount = 0;
-    const server = createServer((req, res) => {
-      const port = (server.address() as { port: number }).port;
-      const base = `http://localhost:${port}`;
-      const path = new URL(req.url ?? "/", base).pathname;
-      if (req.method === "GET" && path === "/.well-known/oauth-authorization-server") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({
-          issuer: base,
-          authorization_endpoint: `${base}/authorize`,
-          token_endpoint: `${base}/token`,
-          registration_endpoint: `${base}/register`,
-          response_types_supported: ["code"],
-          grant_types_supported: ["authorization_code", "refresh_token"],
-          code_challenge_methods_supported: ["S256"],
-          authorization_response_iss_parameter_supported: true,
-        }));
-        return;
-      }
-      if (req.method === "POST" && path === "/register") {
-        let body = "";
-        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
-        req.on("end", () => {
-          const metadata = JSON.parse(body) as Record<string, unknown>;
-          res.writeHead(201, { "content-type": "application/json" });
-          res.end(JSON.stringify({
-            client_id: "browser-client",
-            redirect_uris: metadata.redirect_uris ?? [],
-            grant_types: metadata.grant_types ?? ["authorization_code", "refresh_token"],
-            response_types: metadata.response_types ?? ["code"],
-            token_endpoint_auth_method: metadata.token_endpoint_auth_method ?? "none",
-          }));
-        });
-        return;
-      }
-      if (req.method === "POST" && path === "/token") {
-        let body = "";
-        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
-        req.on("end", () => {
-          const params = new URLSearchParams(body);
-          assert.equal(params.get("grant_type"), "authorization_code");
-          assert.equal(params.get("code"), "browser-code");
-          codeGrantCount++;
-          res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ access_token: "browser-access", refresh_token: "browser-refresh", token_type: "bearer" }));
-        });
-        return;
-      }
-      res.writeHead(404).end();
+    const { server, port } = await startMockOAuthServer({
+      clientId: "browser-client",
+      issuerResponse: true,
+      tokenHandler: (params) => {
+        assert.equal(params.get("grant_type"), "authorization_code");
+        assert.equal(params.get("code"), "browser-code");
+        codeGrantCount++;
+        return { access_token: "browser-access", refresh_token: "browser-refresh", token_type: "bearer" };
+      },
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-
-    const port = (server.address() as { port: number }).port;
     const url = `http://localhost:${port}`;
     let browserOpenCount = 0;
     let submitWrongState = true;
@@ -256,7 +287,7 @@ describe("mcp auth", () => {
     ];
 
     for (const test of cases) {
-      const mock = test.mockDelayMs !== undefined ? await startMockOAuthServer(undefined, test.mockDelayMs) : undefined;
+      const mock = test.mockDelayMs !== undefined ? await startMockOAuthServer({ responseDelayMs: test.mockDelayMs }) : undefined;
       const url = mock ? `http://localhost:${mock.port}` : `https://${test.name}.example.test/mcp`;
       const def = {
         name: test.name,
@@ -287,63 +318,43 @@ describe("mcp auth", () => {
       }
     }
   });
-  it("concurrent authImplicit calls coalesce to one browser flow", async () => {
-    // Spin up a minimal OAuth mock server so the auth() SDK can complete discovery
-    // and DCR and reach the redirectToAuthorization step where openBrowserFn is called.
-    let dcrCount = 0;
-    const { server: mockServer, port: mockPort } = await startMockOAuthServer(() => dcrCount++);
-    const url = `http://localhost:${mockPort}`;
-    const def = { name: "coalesce-server", url, auth: "oauth" as const };
+  for (const test of [
+    { name: "concurrent authImplicit calls coalesce to one browser flow", run: authImplicit, shared: true, browserCount: 1 },
+    { name: "keeps implicit auth flows isolated across different storage backends", run: authImplicit, shared: false, browserCount: 2 },
+    { name: "authInteractive does not coalesce — each call runs its own flow", run: authInteractive, shared: true, browserCount: 2 },
+  ]) {
+    it(test.name, async () => {
+      let dcrCount = 0;
+      const { server, port } = await startMockOAuthServer({ onDcr: () => dcrCount++ });
+      const def = { name: "concurrent-server", url: `http://localhost:${port}`, auth: "oauth" as const };
+      const storage = test.shared ? fileStorage : new MemoryAuthStorage();
+      let browserOpenCount = 0;
+      const openBrowserFn = async (): Promise<void> => {
+        browserOpenCount++;
+        throw new Error("Simulated display failure");
+      };
 
-    let browserOpenCount = 0;
-    const openBrowserFn = async (_u: string): Promise<void> => {
-      browserOpenCount++;
-      throw new Error("Simulated display failure");
-    };
-
-    // Launch two concurrent calls to authImplicit for the same URL.
-    const results = await Promise.allSettled([
-      authImplicit(def, { openBrowserFn, deadlineMs: 10_000 }),
-      authImplicit(def, { openBrowserFn, deadlineMs: 10_000 }),
-    ]);
-
-    mockServer.close();
-
-    // Both should have rejected (browser launch failed).
-    assert.equal(results[0].status, "rejected");
-    assert.equal(results[1].status, "rejected");
-
-    // Only ONE browser open should have been attempted (second call waited for first).
-    assert.equal(browserOpenCount, 1, "only one browser launch for concurrent calls");
-    // DCR should also have been performed at most once.
-    assert.ok(dcrCount <= 1, `DCR called ${dcrCount} times; expected at most 1`);
-  });
-
-  it("authInteractive does not coalesce — each call runs its own flow", async () => {
-    // authInteractive bypasses the coalescing cache; each call runs its own
-    // independent browser flow. Two concurrent calls must each open the browser.
-    // (Exact DCR counts are incidental — they share auth.json and may coalesce
-    // at the registration level without violating the browser-independence contract.)
-    const { server: mockServer, port: mockPort } = await startMockOAuthServer();
-    const url = `http://localhost:${mockPort}`;
-    const def = { name: "no-coalesce-server", url, auth: "oauth" as const };
-
-    let browserOpenCount = 0;
-    const openBrowserFn = async (_u: string): Promise<void> => {
-      browserOpenCount++;
-      throw new Error("Simulated display failure");
-    };
-
-    await Promise.allSettled([
-      authInteractive(def, { openBrowserFn, deadlineMs: 10_000 }),
-      authInteractive(def, { openBrowserFn, deadlineMs: 10_000 }),
-    ]);
-
-    mockServer.close();
-
-    // Both authInteractive calls must have reached the browser-launch step.
-    assert.equal(browserOpenCount, 2, "authInteractive does not coalesce — two browser launches");
-  });
+      try {
+        const results = await Promise.allSettled([
+          test.run(def, { storage, openBrowserFn, deadlineMs: 10_000 }),
+          test.run(def, { storage: test.shared ? storage : new MemoryAuthStorage(), openBrowserFn, deadlineMs: 10_000 }),
+        ]);
+        for (const result of results) {
+          assert.equal(result.status, "rejected");
+          if (result.status === "rejected") {
+            assert.ok(result.reason instanceof AuthError);
+            assert.match(result.reason.message, /browser launch failed/);
+          }
+        }
+        assert.equal(browserOpenCount, test.browserCount);
+        if (test.run === authImplicit && test.shared) {
+          assert.ok(dcrCount <= 1, `DCR called ${dcrCount} times; expected at most 1`);
+        }
+      } finally {
+        server.close();
+      }
+    });
+  }
 
 });
 
@@ -351,18 +362,26 @@ describe("mcp auth", () => {
 
 /**
  * Minimal OAuth 2.0 authorization server mock. Responds to:
- *   GET  /  (or /.well-known/...)  — server metadata
- *   POST /register                  — dynamic client registration
+ *   GET  /.well-known/oauth-authorization-server — server metadata
+ *   POST /register — dynamic client registration
+ *   POST /token — optional token exchange
  * Enough for the MCP SDK auth() to complete discovery + DCR and call
  * redirectToAuthorization, which triggers the injected openBrowserFn.
  */
 async function startMockOAuthServer(
-  onDcr?: () => void,
-  responseDelayMs = 0,
+  { onDcr, onRequest, responseDelayMs = 0, clientId = "test-client", issuerResponse = false, tokenHandler }: {
+    onDcr?: () => void;
+    onRequest?: () => void;
+    responseDelayMs?: number;
+    clientId?: string;
+    issuerResponse?: boolean;
+    tokenHandler?: (params: URLSearchParams) => Record<string, string>;
+  } = {},
 ): Promise<{ server: ReturnType<typeof createServer>; port: number }> {
   const server = createServer((req, res) => {
+    onRequest?.();
     const path = new URL(req.url ?? "/", "http://localhost").pathname;
-    if (req.method === "GET") {
+    if (req.method === "GET" && path === "/.well-known/oauth-authorization-server") {
       const respond = () => {
         const port = (server.address() as { port: number }).port;
         const base = `http://localhost:${port}`;
@@ -376,6 +395,7 @@ async function startMockOAuthServer(
             response_types_supported: ["code"],
             grant_types_supported: ["authorization_code", "refresh_token"],
             code_challenge_methods_supported: ["S256"],
+            authorization_response_iss_parameter_supported: issuerResponse,
           }),
         );
       };
@@ -393,12 +413,23 @@ async function startMockOAuthServer(
         res.writeHead(201, { "content-type": "application/json" });
         res.end(
           JSON.stringify({
-            client_id: "test-client",
+            client_id: clientId,
             redirect_uris: (parsed.redirect_uris as string[]) ?? [],
             grant_types: (parsed.grant_types as string[]) ?? ["authorization_code"],
             response_types: (parsed.response_types as string[]) ?? ["code"],
+            token_endpoint_auth_method: parsed.token_endpoint_auth_method ?? "none",
           }),
         );
+      });
+      return;
+    }
+    if (req.method === "POST" && path === "/token" && tokenHandler) {
+      let body = "";
+      req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+      req.on("end", () => {
+        const tokens = tokenHandler(new URLSearchParams(body));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(tokens));
       });
       return;
     }

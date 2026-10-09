@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { validateToolArguments } from "@earendil-works/pi-ai";
-import { renderRow, textResult, type RowFlags } from "../shared/render-harness.ts";
+import { plainTheme, renderRow, textResult, type RowFlags } from "../shared/render-harness.ts";
 
 const testAgentDir = mkdtempSync(join(tmpdir(), "mcp-agent-"));
 process.env.PI_CODING_AGENT_DIR = testAgentDir;
@@ -28,14 +28,24 @@ interface Binding {
   };
   commands: Map<string, { handler: (argStr: string, ctx: any) => Promise<void> }>;
   events: Map<string, (...args: any[]) => Promise<void>>;
-  piEvents: Map<string, Array<(data: unknown) => void>>;
 }
+
+const bindings: Binding[] = [];
+const sessionDirs: string[] = [];
+afterEach(async () => {
+  try {
+    for (const binding of bindings.splice(0).reverse()) {
+      await binding.events.get("session_shutdown")?.({}, {});
+    }
+  } finally {
+    for (const cwd of sessionDirs.splice(0)) rmSync(cwd, { recursive: true, force: true });
+  }
+});
 
 function bind(): Binding {
   const binding: Partial<Binding> = {
     commands: new Map(),
     events: new Map(),
-    piEvents: new Map(),
   };
   const api = {
     registerTool(value: Binding["tool"]) {
@@ -47,47 +57,23 @@ function bind(): Binding {
     on(event: string, handler: (...args: any[]) => Promise<void>) {
       binding.events!.set(event, handler);
     },
-    events: {
-      emit(channel: string, data: unknown) {
-        for (const h of binding.piEvents!.get(channel) ?? []) h(data);
-      },
-      on(channel: string, handler: (data: unknown) => void) {
-        if (!binding.piEvents!.has(channel)) binding.piEvents!.set(channel, []);
-        binding.piEvents!.get(channel)!.push(handler);
-        return () => {
-          const arr = binding.piEvents!.get(channel);
-          if (arr) {
-            const idx = arr.indexOf(handler);
-            if (idx >= 0) arr.splice(idx, 1);
-          }
-        };
-      },
-    },
-    getSessionName: () => undefined as string | undefined,
   } as unknown as ExtensionAPI;
   mcpExtension(api);
   assert.ok(binding.tool, "the extension registers its MCP tool");
+  bindings.push(binding as Binding);
   return binding as Binding;
 }
 
-const testTheme = {
-  fg: (_color: string, text: string) => text,
-  bold: (text: string) => text,
-};
-
 const ui = {
-  theme: testTheme,
+  theme: plainTheme,
   setStatus() {},
 };
 
-function context(cwd: string, contextUi = ui, sessionName?: string) {
+function context(cwd: string, contextUi = ui) {
   return {
     cwd,
     ui: contextUi,
     signal: undefined,
-    sessionManager: {
-      getSessionName: () => sessionName,
-    },
   } as any;
 }
 
@@ -98,16 +84,15 @@ interface PanelComponent {
 
 function panelHarness() {
   let panel: PanelComponent | undefined;
-  let renderRequests = 0;
   const notifications: Array<{ message: string; level: string }> = [];
   const panelUi = {
     ...ui,
     notify(message: string, level: string) {
       notifications.push({ message, level });
     },
-    custom<T>(factory: (tui: { requestRender(): void }, theme: typeof testTheme, keybindings: unknown, done: (value: T) => void) => PanelComponent) {
+    custom<T>(factory: (tui: { requestRender(): void }, theme: typeof plainTheme, keybindings: unknown, done: (value: T) => void) => PanelComponent) {
       return new Promise<T>((resolve) => {
-        panel = factory({ requestRender: () => renderRequests++ }, testTheme, {}, resolve);
+        panel = factory({ requestRender() {} }, plainTheme, {}, resolve);
       });
     },
   };
@@ -117,9 +102,6 @@ function panelHarness() {
     get panel() {
       assert.ok(panel, "the /mcp command opens a custom panel");
       return panel;
-    },
-    get renderRequests() {
-      return renderRequests;
     },
   };
 }
@@ -165,6 +147,23 @@ function expectInvalid(binding: Binding, args: Record<string, unknown>, label: s
 }
 
 describe("mcp index", () => {
+  it("notifies credential clearing failures on Shift+A without opening an auth loader", async () => {
+    const { defaultAuthStorage } = await import("./auth-storage.ts");
+    const originalUpdate = defaultAuthStorage.update;
+    defaultAuthStorage.update = async () => { throw new Error("Keychain is locked"); };
+    try {
+      const { cwd, binding } = await session(JSON.stringify({ mcpServers: { secured: { url: "https://example.test/mcp", auth: "oauth" } } }));
+      const panel = await openPanel(binding, cwd);
+      const component = panel.harness.panel;
+      component.handleInput("A");
+      await panel.result;
+      assert.deepEqual(panel.harness.notifications, [{ message: '"secured" credential clearing failed: Keychain is locked', level: "error" }]);
+      assert.equal(panel.harness.panel, component, "no OAuth loader or network is started after clearing fails");
+    } finally {
+      defaultAuthStorage.update = originalUpdate;
+    }
+  });
+
   // ---- schema contract tests -----------------------------------------------
 
   describe("mcp schema", () => {
@@ -249,12 +248,8 @@ describe("mcp index", () => {
 
   describe("mcp prompt", () => {
     it("exposes canonical actions, configured servers, and recovery guidance", async () => {
-      const cwd = mkdtempSync(join(tmpdir(), "mcp-prompt-"));
       const server = "prompt server (raw)";
-      writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { [server]: {} } }));
-
-      const binding = bind();
-      await sessionStart(cwd, binding, context(cwd));
+      const { binding } = await session([server]);
 
       const description = binding.tool.description;
       const guidelines = (binding.tool.promptGuidelines ?? []).join("\n");
@@ -323,21 +318,17 @@ describe("mcp index", () => {
 
     for (const { label, global, project, expectWarning, expectServers } of configCases) {
       it(label, async () => {
-        const cwd = mkdtempSync(join(tmpdir(), "mcp-config-"));
         try {
           if (global !== undefined) writeFileSync(globalConfigPath, global);
-          writeFileSync(join(cwd, ".mcp.json"), project);
-
-          const binding = bind();
           const capture = capturingUi();
-          await sessionStart(cwd, binding, context(cwd, capture.ui));
+          const { execute } = await session(project, capture.ui);
 
           assert.equal(capture.notifications.length, 1, "exactly one warning is surfaced");
           assert.equal(capture.notifications[0].level, "warning");
           assert.match(capture.notifications[0].message, /^mcp: /);
           assert.match(capture.notifications[0].message, expectWarning);
 
-          const status = await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd));
+          const status = await execute({ action: "status" });
           for (const name of expectServers) {
             assert.match(status.content[0].text, new RegExp(`\\b${name}\\b`), `server "${name}" must still load`);
           }
@@ -348,15 +339,11 @@ describe("mcp index", () => {
     }
 
     it("surfaces no warning when config files are valid or absent", async () => {
-      const cwd = mkdtempSync(join(tmpdir(), "mcp-config-clean-"));
-      writeServerConfig(cwd, ["clean-srv"]);
-
-      const binding = bind();
       const capture = capturingUi();
-      await sessionStart(cwd, binding, context(cwd, capture.ui));
+      const { execute } = await session(["clean-srv"], capture.ui);
 
       assert.deepEqual(capture.notifications, []);
-      const status = await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd));
+      const status = await execute({ action: "status" });
       assert.match(status.content[0].text, /clean-srv/);
     });
   });
@@ -396,19 +383,15 @@ describe("mcp index", () => {
 
     for (const { label, args, expected, rejects } of dispatchCases) {
       it(label, async () => {
-        const cwd = mkdtempSync(join(tmpdir(), "mcp-dispatch-"));
-        writeServerConfig(cwd, ["some-server"]);
-        const binding = bind();
-        await sessionStart(cwd, binding, context(cwd));
-        const execute = () => binding.tool.execute("id", args, undefined, undefined, context(cwd));
+        const { execute } = await session(["some-server"]);
 
         if (rejects) {
-          await assert.rejects(execute, (e: Error) => {
+          await assert.rejects(() => execute(args), (e: Error) => {
             for (const matcher of expected) assert.match(e.message, matcher);
             return true;
           });
         } else {
-          const text = (await execute()).content[0].text;
+          const text = (await execute(args)).content[0].text;
           for (const matcher of expected) assert.match(text, matcher);
         }
       });
@@ -474,19 +457,11 @@ describe("mcp index", () => {
   // ---- lifecycle/broker tests (preserved from prior plan) -------------------
 
   it("keeps enabled servers isolated between extension factory bindings", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-session-"));
-    const server = "session-isolation-test";
-    writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { [server]: {} } }));
-
-    const parent = bind();
+    const { cwd, binding: parent, ctx } = await session(["session-isolation-test"]);
     const child = bind();
-    const parentStart = parent.events.get("session_start");
     const childStart = child.events.get("session_start");
-    assert.ok(parentStart);
     assert.ok(childStart);
-
-    await parentStart({}, context(cwd));
-    await childStart({}, context(cwd));
+    await childStart({}, ctx);
 
     await enableFirstServer(parent, cwd);
     await assertEnabledCount(parent, cwd, 1);
@@ -494,13 +469,7 @@ describe("mcp index", () => {
   });
 
   it("filters servers from immediate printable input and toggles the selected match", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-panel-filter-"));
-    writeServerConfig(cwd, ["alpha", "bravo", "charlie"]);
-
-    const binding = bind();
-    const sessionStart = binding.events.get("session_start");
-    assert.ok(sessionStart);
-    await sessionStart({}, context(cwd));
+    const { cwd, binding, execute } = await session(["alpha", "bravo", "charlie"]);
 
     const { harness, result } = await openPanel(binding, cwd);
     assert.match(harness.panel.render(78).join("\n"), /filter: █/);
@@ -538,18 +507,12 @@ describe("mcp index", () => {
 
     harness.panel.handleInput("\x1b");
     await result;
-    const status = await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd));
+    const status = await execute({ action: "status" });
     assert.match(status.content[0].text, /MCP servers \(1\/\d+ enabled\)/);
   });
 
   it("uses shifted R and A for restart and reauthentication", async () => {
-    const restartCwd = mkdtempSync(join(tmpdir(), "mcp-panel-restart-"));
-    writeServerConfig(restartCwd, ["restartable"]);
-
-    const restartBinding = bind();
-    const restartStart = restartBinding.events.get("session_start");
-    assert.ok(restartStart);
-    await restartStart({}, context(restartCwd));
+    const { cwd: restartCwd, binding: restartBinding, execute } = await session(["restartable"]);
 
     const restartPanel = await openPanel(restartBinding, restartCwd);
     restartPanel.harness.panel.handleInput("r");
@@ -558,16 +521,10 @@ describe("mcp index", () => {
     assert.match(restartPanel.harness.panel.render(78).join("\n"), /connecting…/);
     restartPanel.harness.panel.handleInput("\x1b");
     await restartPanel.result;
-    const restartStatus = await restartBinding.tool.execute("id", { action: "status" }, undefined, undefined, context(restartCwd));
+    const restartStatus = await execute({ action: "status" });
     assert.match(restartStatus.content[0].text, /MCP servers \(1\/\d+ enabled\)/);
 
-    const authCwd = mkdtempSync(join(tmpdir(), "mcp-panel-auth-"));
-    writeServerConfig(authCwd, ["authable"]);
-
-    const authBinding = bind();
-    const authStart = authBinding.events.get("session_start");
-    assert.ok(authStart);
-    await authStart({}, context(authCwd));
+    const { cwd: authCwd, binding: authBinding } = await session(["authable"]);
 
     const authPanel = await openPanel(authBinding, authCwd);
     for (const key of "authable") authPanel.harness.panel.handleInput(key);
@@ -580,11 +537,7 @@ describe("mcp index", () => {
   });
 
   it("adds a fresh enabled-server snapshot to every child launch environment", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-handoff-parent-"));
-    writeServerConfig(cwd, ["handoff-server"]);
-
-    const parent = bind();
-    await parent.events.get("session_start")!({}, context(cwd));
+    const { cwd, binding: parent } = await session(["handoff-server"]);
     await enableFirstServer(parent, cwd);
 
     const launchEnvironments = [collectSubagentEnvironment(), collectSubagentEnvironment()];
@@ -599,11 +552,7 @@ describe("mcp index", () => {
   });
 
   it("consumes a child snapshot and identity-validates it against local config", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-handoff-child-"));
-    writeServerConfig(cwd, ["matching-server"]);
-
-    const parent = bind();
-    await parent.events.get("session_start")!({}, context(cwd));
+    const { cwd, binding: parent } = await session(["matching-server"]);
     await enableFirstServer(parent, cwd);
     const environment = collectSubagentEnvironment();
 
@@ -630,12 +579,8 @@ describe("mcp index", () => {
     // This test exercises the R1 bug: 'finally' previously called busy.delete(name)
     // immediately, erasing the catch-block error before it could render.
     const { mock } = await import("node:test");
-    const cwd = mkdtempSync(join(tmpdir(), "mcp-restart-err-"));
     // Server with no command or url — connect rejects immediately (no I/O).
-    writeServerConfig(cwd, ["fail-server"]);
-
-    const binding = bind();
-    await binding.events.get("session_start")!({}, context(cwd));
+    const { cwd, binding } = await session(["fail-server"]);
 
     // Mock setTimeout so the 4-second display cleanup timer never fires for real.
     mock.timers.enable({ apis: ["setTimeout"] });
@@ -682,8 +627,16 @@ describe("mcp index", () => {
 
 });
 
-// Helper to trigger session_start on a binding.
-async function sessionStart(cwd: string, binding: Binding, ctx: any): Promise<void> {
-  const handler = binding.events.get("session_start");
-  if (handler) await handler({}, ctx);
+async function session(config: string[] | string, contextUi = ui) {
+  const cwd = mkdtempSync(join(tmpdir(), "mcp-session-"));
+  sessionDirs.push(cwd);
+  if (typeof config === "string") writeFileSync(join(cwd, ".mcp.json"), config);
+  else writeServerConfig(cwd, config);
+  const binding = bind();
+  const ctx = context(cwd, contextUi);
+  const start = binding.events.get("session_start");
+  assert.ok(start, "the extension registers session_start");
+  await start({}, ctx);
+  const execute = (args: Record<string, unknown>) => binding.tool.execute("id", args, undefined, undefined, ctx);
+  return { cwd, binding, ctx, execute };
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import { UnauthorizedError } from "@modelcontextprotocol/client";
 import { Manager, AuthError, type McpEnabledSnapshot, type ToolMeta } from "./manager.ts";
 import type { ServerDef } from "./config.ts";
 import { identity } from "./config.ts";
+import type { AuthStorage } from "./auth-storage.ts";
 
 const serverModule = pathToFileURL(fileURLToPath(import.meta.resolve("@modelcontextprotocol/server"))).href;
 const stdioModule = pathToFileURL(fileURLToPath(import.meta.resolve("@modelcontextprotocol/server/stdio"))).href;
@@ -158,7 +160,11 @@ describe("mcp manager", () => {
   it("implicit OAuth: UnauthorizedError triggers authImplicit then one reconnect that succeeds", async () => {
     const def: ServerDef = { name: "oauth-reconnect", url: "http://localhost/mock", auth: "oauth" };
     const servers = new Map([[def.name, def]]);
-    const manager = new Manager();
+    const storage: AuthStorage = {
+      read: async () => undefined,
+      update: async () => {},
+    };
+    const manager = new Manager(storage);
     await manager.initialize(servers);
     manager.enabled.add(def.name);
 
@@ -173,8 +179,9 @@ describe("mcp manager", () => {
       return tools;
     };
 
-    manager._authImplicit = async (_def, _opts) => {
+    manager._authImplicit = async (_def, options) => {
       authImplicitCalls++;
+      assert.equal(options?.storage, storage, "manager passes its selected storage to implicit OAuth");
       // Auth succeeds; next reconnect will succeed.
     };
 
@@ -186,6 +193,59 @@ describe("mcp manager", () => {
     assert.equal(manager.getAuthFailures().size, 0, "no auth failure latched after successful reconnect");
 
     await manager.shutdown();
+  });
+
+  it("live OAuth transport loads its bearer token from the manager's injected storage", async () => {
+    const authorizationHeaders: string[] = [];
+    const httpServer = createServer((req, res) => {
+      if (req.method !== "POST") {
+        res.writeHead(405).end();
+        return;
+      }
+      let body = "";
+      req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+      req.on("end", () => {
+        authorizationHeaders.push(String(req.headers.authorization ?? ""));
+        const message = JSON.parse(body) as {
+          id?: string | number;
+          method: string;
+          params?: { protocolVersion?: string };
+        };
+        if (message.id === undefined) {
+          res.writeHead(202).end();
+          return;
+        }
+        const result = message.method === "initialize"
+          ? {
+              protocolVersion: message.params?.protocolVersion,
+              capabilities: { tools: {} },
+              serverInfo: { name: "storage-fixture", version: "1" },
+            }
+          : message.method === "tools/list"
+            ? { tools: [] }
+            : {};
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+      });
+    });
+    await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+
+    const url = `http://localhost:${(httpServer.address() as { port: number }).port}`;
+    const storage: AuthStorage = {
+      read: async () => ({ tokens: { access_token: "injected-token", token_type: "bearer" } }),
+      update: async () => {},
+    };
+    const def: ServerDef = { name: "oauth-storage", url, auth: "oauth" };
+    const manager = new Manager(storage);
+    try {
+      await manager.initialize(new Map([[def.name, def]]));
+      assert.deepEqual(await manager.connect(def.name), []);
+      assert.ok(authorizationHeaders.length >= 2, "initialize and tools/list requests reach the live transport");
+      assert.ok(authorizationHeaders.every((header) => header === "Bearer injected-token"));
+    } finally {
+      await manager.shutdown();
+      await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it("implicit OAuth latches, surfaces auth metadata, and can be retried", async () => {
