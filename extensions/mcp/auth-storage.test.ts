@@ -92,14 +92,14 @@ describe("mcp auth-storage", () => {
     }
   });
 
-  it("fails closed for oversized serialized commands, including quote escaping and UTF-8", async () => {
+  it("roundtrips large records with quotes, newlines, and UTF-8", async () => {
     const adapter = new MockKeychain();
     const storage = new MacOSKeyring(adapter, "darwin", dir);
-    for (const codeVerifier of ["x".repeat(4096), '"'.repeat(1500), "😀".repeat(1000)]) {
-      await assert.rejects(() => storage.update("url", () => ({ codeVerifier })), /4096-byte stdin limit/);
-    }
-    assert.equal(adapter.writes, 0);
-    assert.equal(await storage.read("url"), undefined);
+    const record: AuthRecord = {
+      tokens: { access_token: "a".repeat(4000), refresh_token: '"\\\n'.repeat(1000), token_type: "bearer", scope: "😀 ".repeat(2000) },
+    };
+    await storage.update("url", () => record);
+    assert.deepEqual(await storage.read("url"), record);
   });
 
   it("rejects nonmacOS credential operations without helper calls or plaintext fallback/migration", async () => {

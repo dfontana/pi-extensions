@@ -13,7 +13,6 @@ import type {
   StoredOAuthTokens,
 } from "@modelcontextprotocol/client";
 import { createHash } from "node:crypto";
-import * as keychain from "../shared/keychain.ts";
 import { STATE_DIR, readState, writeState } from "./config.ts";
 
 /** One server's persisted OAuth registration, tokens, and in-progress flow. */
@@ -65,6 +64,24 @@ export interface KeychainAdapter {
   deletePassword(account: string): Promise<void>;
 }
 
+const KEYCHAIN_SERVICE = "pi-extensions";
+
+/** Security.framework via @napi-rs/keyring; loaded lazily so non-macOS never needs the native binding. */
+const keychain: KeychainAdapter = {
+  async getPassword(account) {
+    const { AsyncEntry } = await import("@napi-rs/keyring");
+    return (await new AsyncEntry(KEYCHAIN_SERVICE, account).getPassword()) ?? undefined;
+  },
+  async setPassword(account, password) {
+    const { AsyncEntry } = await import("@napi-rs/keyring");
+    await new AsyncEntry(KEYCHAIN_SERVICE, account).setPassword(password);
+  },
+  async deletePassword(account) {
+    const { AsyncEntry } = await import("@napi-rs/keyring");
+    await new AsyncEntry(KEYCHAIN_SERVICE, account).deleteCredential();
+  },
+};
+
 // Shared by all instances: different managers must not lose each other's patches.
 const accountUpdates = new Map<string, Promise<void>>();
 
@@ -111,15 +128,7 @@ export class MacOSKeyring implements AuthStorage {
         await this.adapter.deletePassword(account);
         return;
       }
-      const secret = JSON.stringify(next);
-      // Match shared/keychain.ts's quoted security -i command; fail before any
-      // write when its 4096-byte stdin buffer would truncate the credential.
-      const quote = (value: string) => `"${value.replace(/["\\]/g, "\\$&")}"`;
-      const command = ["add-generic-password", "-s", "pi-extensions", "-a", account, "-U", "-w", secret].map(quote).join(" ") + "\n";
-      if (Buffer.byteLength(command) >= 4096) {
-        throw new Error("MCP OAuth record exceeds the macOS Keychain helper's 4096-byte stdin limit. Use a server with smaller OAuth metadata; plaintext fallback is disabled.");
-      }
-      await this.adapter.setPassword(account, secret);
+      await this.adapter.setPassword(account, JSON.stringify(next));
     });
     accountUpdates.set(account, operation);
     try { await operation; }
