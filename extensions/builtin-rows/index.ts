@@ -2,70 +2,32 @@
  * builtin-rows — draws pi's built-in read, write, bash, grep, find, and ls
  * tools with the shared compact row (extensions/shared/tool-row.ts).
  *
- * pi has no render-only hook, so each tool is re-registered from pi's own
- * definition factory with the same options pi derives from settings; only the
- * renderers change. Expanded rows show pi's stock call + result rendering,
- * loaded from pi's (non-exported) renderer module, so upstream rendering
- * changes still appear there.
+ * Purely presentational: a `pi.registerToolRenderer` resolver wraps whatever
+ * renderers pi would otherwise use (`next()`, pi's stock ones for built-ins),
+ * so the tools themselves, and their settings, stay pi's. Expanded rows show
+ * those stock renderers, so upstream rendering changes still appear there.
  *
- * The factory options, shell-path normalization, and renderer module are pi
- * internals, so the override applies only on the pi version it was verified
- * against; any other version keeps pi's own rendering and warns. See
- * .pi/skills/bump-pi-version.
+ * No pi internals are used. If `next()` stops offering a call + result
+ * renderer pair in pi's default shell, the tool keeps pi's rendering.
  */
 
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
-import {
-  createBashToolDefinition,
-  createFindToolDefinition,
-  createGrepToolDefinition,
-  createLsToolDefinition,
-  createReadToolDefinition,
-  createWriteToolDefinition,
-  getPackageDir,
-  VERSION,
-  type BashToolInput,
-  type BashToolOptions,
-  type ExtensionAPI,
-  type FindToolInput,
-  type FindToolOptions,
-  type GrepToolInput,
-  type GrepToolOptions,
-  type LsToolInput,
-  type LsToolOptions,
-  type ReadToolInput,
-  type ReadToolOptions,
-  type ToolDefinition,
-  type WriteToolInput,
-  type WriteToolOptions,
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import type {
+  BashToolInput,
+  ExtensionAPI,
+  FindToolInput,
+  GrepToolInput,
+  LsToolInput,
+  ReadToolInput,
+  ToolRenderers,
+  WriteToolInput,
 } from "@earendil-works/pi-coding-agent";
 import { Container, type Component } from "@earendil-works/pi-tui";
-// Type-only, so it is erased at runtime: typecheck fails if pi moves or reshapes the renderer module.
-import type * as StockRendererModule from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/renderers/index.js";
-import type * as StockPathModule from "../../node_modules/@earendil-works/pi-coding-agent/dist/utils/paths.js";
 import { toolRowExpanded } from "../shared/tool-focus.ts";
 import { compactRow, countLabel, param, primary, tail, type Segment, type TitleInput } from "../shared/tool-row.ts";
 
-/** The pi version whose tool options and renderer module were last checked by hand. */
-const VERIFIED_PI_VERSION = "1.1.0";
-
-// If pi adds a factory option, typecheck fails here: check whether pi now
-// passes it from settings (AgentSession._buildRuntime) and mirror it below.
-type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-const knownOptions: [
-  Same<keyof ReadToolOptions, "autoResizeImages" | "resizeOptions" | "operations">,
-  Same<keyof BashToolOptions, "operations" | "commandPrefix" | "shellPath" | "exposeSessionEnvironment" | "spawnHook">,
-  Same<keyof WriteToolOptions | keyof GrepToolOptions | keyof FindToolOptions | keyof LsToolOptions, "operations">,
-] = [true, true, true];
-void knownOptions;
-
-type Renderers = Pick<ToolDefinition<any, any>, "renderCall" | "renderResult">;
-type StockInternals = {
-  renderers: Record<keyof typeof titles, Renderers>;
-  normalizePath: typeof StockPathModule.normalizePath;
-};
+type Renderers = Required<Pick<ToolRenderers, "renderCall" | "renderResult">>;
 type Title<Args> = (input: TitleInput<Args, unknown>) => Segment[];
 
 /** cwd-relative inside the cwd, `~`-relative under home, absolute otherwise. */
@@ -84,11 +46,11 @@ const pathTail = (input: TitleInput<{ path?: string }, unknown>, fallback?: stri
 };
 
 const limit = ({ args, theme }: TitleInput<{ limit?: number }, unknown>) =>
-  args.limit !== undefined && param(theme, `limit=${args.limit}`);
+  args.limit != null && param(theme, `limit=${args.limit}`);
 
 const titles = {
   read: (input: TitleInput<ReadToolInput, unknown>) => [
-    input.args.offset !== undefined && param(input.theme, `offset=${input.args.offset}`),
+    input.args.offset != null && param(input.theme, `offset=${input.args.offset}`),
     limit(input),
     pathTail(input),
   ],
@@ -97,7 +59,7 @@ const titles = {
     pathTail(input),
   ],
   bash: ({ args, theme }: TitleInput<BashToolInput, unknown>) => [
-    args.timeout !== undefined && param(theme, `timeout=${args.timeout}s`),
+    args.timeout != null && param(theme, `timeout=${args.timeout}s`),
     typeof args.command === "string" && primary(theme, args.command),
   ],
   grep: (input: TitleInput<GrepToolInput, unknown>) => {
@@ -107,7 +69,7 @@ const titles = {
       args.glob && param(theme, `glob=${args.glob}`),
       args.ignoreCase && param(theme, "ignoreCase"),
       args.literal && param(theme, "literal"),
-      args.context !== undefined && param(theme, `context=${args.context}`),
+      args.context != null && param(theme, `context=${args.context}`),
       limit(input),
       pathTail(input, "."),
     ];
@@ -136,7 +98,7 @@ function attempt(render: () => Component | undefined): Component | undefined {
  * settles (bash records its end time) and on every pass once the row has been
  * expanded, so collapsed rows never pay for it (read highlights the whole file).
  */
-function compactWithStockBody(name: string, stock: Renderers, title: Title<any>): Required<Renderers> {
+function compactWithStockBody(name: string, stock: Renderers, title: Title<any>): Renderers {
   let body: Component | undefined; // handed to compactRow's body() during a renderResult call
   const row = compactRow({ name, title, body: () => body });
   const own = (state: any): { call?: Component; result?: Component; live?: boolean; settled?: boolean } =>
@@ -144,7 +106,7 @@ function compactWithStockBody(name: string, stock: Renderers, title: Title<any>)
   return {
     renderCall(args, theme, context) {
       const state = own(context.state);
-      state.call = attempt(() => stock.renderCall!(args, theme, { ...context, expanded: true, lastComponent: state.call }));
+      state.call = attempt(() => stock.renderCall(args, theme, { ...context, expanded: true, lastComponent: state.call }));
       return row.renderCall(args, theme, context);
     },
     renderResult(result, options, theme, context) {
@@ -153,7 +115,7 @@ function compactWithStockBody(name: string, stock: Renderers, title: Title<any>)
       if (toolRowExpanded(context.toolCallId, options.expanded)) state.live = true;
       if (state.live || (!options.isPartial && !state.settled)) {
         state.result = attempt(() =>
-          stock.renderResult!(result, { ...options, expanded: true }, theme, { ...context, expanded: true, lastComponent: state.result }),
+          stock.renderResult(result, { ...options, expanded: true }, theme, { ...context, expanded: true, lastComponent: state.result }),
         );
       }
       if (!options.isPartial) state.settled = true;
@@ -172,61 +134,18 @@ function compactWithStockBody(name: string, stock: Renderers, title: Title<any>)
   };
 }
 
-async function loadStockRenderers(): Promise<StockInternals | string> {
-  if (VERSION !== VERIFIED_PI_VERSION) return `pi ${VERSION} is unverified (last verified ${VERIFIED_PI_VERSION})`;
-  try {
-    const packageDir = getPackageDir();
-    const rendererUrl = pathToFileURL(join(packageDir, "dist/core/tools/renderers/index.js")).href;
-    const pathUrl = pathToFileURL(join(packageDir, "dist/utils/paths.js")).href;
-    const stock: typeof StockRendererModule = await import(rendererUrl);
-    const paths: typeof StockPathModule = await import(pathUrl);
-    const renderers = {
-      read: stock.readRenderers,
-      write: stock.writeRenderers,
-      bash: stock.createShellRenderers("$"),
-      grep: stock.grepRenderers,
-      find: stock.findRenderers,
-      ls: stock.lsRenderers,
-    };
-    const missing = Object.entries(renderers).filter(([, r]) => typeof r?.renderCall !== "function" || typeof r?.renderResult !== "function");
-    return missing.length
-      ? `pi's renderers are missing for ${missing.map(([n]) => n).join(", ")}`
-      : { renderers, normalizePath: paths.normalizePath };
-  } catch (error) {
-    return `could not load pi internals (${error instanceof Error ? error.message : String(error)})`;
-  }
-}
+const hasTitle = (name: string): name is keyof typeof titles => Object.hasOwn(titles, name);
+
+/** The compact row only fits a call + result renderer pair drawn in pi's default shell. */
+const wrappable = (stock: ToolRenderers | undefined): stock is ToolRenderers & Renderers =>
+  typeof stock?.renderCall === "function" &&
+  typeof stock.renderResult === "function" &&
+  (stock.renderShell ?? "default") === "default";
 
 export default function (pi: ExtensionAPI) {
-  let warned = false;
-  pi.on("session_start", async (_event, ctx) => {
-    const stock = await loadStockRenderers();
-    if (typeof stock === "string") {
-      if (!warned) ctx.ui.notify(`builtin-rows: ${stock}; built-in tools keep pi's rendering. See the bump-pi-version skill.`, "warning");
-      warned = true;
-      return;
-    }
-
-    // Mirror the options pi builds its own tools with (AgentSession._buildRuntime).
-    const settings = pi.getSettings();
-    const read = { autoResizeImages: settings.images?.autoResize ?? true };
-    const bash = {
-      commandPrefix: settings.shellCommandPrefix,
-      shellPath: settings.shellPath ? stock.normalizePath(settings.shellPath) : settings.shellPath,
-    };
-
-    const override = (definition: ToolDefinition<any, any>, name: keyof typeof titles, inactive = false) =>
-      pi.registerTool({
-        ...definition,
-        ...compactWithStockBody(name, stock.renderers[name], titles[name]),
-        // Registering activates a tool by default; grep/find/ls are off unless the user enables them.
-        ...(inactive && { defaultActive: false }),
-      });
-    override(createReadToolDefinition(ctx.cwd, read), "read");
-    override(createWriteToolDefinition(ctx.cwd), "write");
-    override(createBashToolDefinition(ctx.cwd, bash), "bash");
-    override(createGrepToolDefinition(ctx.cwd), "grep", true);
-    override(createFindToolDefinition(ctx.cwd), "find", true);
-    override(createLsToolDefinition(ctx.cwd), "ls", true);
+  pi.registerToolRenderer((toolName, next) => {
+    const stock = next();
+    if (!hasTitle(toolName) || !wrappable(stock)) return stock;
+    return { ...stock, ...compactWithStockBody(toolName, stock, titles[toolName]) };
   });
 }

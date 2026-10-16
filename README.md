@@ -50,7 +50,7 @@ Every tool in this package (`subagent`, `todo`, `model_query`, `select_review_mo
 - **run-review** — full adversarial review/fix workflow for explicitly deep, comprehensive, multi-agent, broad, or high-risk reviews: four sibling subagent investigations emitted in one response, an independent synthesis reviewer, and a bounded fix/re-review loop.
 - **run-plan** — consolidates review feedback, delegates implementation to a persistent large-context agent, then invokes the full `run-review` workflow with that implementer as the fixer.
 
-Repo-local skills (in `.pi/skills/`, not shipped with the package): **web-access-smoke-test** provides an end-to-end check of the web-access tools after code changes, and **bump-pi-version** bumps the pi dependencies and re-verifies builtin-rows against the new version.
+Repo-local skills (in `.pi/skills/`, not shipped with the package): **web-access-smoke-test** provides an end-to-end check of the web-access tools after code changes, and **bump-pi-version** bumps the pi dependencies and smoke-tests builtin-rows against the new version.
 
 `quick-review`, `run-review`, and `run-plan` require this package's `subagent` and review-model selection tools; they preflight those tools and return enablement guidance rather than silently degrading.
 

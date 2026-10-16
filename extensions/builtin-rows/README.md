@@ -15,11 +15,8 @@ under the title.
 
 `edit` is left alone, since pi's edit renderer has its own diff preview.
 
-pi has no render-only hook, so each tool is re-registered from pi's own definition factory, with the
-options pi derives from settings (`images.autoResize`, `shellCommandPrefix`, `shellPath`). The expanded
-view is loaded from pi's renderer module, which pi doesn't export. Because both are pi internals, the
-override only applies on the pi version it was verified against. On any other version, the tools
-keep pi's rendering and a warning is shown at startup. To re-verify, use the repo-local
-`bump-pi-version` skill.
-
-`grep`, `find`, and `ls` stay inactive unless enabled (for example with `--tools`).
+It only changes how calls are drawn. A `pi.registerToolRenderer` resolver wraps the renderers pi
+would otherwise use, so the tools, their settings, and which ones are active stay pi's. It uses no pi
+internals and doesn't depend on the pi version. If pi ever stops providing a call and result
+renderer for one of these tools, or draws it in a custom shell, that tool keeps pi's rendering. If
+pi's renderer throws, the row shows only its title.
