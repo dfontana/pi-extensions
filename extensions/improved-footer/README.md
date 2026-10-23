@@ -1,6 +1,6 @@
 # improved-footer
 
-Replaces pi's default footer with one that shows the Jujutsu bookmark instead of the git branch (with git fallback) and tracks accurate OpenRouter costs via OpenRouter's generation API instead of pi's client-side estimate.
+Replaces pi's default footer with one that shows the Jujutsu bookmark instead of the git branch (with git fallback), tracks accurate OpenRouter costs, and displays ChatGPT Codex subscription usage when a Codex model is active.
 
 ## Configuration
 
@@ -13,7 +13,7 @@ A replacement footer, mirroring pi's default layout:
 ```
 ~/cwd (jj:bookmark) • session-name
 ↑tokens ↓tokens CHhit% $cost ctx%/window        model $in/$out • thinking
-extension statuses
+Codex 5h 85% left (1h20m) · wk 92% left (2d3h)  extension statuses
 ```
 
 - **VCS segment** — in a jj repo (detected via `jj root`), shows `jj:<bookmark>` for the nearest ancestor bookmark (`jj:??` when none); otherwise falls back to pi's git branch watcher; omitted when neither applies.
@@ -21,6 +21,7 @@ extension statuses
 - **Cost** — for OpenRouter responses, the actual cost is fetched from `https://openrouter.ai/api/v1/generation` per response id (pi's estimate uses static pricing and misses OpenRouter's dynamic provider pricing). Non-OpenRouter responses use pi's built-in cost. The two are summed into one `$` figure.
 - **Model rates** — when the OpenRouter model catalog is available, the model name is annotated with its per-million-token prompt/completion prices.
 - **Context %** — colored: warning above 70%, error above 90%.
+- **Codex usage** — shows remaining percentage and reset countdown for the 5-hour and weekly windows when the active model uses Pi's `openai-codex` OAuth provider. It refreshes on model selection, after Codex responses, and every minute while active; it is never polled in headless modes or for other providers.
 
 ## Limitations and Technical details
 
@@ -28,3 +29,4 @@ extension statuses
 - Generation-cost lookups only happen for response ids starting with `gen-`, are deduplicated per id, and time out after 5s (a failed lookup is silently dropped).
 - The jj bookmark is refreshed asynchronously on session start and after each assistant message, not on a file watcher — it can lag briefly after `jj` operations until the next agent activity.
 - Token totals are backfilled from session entries on session restore.
+- Codex usage is fetched through ChatGPT's undocumented `/backend-api/wham/usage` endpoint using the active Pi Codex OAuth credential. This is a private backend API and may change; failures are silent and the last successful snapshot remains visible. No Codex CLI installation is required.

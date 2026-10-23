@@ -5,11 +5,12 @@
  * - Shows jj bookmark (jj:name) instead of git branch, with git fallback
  * - Uses OpenRouter's /api/v1/generation API for accurate cost tracking
  *   instead of pi's client-side estimation
+ * - Shows 5-hour and weekly ChatGPT Codex usage in the TUI footer
  *
  * Footer layout mirrors pi's default exactly:
  *   Line 1: ~/cwd (jj:bookmark) • session-name
  *   Line 2: ↑tokens ↓tokens CHhit% $cost ctx%/window  model • thinking
- *   Line 3: extension statuses
+ *   Line 3: Codex usage (when active) + extension statuses
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -22,6 +23,12 @@ import {
   formatCostStat,
   formatTokens,
 } from "../shared/usage-helpers.ts";
+import {
+  fetchCodexUsage,
+  formatCodexUsage,
+  getCodexAccountId,
+  type CodexUsageSnapshot,
+} from "./codex-usage.ts";
 
 // ─── Jujutsu Bookmark Detection (async, activity-triggered) ───────────────
 
@@ -158,6 +165,12 @@ export default function (pi: ExtensionAPI) {
   let footerTui: { requestRender: () => void } | null = null;
   let modelId = "";
   let thinkingLevel = "off";
+  let codexUsage: CodexUsageSnapshot | undefined;
+  let codexUsageModel: NonNullable<ExtensionContext["model"]> | undefined;
+  let codexUsageGeneration = 0;
+  let codexUsageLastFetchAt = 0;
+  let codexUsageController: AbortController | undefined;
+  let codexUsageTimer: ReturnType<typeof setInterval> | undefined;
 
   // ─── Cached token totals (updated incrementally on message_end) ─────────
   let cachedTotalInput = 0;
@@ -172,6 +185,95 @@ export default function (pi: ExtensionAPI) {
 
   function requestRender() {
     footerTui?.requestRender();
+  }
+
+  function usesCodexOAuth(ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>): boolean {
+    try {
+      return ctx.modelRegistry.isUsingOAuth(model);
+    } catch {
+      return false;
+    }
+  }
+
+  function clearCodexUsage() {
+    codexUsageController?.abort();
+    codexUsageController = undefined;
+    codexUsageLastFetchAt = 0;
+    if (codexUsage) {
+      codexUsage = undefined;
+      requestRender();
+    }
+  }
+
+  function stopCodexUsage(clearDisplay = true) {
+    codexUsageGeneration++;
+    if (codexUsageTimer) clearInterval(codexUsageTimer);
+    codexUsageTimer = undefined;
+    codexUsageController?.abort();
+    codexUsageController = undefined;
+    codexUsageModel = undefined;
+    codexUsageLastFetchAt = 0;
+    if (clearDisplay && codexUsage) {
+      codexUsage = undefined;
+      requestRender();
+    }
+  }
+
+  async function refreshCodexUsage(
+    ctx: ExtensionContext,
+    model: NonNullable<ExtensionContext["model"]>,
+    generation: number,
+  ) {
+    if (ctx.mode !== "tui" || model.provider !== "openai-codex" || generation !== codexUsageGeneration) return;
+    if (!usesCodexOAuth(ctx, model)) {
+      clearCodexUsage();
+      return;
+    }
+    if (codexUsageController) return;
+    const now = Date.now();
+    if (now - codexUsageLastFetchAt < 10_000) return;
+    codexUsageLastFetchAt = now;
+
+    const controller = new AbortController();
+    codexUsageController = controller;
+    try {
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+      if (generation !== codexUsageGeneration || controller.signal.aborted) return;
+      if (!usesCodexOAuth(ctx, model)) {
+        clearCodexUsage();
+        return;
+      }
+      if (!auth.ok || !auth.apiKey) return;
+      const accountId = getCodexAccountId(auth.apiKey);
+      if (!accountId) return;
+      const usage = await fetchCodexUsage(auth.apiKey, accountId, { signal: controller.signal });
+      if (generation !== codexUsageGeneration || controller.signal.aborted) return;
+      if (!usesCodexOAuth(ctx, model)) {
+        clearCodexUsage();
+        return;
+      }
+      if (!usage) return;
+      codexUsage = usage;
+      requestRender();
+    } catch {
+      // Usage is a best-effort footer detail; leave the last successful snapshot visible.
+    } finally {
+      if (codexUsageController === controller) codexUsageController = undefined;
+    }
+  }
+
+  function syncCodexUsage(ctx: ExtensionContext, model: ExtensionContext["model"]) {
+    if (ctx.mode !== "tui" || model?.provider !== "openai-codex") {
+      stopCodexUsage();
+      return;
+    }
+    if (codexUsageModel?.id === model.id && codexUsageTimer) return;
+    stopCodexUsage(false);
+    codexUsageModel = model;
+    const generation = codexUsageGeneration;
+    void refreshCodexUsage(ctx, model, generation);
+    codexUsageTimer = setInterval(() => void refreshCodexUsage(ctx, model, generation), 60_000);
+    codexUsageTimer.unref?.();
   }
 
   function ensureOpenRouterPricing(ctx: ExtensionContext) {
@@ -203,6 +305,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("model_select", async (event, ctx) => {
     modelId = event.model.id;
+    syncCodexUsage(ctx, event.model);
     ensureOpenRouterPricing(ctx);
     requestRender();
   });
@@ -217,6 +320,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
     const provider = event.message.provider;
+    if (provider === "openai-codex" && codexUsageModel) {
+      void refreshCodexUsage(ctx, codexUsageModel, codexUsageGeneration);
+    }
 
     // Incrementally accumulate token totals (avoids re-iterating all entries in render)
     cachedTotalInput += event.message.usage.input;
@@ -266,8 +372,10 @@ export default function (pi: ExtensionAPI) {
     cachedTotalOutput = 0;
     latestCacheHitRate = undefined;
     hasCacheActivity = false;
+    stopCodexUsage();
     modelId = ctx.model?.id ?? "";
     thinkingLevel = pi.getThinkingLevel();
+    syncCodexUsage(ctx, ctx.model);
     vcsCwd = ctx.cwd;
     isJjRepo = await detectJjRepo(ctx.cwd);
     ensureOpenRouterPricing(ctx);
@@ -287,6 +395,9 @@ export default function (pi: ExtensionAPI) {
 
     // Fire initial jj bookmark lookup
     refreshJjBookmark();
+
+    // The usage bridge and custom footer are TUI-only; headless modes do no usage polling.
+    if (ctx.mode !== "tui") return;
 
     let unsubBranchChange: (() => void) | null = null;
 
@@ -365,14 +476,23 @@ export default function (pi: ExtensionAPI) {
 
           const lines = [pwdLine, statsLine2];
 
-          // ── Line 3: Extension statuses ──
+          // ── Line 3: Codex usage + extension statuses ──
+          const statusParts: string[] = [];
+          if (codexUsage) {
+            const remaining = [codexUsage.fiveHour, codexUsage.weekly]
+              .filter((window): window is NonNullable<typeof window> => !!window)
+              .map((window) => 100 - window.usedPercent);
+            const lowestRemaining = Math.min(...remaining);
+            const color = lowestRemaining <= 5 ? "error" : lowestRemaining <= 20 ? "warning" : "dim";
+            statusParts.push(theme.fg(color, formatCodexUsage(codexUsage)));
+          }
           const extensionStatuses = footerData.getExtensionStatuses();
-          if (extensionStatuses.size > 0) {
-            const sortedStatuses = Array.from(extensionStatuses.entries())
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim());
-            const statusLine = sortedStatuses.join(" ");
-            lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+          const sortedStatuses = Array.from(extensionStatuses.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim());
+          statusParts.push(...sortedStatuses);
+          if (statusParts.length > 0) {
+            lines.push(truncateToWidth(statusParts.join(" "), width, theme.fg("dim", "...")));
           }
 
           return lines;
@@ -384,6 +504,7 @@ export default function (pi: ExtensionAPI) {
   // ─── Cleanup ────────────────────────────────────────────────────────────
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    stopCodexUsage();
     vcsCwd = null;
     isJjRepo = false;
     jjBookmark = null;
