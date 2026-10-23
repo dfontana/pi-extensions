@@ -89,6 +89,17 @@ export class SubagentScheduler {
     return { acquire, close };
   }
 
+  /**
+   * Wait for an active-turn slot without an outstanding-call admission. Vibe
+   * workers use this for each turn they start from idle; FIFO with calls.
+   */
+  acquireTurn(): Promise<SchedulerLease> {
+    return new Promise((resolve) => {
+      this.waiters.push({ started: false, waiting: true, resolve: (lease) => resolve(lease!) });
+      this.pump();
+    });
+  }
+
   private pump(): void {
     while (this.active < MAX_ACTIVE_CHILDREN) {
       const waiter = this.waiters[0];

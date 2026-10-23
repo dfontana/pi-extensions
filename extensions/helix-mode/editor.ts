@@ -20,6 +20,7 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { decorateEditorLines } from "../shared/editor-decoration.ts";
 
 import {
   lineColToOffset,
@@ -174,7 +175,7 @@ export class HelixEditor extends CustomEditor {
   override render(width: number): string[] {
     this.lastRenderWidth = width;
 
-    let lines = super.render(width);
+    let lines = decorateEditorLines(super.render(width), this.getTheme());
     if (lines.length === 0) return lines;
 
     // Selection highlight — applied before the mode label, preserves CURSOR_MARKER

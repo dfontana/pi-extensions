@@ -9,7 +9,8 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderRow } from "../shared/render-harness.ts";
 import { registerSubagentEnvironmentProvider } from "./environment.ts";
 import { createSubagentExtension, MAX_ACTIVE_CHILDREN, MAX_OUTSTANDING_CALLS } from "./index.ts";
-import { SUBAGENT_CHILD_ENV, type AgentResult, type RunRequest, type SubagentRunner } from "./process.ts";
+import { SUBAGENT_CHILD_ENV } from "./launch.ts";
+import type { AgentResult, RunRequest, SubagentRunner } from "./process.ts";
 import { emptyTrackedUsage } from "./usage.ts";
 
 interface RegisteredTool {
@@ -115,8 +116,10 @@ function setup(options: {
   let toolResultHandler: ((event: any) => any) | undefined;
   const api = {
     registerTool(value: RegisteredTool) {
-      tool = value;
+      if (value.name === "subagent") tool = value;
     },
+    registerCommand() {},
+    registerMessageRenderer() {},
     on(event: string, handler: (value: any) => any) {
       if (event === "tool_result") toolResultHandler = handler;
     },

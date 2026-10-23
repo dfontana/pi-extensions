@@ -36,7 +36,7 @@ Each extension has its own README covering configuration, provided tools/command
 | [model-query](extensions/model-query/README.md) | `model_query` tool: resolve one usable model by deterministic policy |
 | [review-model-selector](extensions/review-model-selector/README.md) | `select_review_model` tool: deterministic adversarial-reviewer selection |
 | [scoped-tools](extensions/scoped-tools/README.md) | YAML-specified bash commands as validated agent tools with hidden, call-time computed parameters |
-| [subagent](extensions/subagent/README.md) | Lean synchronous one-call delegation to global agents, with sibling-call parallelism |
+| [subagent](extensions/subagent/README.md) | Delegation to global agents: synchronous one-call subagents with sibling parallelism, and a `/vibe` director mode with persistent, steerable workers |
 | [todo](extensions/todo/README.md) | Minimal session-backed task list: one `todo` tool, a widget, and `/todo clear` / `/todo completed` |
 | [web-access](extensions/web-access/README.md) | `web_search` and `web_fetch` tools backed by configurable model providers |
 

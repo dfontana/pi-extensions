@@ -53,6 +53,16 @@ function addUsage(target: Usage, usage: Usage): void {
   if (usage.reasoning !== undefined) target.reasoning = (target.reasoning ?? 0) + usage.reasoning;
 }
 
+/** Add one tracked total into another, keeping the latest context and cache readings. */
+export function mergeTrackedUsage(target: TrackedUsage, source: TrackedUsage): void {
+  addUsage(target.usage, source.usage);
+  target.turns += source.turns;
+  if (source.contextTokens > 0) target.contextTokens = source.contextTokens;
+  if (source.contextWindow !== undefined) target.contextWindow = source.contextWindow;
+  if (source.latestCacheHitRate !== undefined) target.latestCacheHitRate = source.latestCacheHitRate;
+  if (source.hasCacheActivity) target.hasCacheActivity = true;
+}
+
 export function trackMessageUsage(target: TrackedUsage, message: Message): void {
   if (message.role === "assistant") {
     target.turns++;

@@ -15,17 +15,21 @@ import {
   type AgentConfig,
   type AgentDiagnostic,
 } from "./agents.ts";
+import { SUBAGENT_CHILD_ENV, VIBE_WORKER_ENV } from "./launch.ts";
 import {
-  SUBAGENT_CHILD_ENV,
   abortedResult,
   finalOutput,
+  newResult,
   resultFailed,
   resultOutput,
-  runPiSubagent,
   type AgentResult,
+  type ResultIdentity,
   type RunRequest,
   type SubagentRunner,
 } from "./process.ts";
+import { truncateUtf8 } from "./text.ts";
+import { createVibe, type VibeDeps } from "./vibe.ts";
+import { runPiSubagent } from "./worker.ts";
 import { collectSubagentEnvironment } from "./environment.ts";
 import { SubagentScheduler } from "./scheduler.ts";
 import { emptyTrackedUsage, formatUsage } from "./usage.ts";
@@ -59,6 +63,8 @@ interface LegacySubagentDetails {
 export interface SubagentExtensionOptions {
   run?: SubagentRunner;
   agentsDirectory?: string;
+  /** Test seams for vibe workers (storage root, launch hooks, idle parking). */
+  vibe?: Pick<VibeDeps, "workersRoot" | "hooks">;
 }
 
 const ThinkingSchema = Type.Unsafe<ModelThinkingLevel>({
@@ -108,11 +114,10 @@ function resolveThinking(
 }
 
 function truncateOutput(output: string): string {
-  const bytes = Buffer.byteLength(output, "utf8");
-  if (bytes <= PER_CALL_OUTPUT_CAP) return output;
-  let value = output.slice(0, PER_CALL_OUTPUT_CAP);
-  while (Buffer.byteLength(value, "utf8") > PER_CALL_OUTPUT_CAP) value = value.slice(0, -1);
-  return `${value}\n\n[Output truncated: ${bytes - Buffer.byteLength(value, "utf8")} bytes omitted. Retained tool details are separately bounded.]`;
+  const value = truncateUtf8(output, PER_CALL_OUTPUT_CAP, "");
+  if (value === output) return output;
+  const omitted = Buffer.byteLength(output, "utf8") - Buffer.byteLength(value, "utf8");
+  return `${value}\n\n[Output truncated: ${omitted} bytes omitted. Retained tool details are separately bounded.]`;
 }
 
 function notifyDiagnostics(
@@ -176,7 +181,6 @@ function diagnosticsLines(item: AgentResult, theme: RenderTheme): string {
   lines.push(`${fg("muted", "stderr: ")}${fg("dim", item.stderr.trim() ? "present" : "empty")}`);
   if (proc.spawnError) lines.push(`${fg("muted", "Spawn error: ")}${fg("dim", proc.spawnError)}`);
   if (proc.protocolErrors) lines.push(`${fg("muted", "Protocol errors: ")}${fg("dim", String(proc.protocolErrors))}`);
-  if (proc.stdoutBytesIgnored) lines.push(`${fg("muted", "Stdout truncated: ")}${fg("dim", `${proc.stdoutBytesIgnored} bytes`)}`);
   if (proc.stdoutTail) lines.push(`${fg("muted", "Stdout tail:")}\n${fg("dim", proc.stdoutTail)}`);
   return lines.join("\n");
 }
@@ -293,18 +297,7 @@ function parseDetails(value: unknown): AgentResult | undefined {
 }
 
 function queuedResult(params: SubagentParams, cwd: string): AgentResult {
-  return {
-    agent: params.agent,
-    task: params.task,
-    cwd: params.cwd ?? cwd,
-    exitCode: -1,
-    status: "queued",
-    messages: [],
-    stderr: "",
-    usage: emptyTrackedUsage(),
-    model: params.model,
-    thinking: params.thinking ?? thinkingFromModelReference(params.model),
-  };
+  return newResult({ ...params, cwd: params.cwd ?? cwd }, { status: "queued" });
 }
 
 function makeDetails(result: AgentResult): SubagentDetails {
@@ -343,7 +336,7 @@ function resultReturn(
 }
 
 function cancelledToolResult(
-  request: Parameters<typeof abortedResult>[0],
+  request: ResultIdentity,
   onUpdate: AgentToolUpdateCallback<SubagentDetails> | undefined,
 ): AgentToolResult<SubagentDetails> {
   return resultReturn(abortedResult(request), onUpdate);
@@ -477,7 +470,13 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
   const run = options.run ?? runPiSubagent;
 
   return (pi: ExtensionAPI) => {
-    if (process.env[SUBAGENT_CHILD_ENV] === "1") return;
+    if (process.env[SUBAGENT_CHILD_ENV] === "1") {
+      // Idle vibe workers should not spend money keeping their prompt cache warm.
+      if (process.env[VIBE_WORKER_ENV] === "1") {
+        pi.on("cache_warming_decision", (_event, ctx) => (ctx.isIdle() ? { action: "stop" } : undefined));
+      }
+      return;
+    }
 
     const initialDiscovery = discoverAgents(options.agentsDirectory);
     const scheduler = new SubagentScheduler();
@@ -496,6 +495,35 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
       }).then(normalize);
     };
 
+    const findAgent = (name: string, agents = discoverAgents(options.agentsDirectory).agents) =>
+      agents.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase())
+      ?? agents.find((candidate) => candidate.name === GENERAL_AGENT_NAME)!;
+
+    /** Resolve agent, cwd, model, and thinking with the documented precedence. */
+    async function resolveRequest(params: SubagentParams, ctx: ExtensionContext, signal: AbortSignal | undefined): Promise<RunRequest> {
+      const discovery = discoverAgents(options.agentsDirectory);
+      notifyDiagnostics(ctx, discovery.diagnostics, notifiedDiagnostics);
+      const defaults = parentDefaults(ctx);
+      await refreshModels(ctx.modelRegistry, signal);
+      throwIfAborted(signal);
+      const modelSnapshot = { current: ctx.model, available: selectableModels(ctx) };
+      const agent = findAgent(params.agent, discovery.agents);
+      const rawModel = params.model ?? agent.model;
+      const requestedThinking = resolveThinking(params, agent, defaults.thinking);
+      const modelResult = rawModel
+        ? resolveModelReference(rawModel, modelSnapshot, requestedThinking)
+        : { model: defaults.model, thinking: requestedThinking };
+      return {
+        agent,
+        task: params.task,
+        cwd: params.cwd ?? ctx.cwd,
+        model: modelResult.model,
+        thinking: modelResult.thinking,
+        contextWindow: contextWindowForModel(modelResult.model, modelSnapshot),
+        signal,
+      };
+    }
+
     // Tool failures are returned with their retained details and usage so the
     // native Pi result can render them. Partial updates do not pass through
     // this finalized-result middleware.
@@ -506,111 +534,114 @@ export function createSubagentExtension(options: SubagentExtensionOptions = {}) 
       return resultFailed(result) ? { isError: true } : undefined;
     });
 
-    pi.registerTool({
-      name: "subagent",
-      label: "Subagent",
-      description: [
-        "Delegate one task to one global agent in an isolated synchronous Pi process.",
-        "Each invocation delegates exactly one task; cwd, model (Pi CLI syntax), and thinking override agent frontmatter and then the parent session when omitted.",
-        `Available agents from ${initialDiscovery.directory}: ${formatAgentList(initialDiscovery.agents)}.`,
-      ].join(" "),
-      promptSnippet: "Delegate one task synchronously to an isolated global agent.",
-      promptGuidelines: [
-        "Issue all independent sibling subagent calls in the same response (maximum 8); do not issue unrelated sequential tools between them, then consume every complete synchronous result.",
-      ],
-      parameters: Parameters,
-      prepareArguments,
-      executionMode: "parallel",
+    async function executeSync(
+      params: SubagentParams,
+      signal: AbortSignal | undefined,
+      onUpdate: AgentToolUpdateCallback<SubagentDetails> | undefined,
+      ctx: ExtensionContext,
+    ): Promise<AgentToolResult<SubagentDetails>> {
+      const admission = scheduler.admit(signal);
+      const initial = queuedResult(params, ctx.cwd);
+      let resolved: RunRequest | undefined;
+      try {
+        emitResultUpdate(onUpdate, initial, "(waiting for subagent slot)");
+        resolved = await resolveRequest(params, ctx, signal);
 
-      async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
-        const params = rawParams as SubagentParams;
-        if (!params.agent?.trim() || !params.task?.trim()) {
-          throw new Error("agent and task are required and must be non-empty strings");
-        }
-        throwIfAborted(signal);
+        const queued = {
+          ...initial,
+          agent: resolved.agent.name,
+          cwd: resolved.cwd,
+          model: resolved.model,
+          thinking: resolved.thinking,
+          usage: emptyTrackedUsage(resolved.contextWindow),
+          status: "queued" as const,
+        };
+        emitResultUpdate(onUpdate, queued, "(waiting for subagent slot)");
 
-        const admission = scheduler.admit(signal);
-        const initial = queuedResult(params, ctx.cwd);
-        let resolved: RunRequest | undefined;
+        const lease = await admission.acquire();
         try {
-          emitResultUpdate(onUpdate, initial, "(waiting for subagent slot)");
-          const discovery = discoverAgents(options.agentsDirectory);
-          notifyDiagnostics(ctx, discovery.diagnostics, notifiedDiagnostics);
-          const defaults = parentDefaults(ctx);
-          await refreshModels(ctx.modelRegistry, signal);
-          throwIfAborted(signal);
-          const modelSnapshot = { current: ctx.model, available: selectableModels(ctx) };
-          const agent =
-            discovery.agents.find((candidate) => candidate.name.toLowerCase() === params.agent.toLowerCase())
-            ?? discovery.agents.find((candidate) => candidate.name === GENERAL_AGENT_NAME)!;
-          const rawModel = params.model ?? agent.model;
-          const requestedThinking = resolveThinking(params, agent, defaults.thinking);
-          const modelResult = rawModel
-            ? resolveModelReference(rawModel, modelSnapshot, requestedThinking)
-            : { model: defaults.model, thinking: requestedThinking };
-          resolved = {
-            agent,
-            task: params.task,
-            cwd: params.cwd ?? ctx.cwd,
-            model: modelResult.model,
-            thinking: modelResult.thinking,
-            contextWindow: contextWindowForModel(modelResult.model, modelSnapshot),
-            signal,
-          };
-
-          const queued = {
-            ...initial,
-            agent: agent.name,
-            cwd: resolved.cwd,
-            model: resolved.model,
-            thinking: resolved.thinking,
-            usage: emptyTrackedUsage(resolved.contextWindow),
-            status: "queued" as const,
-          };
-          emitResultUpdate(onUpdate, queued, "(waiting for subagent slot)");
-
-          const lease = await admission.acquire();
-          try {
-            if (!lease || signal?.aborted) {
-              return cancelledToolResult(resolved, onUpdate);
-            }
-
-            const running: AgentResult = {
-              ...queued,
-              status: "running",
-              exitCode: -1,
-            };
-            emitResultUpdate(onUpdate, running, "(working…)");
-            const result = await runChild({
-              ...resolved,
-              onUpdate: onUpdate
-                ? (partial) => {
-                    const runningPartial = { ...partial, status: "running" as const };
-                    emitResultUpdate(onUpdate, runningPartial, truncateOutput(finalOutput(runningPartial.messages) || "(working…)"));
-                  }
-                : undefined,
-            });
-            if (!isComplete(result)) result.status = result.exitCode === 0 ? "done" : "failed";
-            return resultReturn(result, onUpdate);
-          } finally {
-            // The lease is released even if cancellation wins after acquire()
-            // resolves but before the runner continuation starts.
-            lease?.release();
+          if (!lease || signal?.aborted) {
+            return cancelledToolResult(resolved, onUpdate);
           }
-        } catch (error) {
-          if (signal?.aborted) {
-            return cancelledToolResult(resolved ?? initial, onUpdate);
-          }
-          throw error;
+
+          const running: AgentResult = {
+            ...queued,
+            status: "running",
+            exitCode: -1,
+          };
+          emitResultUpdate(onUpdate, running, "(working…)");
+          const result = await runChild({
+            ...resolved,
+            onUpdate: onUpdate
+              ? (partial) => {
+                  const runningPartial = { ...partial, status: "running" as const };
+                  emitResultUpdate(onUpdate, runningPartial, truncateOutput(finalOutput(runningPartial.messages) || "(working…)"));
+                }
+              : undefined,
+          });
+          if (!isComplete(result)) result.status = result.exitCode === 0 ? "done" : "failed";
+          return resultReturn(result, onUpdate);
         } finally {
-          // close() removes an unlaunched waiter and releases the outstanding
-          // admission. It is safe on every setup, cancellation, and runner path.
-          admission.close();
+          // The lease is released even if cancellation wins after acquire()
+          // resolves but before the runner continuation starts.
+          lease?.release();
         }
-      },
+      } catch (error) {
+        if (signal?.aborted) {
+          return cancelledToolResult(resolved ?? initial, onUpdate);
+        }
+        throw error;
+      } finally {
+        // close() removes an unlaunched waiter and releases the outstanding
+        // admission. It is safe on every setup, cancellation, and runner path.
+        admission.close();
+      }
+    }
 
-      ...subagentRenderers,
+    const vibe = createVibe(pi, {
+      scheduler,
+      resolve: resolveRequest,
+      registerSubagent,
+      findAgent,
+      environment: collectSubagentEnvironment,
+      ...options.vibe,
     });
+
+    function registerSubagent(mode: "normal" | "vibe"): void {
+      const agents = `Available agents from ${initialDiscovery.directory}: ${formatAgentList(initialDiscovery.agents)}.`;
+      const overrides = "cwd, model (Pi CLI syntax), and thinking override agent frontmatter and then the parent session when omitted.";
+      pi.registerTool({
+        name: "subagent",
+        label: "Subagent",
+        description: mode === "vibe"
+          ? `Start a persistent worker agent on one task and return its worker id immediately. The worker keeps its conversation; its turn result arrives automatically, and subagent_send continues it. ${overrides} ${agents}`
+          : `Delegate one task to one global agent in an isolated synchronous Pi process. Each invocation delegates exactly one task; ${overrides} ${agents}`,
+        promptSnippet: mode === "vibe"
+          ? "Start a persistent worker agent on a task; results arrive automatically."
+          : "Delegate one task synchronously to an isolated global agent.",
+        promptGuidelines: mode === "vibe"
+          ? ["Start independent workers in the same response; each subagent call returns a worker id, not a result."]
+          : ["Issue all independent sibling subagent calls in the same response (maximum 8); do not issue unrelated sequential tools between them, then consume every complete synchronous result."],
+        parameters: Parameters,
+        prepareArguments,
+        executionMode: "parallel",
+
+        async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
+          const params = rawParams as SubagentParams;
+          if (!params.agent?.trim() || !params.task?.trim()) {
+            throw new Error("agent and task are required and must be non-empty strings");
+          }
+          throwIfAborted(signal);
+          if (!vibe.enabled) return executeSync(params, signal, onUpdate, ctx);
+          // A worker handle, not a result: the row falls back to this text.
+          return vibe.spawn(params, ctx, signal) as unknown as AgentToolResult<SubagentDetails>;
+        },
+
+        ...subagentRenderers,
+      });
+    }
+
+    registerSubagent("normal");
   };
 }
 

@@ -17,6 +17,7 @@
 
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { HelixEditor } from "./editor.js";
+import { ensureDecoratedEditor } from "../shared/editor-decoration.ts";
 
 export default function (pi: ExtensionAPI): void {
   let helixEnabled = true;
@@ -39,6 +40,8 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.setEditorComponent(previousFactory);
     helixInstalled = false;
     previousFactory = undefined;
+    // Keep another extension's border decoration (such as /vibe) visible.
+    ensureDecoratedEditor(ctx.ui);
   }
 
   // ── session_start: install the helix editor ──────────────────────────────

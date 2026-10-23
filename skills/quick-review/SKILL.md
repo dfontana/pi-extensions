@@ -38,6 +38,8 @@ These internal fields are workflow context, not required user-facing syntax.
 
 Confirm that `subagent` is available. If it is missing, stop and tell the user to enable or reload this package.
 
+In vibe mode (`/vibe`; `subagent` returns a worker id instead of a result) the same steps apply with two differences. The coordinating session cannot run shell commands, so delegate repository inspection, such as resolving the target or running tests, to a worker. Every "complete result" below means that worker's turn result, which arrives as a worker result message or through `subagent_wait`. Collect every required result before continuing, and `subagent_kill` each worker once its result is in so a later round starts fresh.
+
 Restate the exact review target. Resolve it with repository-appropriate commands and include untracked files.
 
 - For current working changes, inspect status plus the complete working diff. In Jujutsu repositories use `jj`; never substitute raw Git commands. In Git repositories include untracked files rather than relying on `git diff` alone.

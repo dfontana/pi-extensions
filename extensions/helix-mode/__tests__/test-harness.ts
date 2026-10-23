@@ -114,7 +114,7 @@ export function repeatKey(editor: HelixEditor, key: string, count: number): void
 export function stripAnsiAndCursor(value: string): string {
   return value
     .replaceAll(CURSOR_MARKER, "")
-    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "")
+    .replace(/\x1B[\]_][^\x07]*(?:\x07|\x1B\\)/g, "")
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\x1B[@-Z\\-_]/g, "");
 }

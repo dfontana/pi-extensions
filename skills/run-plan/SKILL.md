@@ -19,6 +19,8 @@ Read all review feedback and user instructions before acting. If the feedback is
 
 Confirm that `subagent` is available. If not, stop and tell the user to enable or reload this package. Also require the `select_review_model` tool from this package.
 
+In vibe mode (`/vibe`; `subagent` returns a worker id instead of a result) the same steps apply with two differences. The coordinating session cannot run shell commands, so delegate repository inspection, such as resolving the target or running tests, to a worker. Every "complete result" below means that worker's turn result, which arrives as a worker result message or through `subagent_wait`. Collect every required result before continuing, and `subagent_kill` each worker once its result is in so a later round starts fresh.
+
 ## 1. Consolidate feedback
 
 Inspect the relevant repository context and turn the individual comments into one cohesive plan:

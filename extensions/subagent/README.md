@@ -1,15 +1,13 @@
 # Subagent
 
-Delegate one task at a time to global, user-defined agents in isolated Pi processes.
+Delegate tasks to global, user-defined agents running in their own Pi processes.
 
-This extension intentionally keeps a small synchronous surface:
+There are two modes, both built on Pi's RPC mode (`pi --mode rpc`):
 
-- one `subagent` tool invocation launches exactly one child process
-- independent work runs in parallel when the parent emits sibling `subagent` calls in the same assistant response
-- global agent definitions only
-- per-call model, thinking, and working-directory overrides
-- shared model-query registry resolution
-- no chains, workflow prompts, background handles, steering, worktrees, or nested delegation
+- **Normal:** each `subagent` call runs one task in a disposable child and returns its complete result. Independent work runs in parallel when the parent emits sibling `subagent` calls in the same assistant response.
+- **Vibe (`/vibe`):** the parent becomes a director. `subagent` starts a persistent worker and returns its id immediately. Results arrive on their own, and `subagent_send` steers or continues a worker. See [Vibe mode](#vibe-mode).
+
+Both modes use global agent definitions only, with per-call model, thinking, and working-directory overrides resolved through the shared model-query registry. There are no chains, workflow prompts, worktrees, or nested delegation.
 
 ## Agent definitions
 
@@ -76,11 +74,28 @@ Older persisted calls containing the removed array syntax are display-only compa
 
 Each extension instance has a FIFO scheduler with at most eight outstanding/admitted calls and four active child processes. An accepted call immediately emits a queued partial result, so its native row shows `·` and `waiting for subagent slot`; a launched call shows `●` and `working`; completion shows `✓`, and child failure or cancellation shows `✗`. Setup and model resolution may finish while a call waits, but only child launch consumes an active slot. Aborted waiters are removed and never launched. Every admission and active lease is released idempotently in `finally`, including runner and setup errors. The scheduler is scoped to the parent extension instance/session and is not shared across processes.
 
-Each call launches Pi in JSON print mode with no session file. Explicit parent `--no-extensions` and `--extension` flags are preserved, with extension paths made absolute so a working-directory override cannot change what is loaded. Immediately before launch, registered environment providers add values to that child's isolated environment. The child receives `PI_EXTENSIONS_SUBAGENT_CHILD=1`, preventing recursive registration. Visible child activity streams into compact rendering; transcript messages, stderr, and the latest full tool-call preview are separately bounded. Model-visible final output is capped at 50 KB per call; retained details are also separately bounded, while per-call usage remains available.
+Each call launches Pi in RPC mode with no session file and sends `Task: <task>` as its one prompt; the child is stopped (stdin closed, then TERM and KILL if it lingers) as soon as that turn settles. Extension dialogs inside the child are answered as cancelled. Explicit parent `--no-extensions` and `--extension` flags are preserved, with extension paths made absolute so a working-directory override cannot change what is loaded. Immediately before launch, registered environment providers add values to that child's isolated environment. The child receives `PI_EXTENSIONS_SUBAGENT_CHILD=1`, preventing recursive registration. Visible child activity streams into compact rendering; transcript messages, stderr, and the latest full tool-call preview are separately bounded. Model-visible final output is capped at 50 KB per call; retained details are also separately bounded, while per-call usage remains available.
 
 The model registry refresh is shared as a single-flight operation across simultaneous sibling calls. Individual callers still honor their own cancellation, and each requested model is resolved independently after refresh, so one invalid model does not invalidate its siblings.
 
 Child failures return their retained, separately bounded result details and usage and are marked as native Pi tool errors. Setup, schema, admission, and model-resolution failures throw normally. Aborting a queued or admitted-but-not-started call cancels it without launching a child. An active child receives TERM first, then KILL after the five-second grace period if it remains alive.
+
+## Vibe mode
+
+`/vibe` (TUI only, while the parent is idle; no arguments) toggles director mode. While it is on:
+
+- The parent can only use `read`, `todo`, `subagent`, and the four worker controls. Any other tool call, including one nested inside another tool, is blocked, and `!`/`!!` shell commands are rejected. A system prompt section explains the director role.
+- The input box border turns the theme's accent color with ` VIBE ` at its top left. This works with or without [helix-mode](../helix-mode/README.md); the status bar shows the worker count and a widget lists each worker's state and latest activity.
+- `subagent` (same parameters as normal mode) starts a worker and returns `Started worker w1-general (turn t1)` right away.
+- `subagent_send {workerId, message}` reaches a busy worker at its next step, after its current tool batch and before its next model call, like typing into a running Pi. An idle or parked worker starts a new turn. Messages arrive as `<director-message id=…>` blocks.
+- When a worker's turn ends, its final text (capped at 16 KiB), status, and usage are posted to the director as a message, which starts a director turn if it was idle. If a `subagent_wait {workerIds?, timeoutMs?}` is pending for that worker, the wait returns the result instead. A wait with nothing running returns at once; the default timeout is 30 s, up to 120 s.
+- `subagent_list` shows every worker's state, turns, activity, usage, and transcript path. `subagent_kill {workerId}` stops a worker for good, ending any turn in progress.
+
+Workers share the parent's filesystem; nothing isolates their edits from each other. Up to eight worker processes run at once, and worker turns share the four active-turn slots with normal calls. A spawn at the limit parks the least recently used idle worker, and is rejected if all are busy. A parked worker's process is stopped; the next `subagent_send` relaunches it on its saved transcript.
+
+Each worker keeps its own Pi session under `~/.pi/agent/subagent-workers/<parent session id>/`, next to a `workers.json` roster. Switching, forking, starting a new session, `/tree`, reload, and quit park every worker. After a restart, running `/vibe` again lists the saved workers as parked, and `subagent_send` resumes one only after checking that its transcript file and session id still match. Nothing is replayed automatically: a turn cut off by shutdown stays interrupted, and the worker continues from its transcript when sent a message. Turning vibe off kills every worker and deletes the roster; transcripts are left on disk.
+
+Worker usage appears per worker and in each result message; it is not added to the parent session's totals. Idle workers turn off Pi's prompt-cache warming so they do not spend while waiting.
 
 ## Rendering
 
