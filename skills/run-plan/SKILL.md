@@ -1,7 +1,8 @@
 ---
 name: run-plan
 description: >
-  Consolidate code-review feedback into a cohesive implementation plan, delegate implementation to a Claude Sonnet 4.6 1M subagent, then invoke the reusable adversarial run-review workflow with a subagent as the fixer. Use when the user provides review feedback to plan, implement, and repeatedly verify.
+  Manually consolidate code-review feedback into a cohesive implementation plan, delegate implementation to a Claude Sonnet 4.6 1M subagent, then invoke the reusable adversarial run-review workflow with a subagent as the fixer. Invoke only when the user explicitly requests this skill.
+disable-model-invocation: true
 compatibility: Requires Pi 0.84.1+ and the subagent tool.
 ---
 

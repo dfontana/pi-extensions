@@ -1,7 +1,8 @@
 ---
 name: quick-review
 description: >
-  Run a lightweight single-agent code review and bounded fix/re-review loop for small, routine, low-risk, or clearly scoped changes. Use by default for ordinary review requests that do not explicitly request a deep, comprehensive, adversarial, or multi-agent audit. One reviewer checks completeness, correctness, duplication, and simplicity together.
+  Manually run a lightweight single-agent code review and bounded fix/re-review loop for small, routine, low-risk, or clearly scoped changes. Invoke only when the user explicitly requests this skill. One reviewer checks completeness, correctness, duplication, and simplicity together.
+disable-model-invocation: true
 compatibility: Requires Pi 0.84.1+ and the subagent tool.
 ---
 

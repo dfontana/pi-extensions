@@ -1,7 +1,7 @@
 ---
 name: run-review
 description: >
-  Run a full multi-agent adversarial code review using four independent investigation angles, synthesis, and a bounded fix/re-review loop. Use only for explicitly deep, comprehensive, adversarial, multi-axis, or multi-agent reviews; broad or high-risk changes; or when invoked by run-plan. For ordinary small, routine, low-risk, or clearly scoped review requests, use quick-review instead.
+  Manually run a full multi-agent adversarial code review using four independent investigation angles, synthesis, and a bounded fix/re-review loop. Invoke only when the user explicitly requests this skill or as an internal step of run-plan.
 disable-model-invocation: true
 compatibility: Requires Pi 0.84.1+ and the subagent tool.
 ---
