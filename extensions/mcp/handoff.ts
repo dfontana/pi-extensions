@@ -25,6 +25,15 @@ function validSnapshot(value: unknown): value is McpEnabledSnapshot {
   );
 }
 
+/** Validate an untrusted value as a snapshot, returning a normalized copy. */
+export function parseEnabledSnapshot(value: unknown): McpEnabledSnapshot | undefined {
+  if (!validSnapshot(value)) return undefined;
+  return {
+    version: 1,
+    servers: value.servers.map(({ name, identity }) => ({ name, identity })),
+  };
+}
+
 /** Serialize a snapshot for one child process, or omit an unexpectedly large value. */
 export function serializeEnabledSnapshot(snapshot: McpEnabledSnapshot): string | undefined {
   const serialized = JSON.stringify(snapshot);
@@ -44,12 +53,7 @@ export function consumeEnabledSnapshot(
   if (!serialized || Buffer.byteLength(serialized, "utf8") > MAX_SNAPSHOT_BYTES) return undefined;
 
   try {
-    const parsed: unknown = JSON.parse(serialized);
-    if (!validSnapshot(parsed)) return undefined;
-    return {
-      version: 1,
-      servers: parsed.servers.map(({ name, identity }) => ({ name, identity })),
-    };
+    return parseEnabledSnapshot(JSON.parse(serialized));
   } catch {
     return undefined;
   }

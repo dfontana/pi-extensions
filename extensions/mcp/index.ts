@@ -12,6 +12,9 @@
  * server set through a child-only environment handoff. Connections and later
  * enable/disable changes remain isolated between processes.
  *
+ * The enabled set is also recorded as a session entry on the active branch,
+ * so reloading, resuming, or navigating the session tree restores it.
+ *
  * See README.md for config details.
  */
 
@@ -22,6 +25,7 @@ import {
   DEFAULT_MAX_LINES,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ExtensionContext,
   type ExtensionUIContext,
   formatSize,
   type ThemeColor,
@@ -33,9 +37,10 @@ import { GLOBAL_CONFIG_FILE, loadServers } from "./config.ts";
 import {
   consumeEnabledSnapshot,
   MCP_ENABLED_SNAPSHOT_ENV,
+  parseEnabledSnapshot,
   serializeEnabledSnapshot,
 } from "./handoff.ts";
-import { Manager, type ServerState } from "./manager.ts";
+import { Manager, type McpEnabledSnapshot, type ServerState } from "./manager.ts";
 import { registerSubagentEnvironmentProvider } from "../subagent/environment.ts";
 import {
   compactRow,
@@ -52,6 +57,24 @@ import {
 interface Runtime {
   manager: Manager;
   ui?: ExtensionUIContext;
+  /** Record the enabled set as a session entry when it changed since the last record. */
+  persist(): void;
+}
+
+/** Custom session entry type holding an McpEnabledSnapshot. */
+export const MCP_ENABLED_ENTRY = "mcp-enabled";
+
+const enabledKey = (names: Iterable<string>) => [...names].sort().join("\0");
+
+/** Newest valid enabled-set entry on the active branch. */
+function snapshotFromBranch(entries: readonly any[]): McpEnabledSnapshot | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry?.type !== "custom" || entry.customType !== MCP_ENABLED_ENTRY) continue;
+    const snapshot = parseEnabledSnapshot(entry.data);
+    if (snapshot) return snapshot;
+  }
+  return undefined;
 }
 
 /** Where to tell users to add servers; mirrors the paths loadServers() reads. */
@@ -557,6 +580,7 @@ async function openPanel(runtime: Runtime, ctx: ExtensionCommandContext): Promis
     };
   });
 
+  runtime.persist();
   if (result?.auth) await runAuth(runtime, ctx, result.auth);
 }
 
@@ -587,6 +611,7 @@ async function runAuth(runtime: Runtime, ctx: ExtensionCommandContext, name: str
   });
   if (ok) {
     manager.enabled.add(name);
+    runtime.persist();
     await manager.connect(name).catch(() => {});
     updateFooter(runtime);
     ctx.ui.notify(`"${name}" authenticated ✓`, "info");
@@ -654,7 +679,36 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
 }
 
 export default function (pi: ExtensionAPI) {
-  const runtime: Runtime = { manager: new Manager() };
+  /** Enabled set most recently recorded on (or restored from) the active branch. */
+  let recordedKey = "";
+  const runtime: Runtime = {
+    manager: new Manager(),
+    persist() {
+      const key = enabledKey(runtime.manager.enabled);
+      if (key === recordedKey) return;
+      pi.appendEntry<McpEnabledSnapshot>(MCP_ENABLED_ENTRY, runtime.manager.snapshot());
+      recordedKey = key;
+    },
+  };
+
+  /**
+   * Adopt the branch's recorded enabled set (all off when none) without
+   * touching connections; servers reconnect lazily. Names are matched without
+   * identity checks because the user chose them for this very session.
+   */
+  function restoreFromBranch(ctx: ExtensionContext, apply: boolean): void {
+    const snapshot = snapshotFromBranch(ctx.sessionManager.getBranch());
+    recordedKey = enabledKey(snapshot?.servers.map((s) => s.name) ?? []);
+    if (!apply) return;
+    const missing = runtime.manager.restoreEnabled(snapshot ?? { version: 1, servers: [] }, { matchIdentity: false });
+    if (missing.length) {
+      ctx.ui.notify(
+        `mcp: previously enabled server${missing.length === 1 ? " is" : "s are"} no longer configured: ${missing.join(", ")}`,
+        "warning",
+      );
+    }
+    updateFooter(runtime);
+  }
 
   registerMcpTool(pi, runtime);
 
@@ -683,10 +737,17 @@ export default function (pi: ExtensionAPI) {
 
     // Consume before initializing. The handoff helper always deletes the
     // environment value, including malformed input, to prevent propagation.
+    // A launch handoff from a parent agent takes precedence over session state.
     const inheritedSnapshot = consumeEnabledSnapshot();
     await runtime.manager.initialize(servers, inheritedSnapshot);
+    restoreFromBranch(ctx, !inheritedSnapshot);
     registerMcpTool(pi, runtime, runtime.manager.list());
     updateFooter(runtime);
+  });
+
+  pi.on("session_tree", async (_event, ctx) => {
+    runtime.ui = ctx.ui;
+    restoreFromBranch(ctx, true);
   });
 
   pi.on("session_shutdown", async () => {

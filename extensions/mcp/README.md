@@ -80,13 +80,19 @@ The minimum configuration is one server with either `command` (stdio) or `url` (
 
 ## Special Setup Instructions
 
-Servers default to **off** every session — curate the active set from the `/mcp` panel before the agent can reach them.
+Servers default to **off** in a new session — curate the active set from the `/mcp` panel before the agent can reach them.
+
+## Session persistence
+
+The enabled set is recorded in the session as an `mcp-enabled` custom entry (server names and identity hashes only) whenever it changes: on closing the `/mcp` panel and after a successful Shift+A re-authentication. Unchanged sets are not re-recorded.
+
+On `/reload`, resume, or fork, the newest record on the active branch is restored; navigating with `/tree` adopts the target branch's record (all off when it has none). `/new` starts with everything off. Servers are matched by name, so a server whose configuration changed stays enabled; a server no longer configured stays off and produces a warning. Restoring never connects: servers reconnect lazily on first use.
 
 ## Child agent inheritance
 
 Each child process receives a point-in-time snapshot of the parent's enabled server set at launch. The handoff contains only server names and configuration identity hashes; it contains no credentials or server configuration. During child startup, MCP removes the handoff value from the process environment and enables only entries whose identity matches the child's independently loaded configuration.
 
-Snapshots are launch-scoped and isolated for parallel children. Child connections and subsequent enable/disable changes do not affect the parent or siblings. Other Pi sessions start with all servers off as usual.
+Snapshots are launch-scoped and isolated for parallel children. Child connections and subsequent enable/disable changes do not affect the parent or siblings. A launch snapshot takes precedence over any enabled set recorded in the child's session. Other new Pi sessions start with all servers off as usual.
 
 Capability scoping remains authoritative. If a child does not load MCP, it cannot consume or use the snapshot. If its tool list excludes `mcp`, MCP may initialize the inherited enabled set, but the child still has no tool with which to reach those servers.
 
@@ -96,6 +102,6 @@ Capability scoping remains authoritative. If a child does not load MCP, it canno
 - On **other operating systems**, OAuth credentials use the plaintext file adapter at `~/.pi/agent/mcp/auth.json`, keyed by server URL. Credentials are never written to `.mcp.json` or session files. Storage errors propagate; Shift+A clearing failures appear as error notifications and do not start authentication.
 - On macOS, existing `~/.pi/agent/mcp/auth.json` files are **not read, migrated, or deleted automatically**. Re-authenticate to create Keychain credentials; manage any legacy plaintext file yourself. Other platforms continue to read and update that file.
 - Tool metadata remains on disk under `~/.pi/agent/mcp/cache.json`, keyed by a server-identity hash (7-day TTL). The cache lets status/list/search/describe work without a live connection; actual tool calls trigger a lazy connect. Cache is an optimization, never the source of truth.
-- Enable/disable controls whether the current session exposes a server to the agent; it does not connect or disconnect it. Restart (`R`, Shift+R) enables the server, clears any auth latch, replaces any live transport, and refreshes its tool metadata, while retaining OAuth credentials. Re-authenticate (`A`, Shift+A) also clears the auth latch and all locally saved OAuth state first, so the next connection obtains fresh credentials.
+- Enable/disable controls whether the current session exposes a server to the agent and is recorded in the session; it does not connect or disconnect it. Restart (`R`, Shift+R) enables the server, clears any auth latch, replaces any live transport, and refreshes its tool metadata, while retaining OAuth credentials. Re-authenticate (`A`, Shift+A) also clears the auth latch and all locally saved OAuth state first, so the next connection obtains fresh credentials.
 - OAuth auth is implicit: the first connect that needs auth opens a browser, awaits the callback (up to 120 seconds), exchanges the code, and reconnects exactly once. Multiple concurrent calls for the same URL coalesce to a single browser flow. A successful `client_credentials` grant is non-interactive. On failure the error is latched for that session so no further browser flows are attempted automatically.
 - Intentionally out of scope: direct-tool promotion, MCP UI/Glimpse, host-config imports (Cursor/Claude/VS Code/…), setup wizards, sampling, elicitation, and an `npx` binary resolver. This is a single-proxy MCP client, nothing more.

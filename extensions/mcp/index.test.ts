@@ -28,6 +28,14 @@ interface Binding {
   };
   commands: Map<string, { handler: (argStr: string, ctx: any) => Promise<void> }>;
   events: Map<string, (...args: any[]) => Promise<void>>;
+  /** Session entries appended by the extension. */
+  entries: SessionEntry[];
+}
+
+interface SessionEntry {
+  type: string;
+  customType?: string;
+  data?: unknown;
 }
 
 const bindings: Binding[] = [];
@@ -42,10 +50,11 @@ afterEach(async () => {
   }
 });
 
-function bind(): Binding {
+function bind(entries: SessionEntry[] = []): Binding {
   const binding: Partial<Binding> = {
     commands: new Map(),
     events: new Map(),
+    entries,
   };
   const api = {
     registerTool(value: Binding["tool"]) {
@@ -56,6 +65,9 @@ function bind(): Binding {
     },
     on(event: string, handler: (...args: any[]) => Promise<void>) {
       binding.events!.set(event, handler);
+    },
+    appendEntry(customType: string, data?: unknown) {
+      entries.push({ type: "custom", customType, data });
     },
   } as unknown as ExtensionAPI;
   mcpExtension(api);
@@ -69,11 +81,12 @@ const ui = {
   setStatus() {},
 };
 
-function context(cwd: string, contextUi = ui) {
+function context(cwd: string, contextUi: object = ui, branch: () => readonly SessionEntry[] = () => []) {
   return {
     cwd,
     ui: contextUi,
     signal: undefined,
+    sessionManager: { getBranch: branch },
   } as any;
 }
 
@@ -575,6 +588,79 @@ describe("mcp index", () => {
     }
   });
 
+  describe("mcp session persistence", () => {
+    /** Start a fresh extension binding on an existing session, as /reload or a resume does. */
+    async function resume(cwd: string, entries: SessionEntry[]) {
+      const harness = panelHarness();
+      const binding = bind(entries);
+      await binding.events.get("session_start")!({}, context(cwd, harness.ui, () => entries));
+      return { binding, notifications: harness.notifications };
+    }
+
+    it("records changes once and restores the enabled set on reload", async () => {
+      const { cwd, binding, entries } = await session(["alpha", "bravo"]);
+      await enableFirstServer(binding, cwd);
+      await enableFirstServer(binding, cwd); // disable again
+      await enableFirstServer(binding, cwd); // re-enable
+      const unchanged = await openPanel(binding, cwd);
+      unchanged.harness.panel.handleInput("\x1b");
+      await unchanged.result;
+      assert.equal(entries.length, 3, "each change is recorded once; closing without changes records nothing");
+
+      const reloaded = await resume(cwd, entries);
+      await assertEnabledCount(reloaded.binding, cwd, 1);
+      assert.deepEqual(reloaded.notifications, []);
+    });
+
+    const configChanges: Array<{ label: string; config: Record<string, unknown>; enabled: number; warning?: RegExp }> = [
+      { label: "keeps a server whose configuration changed", config: { alpha: { command: "changed" } }, enabled: 1 },
+      { label: "warns about a server that is no longer configured", config: { bravo: {} }, enabled: 0, warning: /no longer configured: alpha/ },
+    ];
+    for (const { label, config, enabled, warning } of configChanges) {
+      it(label, async () => {
+        const { cwd, binding, entries } = await session(["alpha"]);
+        await enableFirstServer(binding, cwd);
+        writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: config }));
+
+        const reloaded = await resume(cwd, entries);
+        await assertEnabledCount(reloaded.binding, cwd, enabled);
+        const warnings = reloaded.notifications.filter((n) => n.level === "warning").map((n) => n.message);
+        if (warning) assert.ok(warnings.some((m) => warning.test(m)), `expected warning, got ${JSON.stringify(warnings)}`);
+        else assert.deepEqual(warnings, []);
+      });
+    }
+
+    it("follows the active branch when navigating the session tree", async () => {
+      const entries: SessionEntry[] = [];
+      let branch: SessionEntry[] = entries;
+      const { cwd, binding } = await session(["alpha"], ui, entries);
+      await enableFirstServer(binding, cwd);
+      const tree = binding.events.get("session_tree")!;
+
+      branch = [];
+      await tree({}, context(cwd, ui, () => branch));
+      await assertEnabledCount(binding, cwd, 0, "a branch without a record has everything off");
+
+      await tree({}, context(cwd, ui, () => entries));
+      await assertEnabledCount(binding, cwd, 1, "returning to the branch restores its record");
+    });
+
+    it("prefers a parent agent handoff over the session record", async () => {
+      const { cwd, binding: parent, entries } = await session(["alpha", "bravo"]);
+      await enableFirstServer(parent, cwd); // records alpha
+      const handoff = { version: 1, servers: [] };
+      const previous = process.env[MCP_ENABLED_SNAPSHOT_ENV];
+      try {
+        process.env[MCP_ENABLED_SNAPSHOT_ENV] = JSON.stringify(handoff);
+        const child = await resume(cwd, entries);
+        await assertEnabledCount(child.binding, cwd, 0);
+      } finally {
+        if (previous === undefined) delete process.env[MCP_ENABLED_SNAPSHOT_ENV];
+        else process.env[MCP_ENABLED_SNAPSHOT_ENV] = previous;
+      }
+    });
+  });
+
   it("rejected Shift+R restart renders the error until the display timeout", async () => {
     // This test exercises the R1 bug: 'finally' previously called busy.delete(name)
     // immediately, erasing the catch-block error before it could render.
@@ -627,16 +713,16 @@ describe("mcp index", () => {
 
 });
 
-async function session(config: string[] | string, contextUi = ui) {
+async function session(config: string[] | string, contextUi: object = ui, entries: SessionEntry[] = []) {
   const cwd = mkdtempSync(join(tmpdir(), "mcp-session-"));
   sessionDirs.push(cwd);
   if (typeof config === "string") writeFileSync(join(cwd, ".mcp.json"), config);
   else writeServerConfig(cwd, config);
-  const binding = bind();
-  const ctx = context(cwd, contextUi);
+  const binding = bind(entries);
+  const ctx = context(cwd, contextUi, () => entries);
   const start = binding.events.get("session_start");
   assert.ok(start, "the extension registers session_start");
   await start({}, ctx);
   const execute = (args: Record<string, unknown>) => binding.tool.execute("id", args, undefined, undefined, ctx);
-  return { cwd, binding, ctx, execute };
+  return { cwd, binding, ctx, execute, entries };
 }

@@ -32,7 +32,8 @@ export type ServerState = "off" | "idle" | "cached" | "connected" | "needs-auth"
 /**
  * Point-in-time snapshot of a session's enabled MCP server set.
  * Passed to a child process at launch so it inherits only what the parent had
- * enabled at that instant.
+ * enabled at that instant, and persisted as a session entry so the set
+ * survives reloads and resumes.
  */
 export interface McpEnabledSnapshot {
   version: 1;
@@ -150,17 +151,28 @@ export class Manager {
     this.cacheFile = undefined;
     this.connecting.clear();
 
-    if (snapshot && snapshot.version === 1) {
-      const seen = new Set<string>();
-      for (const entry of snapshot.servers) {
-        if (seen.has(entry.name)) continue; // duplicate
-        seen.add(entry.name);
-        const def = this.servers.get(entry.name);
-        if (!def) continue; // unknown in this session's config
-        if (identity(def) !== entry.identity) continue; // identity mismatch
-        this.enabled.add(entry.name);
-      }
+    if (snapshot) this.restoreEnabled(snapshot, { matchIdentity: true });
+  }
+
+  /**
+   * Replace the enabled set with `snapshot` without touching connections.
+   * Entries for servers absent from the configuration are skipped and returned.
+   * With `matchIdentity`, entries whose configuration identity changed are
+   * skipped silently; otherwise a server is matched by name alone.
+   */
+  restoreEnabled(snapshot: McpEnabledSnapshot, { matchIdentity }: { matchIdentity: boolean }): string[] {
+    this.enabled.clear();
+    const missing: string[] = [];
+    if (snapshot.version !== 1) return missing;
+    const seen = new Set<string>();
+    for (const entry of snapshot.servers) {
+      if (seen.has(entry.name)) continue; // duplicate
+      seen.add(entry.name);
+      const def = this.servers.get(entry.name);
+      if (!def) missing.push(entry.name);
+      else if (!matchIdentity || identity(def) === entry.identity) this.enabled.add(entry.name);
     }
+    return missing;
   }
 
   /**
