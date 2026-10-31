@@ -13,7 +13,7 @@ process.on("exit", () => rmSync(testAgentDir, { recursive: true, force: true }))
 
 const { MCP_ENABLED_SNAPSHOT_ENV } = await import("./handoff.ts");
 const { collectSubagentEnvironment } = await import("../subagent/environment.ts");
-const { default: mcpExtension, MCP_ACTIONS } = await import("./index.ts");
+const { default: mcpExtension, MCP_ACTIONS, MCP_ENABLED_ENTRY } = await import("./index.ts");
 
 interface Binding {
   tool: {
@@ -28,6 +28,7 @@ interface Binding {
   };
   commands: Map<string, { handler: (argStr: string, ctx: any) => Promise<void> }>;
   events: Map<string, (...args: any[]) => Promise<void>>;
+  flags: Map<string, { description?: string; type: "boolean" | "string" }>;
   /** Session entries appended by the extension. */
   entries: SessionEntry[];
 }
@@ -50,10 +51,11 @@ afterEach(async () => {
   }
 });
 
-function bind(entries: SessionEntry[] = []): Binding {
+function bind(entries: SessionEntry[] = [], flagValues: Record<string, string | boolean> = {}): Binding {
   const binding: Partial<Binding> = {
     commands: new Map(),
     events: new Map(),
+    flags: new Map(),
     entries,
   };
   const api = {
@@ -62,6 +64,12 @@ function bind(entries: SessionEntry[] = []): Binding {
     },
     registerCommand(name: string, command: { handler: (argStr: string, ctx: any) => Promise<void> }) {
       binding.commands!.set(name, command);
+    },
+    registerFlag(name: string, options: { description?: string; type: "boolean" | "string" }) {
+      binding.flags!.set(name, options);
+    },
+    getFlag(name: string) {
+      return flagValues[name];
     },
     on(event: string, handler: (...args: any[]) => Promise<void>) {
       binding.events!.set(event, handler);
@@ -160,6 +168,75 @@ function expectInvalid(binding: Binding, args: Record<string, unknown>, label: s
 }
 
 describe("mcp index", () => {
+  it("registers --mcp as a string-valued extension flag", () => {
+    const binding = bind();
+    const flag = binding.flags.get("mcp");
+    assert.equal(flag?.type, "string");
+    assert.match(flag?.description ?? "", /comma-separated/i);
+  });
+
+  it("uses explicit --mcp names over saved and inherited selections", async () => {
+    const { cwd: parentCwd, binding: parent } = await session(["alpha", "bravo", "charlie"]);
+    await enableFirstServer(parent, parentCwd);
+    const inheritedEnvironment = collectSubagentEnvironment();
+    assert.ok(inheritedEnvironment[MCP_ENABLED_SNAPSHOT_ENV], "parent provides a real enabled snapshot");
+    const previous = process.env[MCP_ENABLED_SNAPSHOT_ENV];
+    const entries: SessionEntry[] = [{
+      type: "custom",
+      customType: MCP_ENABLED_ENTRY,
+      data: { version: 1, servers: [{ name: "alpha", identity: "saved" }] },
+    }];
+    const capture = panelHarness();
+    try {
+      process.env[MCP_ENABLED_SNAPSHOT_ENV] = inheritedEnvironment[MCP_ENABLED_SNAPSHOT_ENV];
+      const { cwd, binding } = await session(
+        ["alpha", "bravo", "charlie"],
+        capture.ui,
+        entries,
+        { mcp: " bravo, missing,bravo " },
+      );
+      const status = (await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd))).content[0].text;
+
+      assert.match(status, /MCP servers \(1\/3 enabled\)/);
+      assert.match(status, /○ bravo\s+idle/);
+      assert.match(status, /· alpha\s+off/);
+      assert.match(status, /· charlie\s+off/);
+      assert.deepEqual(capture.notifications, [
+        { message: "mcp: --mcp skipped unknown server: missing", level: "warning" },
+      ]);
+      assert.equal(process.env[MCP_ENABLED_SNAPSHOT_ENV], undefined, "the overridden snapshot is still consumed");
+    } finally {
+      if (previous === undefined) delete process.env[MCP_ENABLED_SNAPSHOT_ENV];
+      else process.env[MCP_ENABLED_SNAPSHOT_ENV] = previous;
+    }
+  });
+
+  it("treats an explicit empty --mcp value as none, overriding a child snapshot", async () => {
+    const { cwd: parentCwd, binding: parent } = await session(["saved", "inherited"]);
+    await enableFirstServer(parent, parentCwd);
+    const inheritedEnvironment = collectSubagentEnvironment();
+    assert.ok(inheritedEnvironment[MCP_ENABLED_SNAPSHOT_ENV], "parent provides a real enabled snapshot");
+    const previous = process.env[MCP_ENABLED_SNAPSHOT_ENV];
+    try {
+      process.env[MCP_ENABLED_SNAPSHOT_ENV] = inheritedEnvironment[MCP_ENABLED_SNAPSHOT_ENV];
+      const savedEntries: SessionEntry[] = [{
+        type: "custom",
+        customType: MCP_ENABLED_ENTRY,
+        data: { version: 1, servers: [{ name: "saved", identity: "saved" }] },
+      }];
+      const { cwd, binding } = await session(["saved", "inherited"], ui, savedEntries, { mcp: "" });
+      const status = (await binding.tool.execute("id", { action: "status" }, undefined, undefined, context(cwd))).content[0].text;
+
+      assert.match(status, /MCP servers \(0\/2 enabled\)/);
+      assert.match(status, /· inherited\s+off/);
+      assert.match(status, /· saved\s+off/);
+      assert.equal(process.env[MCP_ENABLED_SNAPSHOT_ENV], undefined);
+    } finally {
+      if (previous === undefined) delete process.env[MCP_ENABLED_SNAPSHOT_ENV];
+      else process.env[MCP_ENABLED_SNAPSHOT_ENV] = previous;
+    }
+  });
+
   it("notifies credential clearing failures on Shift+A without opening an auth loader", async () => {
     const { defaultAuthStorage } = await import("./auth-storage.ts");
     const originalUpdate = defaultAuthStorage.update;
@@ -564,24 +641,33 @@ describe("mcp index", () => {
     ]);
   });
 
-  it("consumes a child snapshot and identity-validates it against local config", async () => {
-    const { cwd, binding: parent } = await session(["matching-server"]);
-    await enableFirstServer(parent, cwd);
+  it("consumes a real child snapshot and rejects a same-name config hash mismatch", async () => {
+    const { cwd: parentCwd, binding: parent } = await session(["matching-server"]);
+    await enableFirstServer(parent, parentCwd);
     const environment = collectSubagentEnvironment();
+    const serialized = environment[MCP_ENABLED_SNAPSHOT_ENV];
+    assert.ok(serialized, "enabled parent emits its real config identity");
 
     const previous = process.env[MCP_ENABLED_SNAPSHOT_ENV];
     try {
-      process.env[MCP_ENABLED_SNAPSHOT_ENV] = environment[MCP_ENABLED_SNAPSHOT_ENV];
-      const child = bind();
-      await child.events.get("session_start")!({}, context(cwd));
-      await assertEnabledCount(child, cwd, 1, "matching child config inherits");
+      process.env[MCP_ENABLED_SNAPSHOT_ENV] = serialized;
+      const matching = await session(["matching-server"]);
+      await assertEnabledCount(matching.binding, matching.cwd, 1, "same config in a different directory inherits");
       assert.equal(process.env[MCP_ENABLED_SNAPSHOT_ENV], undefined, "handoff is removed after consumption");
 
-      writeServerConfig(cwd, ["different-server"]);
-      process.env[MCP_ENABLED_SNAPSHOT_ENV] = environment[MCP_ENABLED_SNAPSHOT_ENV];
-      const changedChild = bind();
-      await changedChild.events.get("session_start")!({}, context(cwd));
-      await assertEnabledCount(changedChild, cwd, 0, "changed child config rejects the snapshot");
+      const savedEntries: SessionEntry[] = [{
+        type: "custom",
+        customType: MCP_ENABLED_ENTRY,
+        data: { version: 1, servers: [{ name: "matching-server", identity: "saved" }] },
+      }];
+      process.env[MCP_ENABLED_SNAPSHOT_ENV] = serialized;
+      const changed = await session(
+        JSON.stringify({ mcpServers: { "matching-server": { command: "changed" } } }),
+        ui,
+        savedEntries,
+      );
+      await assertEnabledCount(changed.binding, changed.cwd, 0, "same-name hash mismatch rejects snapshot without saved-state fallback");
+      assert.equal(process.env[MCP_ENABLED_SNAPSHOT_ENV], undefined, "mismatched handoff is consumed");
     } finally {
       if (previous === undefined) delete process.env[MCP_ENABLED_SNAPSHOT_ENV];
       else process.env[MCP_ENABLED_SNAPSHOT_ENV] = previous;
@@ -713,12 +799,17 @@ describe("mcp index", () => {
 
 });
 
-async function session(config: string[] | string, contextUi: object = ui, entries: SessionEntry[] = []) {
+async function session(
+  config: string[] | string,
+  contextUi: object = ui,
+  entries: SessionEntry[] = [],
+  flagValues: Record<string, string | boolean> = {},
+) {
   const cwd = mkdtempSync(join(tmpdir(), "mcp-session-"));
   sessionDirs.push(cwd);
   if (typeof config === "string") writeFileSync(join(cwd, ".mcp.json"), config);
   else writeServerConfig(cwd, config);
-  const binding = bind(entries);
+  const binding = bind(entries, flagValues);
   const ctx = context(cwd, contextUi, () => entries);
   const start = binding.events.get("session_start");
   assert.ok(start, "the extension registers session_start");

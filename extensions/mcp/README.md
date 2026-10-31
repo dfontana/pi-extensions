@@ -80,19 +80,33 @@ The minimum configuration is one server with either `command` (stdio) or `url` (
 
 ## Special Setup Instructions
 
-Servers default to **off** in a new session — curate the active set from the `/mcp` panel before the agent can reach them.
+Without an explicit `--mcp` value or child snapshot, servers default to **off** in a new session — curate the active set from the `/mcp` panel before the agent can reach them.
+
+## CLI selection and child handoff
+
+The external extension registers `--mcp <names>` to select an explicit comma-separated server set at startup (for example, `pi --mcp filesystem,linear`). Names are matched exactly after trimming whitespace; duplicate and empty comma-separated entries are ignored. Unknown names produce a warning and are skipped. Pass an explicit empty string (`pi --mcp ""` or `pi --mcp=`) to select no servers.
+
+An explicit `--mcp` value, including empty, overrides both an inherited child snapshot and saved session state at each `session_start`. Pi reuses the process flag for reloads and replacement sessions (new, resume, and fork), so the original selection is reapplied then and can undo later panel changes. When the flag is absent, existing precedence is unchanged: a child launch snapshot wins over saved session state; otherwise the active branch's saved set is restored, and a new session with no saved set starts with everything off. The snapshot environment value is consumed even when `--mcp` overrides it.
+
+For a launcher such as Demi that offers `names` / `inherit` / `none` modes, use these argv/environment rules:
+
+- **names** — pass `--mcp <comma-separated names>`; this explicit set wins over any child snapshot.
+- **inherit** — omit `--mcp` and preserve the launch environment. Subagent launches already provide the parent's enabled-set snapshot in `PI_EXTENSIONS_MCP_ENABLED_SNAPSHOT`.
+- **none** — pass `--mcp ""`; the explicit empty set disables all configured servers even if a snapshot is present.
+
+This flag controls this external extension only; it does not use or configure Pi's built-in MCP support.
 
 ## Session persistence
 
 The enabled set is recorded in the session as an `mcp-enabled` custom entry (server names and identity hashes only) whenever it changes: on closing the `/mcp` panel and after a successful Shift+A re-authentication. Unchanged sets are not re-recorded.
 
-On `/reload`, resume, or fork, the newest record on the active branch is restored; navigating with `/tree` adopts the target branch's record (all off when it has none). `/new` starts with everything off. Servers are matched by name, so a server whose configuration changed stays enabled; a server no longer configured stays off and produces a warning. Restoring never connects: servers reconnect lazily on first use.
+On `/reload`, resume, or fork, the newest record on the active branch is restored when the process has no explicit `--mcp`; an original CLI selection is reapplied on those `session_start` events instead and may override later panel changes. Navigating with `/tree` adopts the target branch's record even when the process started with `--mcp` (all off when the branch has none). Thus the flag is a startup selection, not a permanent denylist. Without a CLI override, `/new` starts with everything off. Servers are matched by name when restoring saved branch state, so a server whose configuration changed stays enabled; a server no longer configured stays off and produces a warning. Restoring never connects: servers reconnect lazily on first use.
 
 ## Child agent inheritance
 
-Each child process receives a point-in-time snapshot of the parent's enabled server set at launch. The handoff contains only server names and configuration identity hashes; it contains no credentials or server configuration. During child startup, MCP removes the handoff value from the process environment and enables only entries whose identity matches the child's independently loaded configuration.
+Each child process receives a point-in-time snapshot of the parent's enabled server set at launch. The handoff contains only server names and configuration identity hashes; it contains no credentials or server configuration. During child startup, MCP removes the handoff value from the process environment and, unless an explicit `--mcp` flag overrides it, enables only entries whose identity matches the child's independently loaded configuration.
 
-Snapshots are launch-scoped and isolated for parallel children. Child connections and subsequent enable/disable changes do not affect the parent or siblings. A launch snapshot takes precedence over any enabled set recorded in the child's session. Other new Pi sessions start with all servers off as usual.
+Snapshots are launch-scoped and isolated for parallel children. Child connections and subsequent enable/disable changes do not affect the parent or siblings. When `--mcp` is absent, a launch snapshot takes precedence over any enabled set recorded in the child's session. New Pi sessions without an explicit flag or child snapshot start with all servers off as usual.
 
 Capability scoping remains authoritative. If a child does not load MCP, it cannot consume or use the snapshot. If its tool list excludes `mcp`, MCP may initialize the inherited enabled set, but the child still has no tool with which to reach those servers.
 

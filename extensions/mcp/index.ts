@@ -33,7 +33,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { decodeKittyPrintable, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AuthError, authInteractive, clearOAuthCredentials } from "./auth.ts";
-import { GLOBAL_CONFIG_FILE, loadServers } from "./config.ts";
+import { GLOBAL_CONFIG_FILE, identity, loadServers } from "./config.ts";
 import {
   consumeEnabledSnapshot,
   MCP_ENABLED_SNAPSHOT_ENV,
@@ -679,6 +679,11 @@ function registerMcpTool(pi: ExtensionAPI, runtime: Runtime, configuredServers: 
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.registerFlag("mcp", {
+    description: "Comma-separated MCP server names to enable (an empty value selects none)",
+    type: "string",
+  });
+
   /** Enabled set most recently recorded on (or restored from) the active branch. */
   let recordedKey = "";
   const runtime: Runtime = {
@@ -735,12 +740,36 @@ export default function (pi: ExtensionAPI) {
     const { servers, errors } = loadServers(ctx.cwd);
     for (const error of errors) ctx.ui.notify(`mcp: ${error}`, "warning");
 
+    const mcpFlag = pi.getFlag("mcp");
+    const explicitNames = typeof mcpFlag === "string"
+      ? [...new Set(mcpFlag.split(",").map((name) => name.trim()).filter(Boolean))]
+      : undefined;
+
     // Consume before initializing. The handoff helper always deletes the
     // environment value, including malformed input, to prevent propagation.
-    // A launch handoff from a parent agent takes precedence over session state.
+    // An explicit --mcp value overrides both the handoff and session state;
+    // without it, a launch handoff takes precedence over session state.
     const inheritedSnapshot = consumeEnabledSnapshot();
-    await runtime.manager.initialize(servers, inheritedSnapshot);
-    restoreFromBranch(ctx, !inheritedSnapshot);
+    await runtime.manager.initialize(servers, explicitNames === undefined ? inheritedSnapshot : undefined);
+    if (explicitNames !== undefined) {
+      const unknown = explicitNames.filter((name) => !servers.has(name));
+      if (unknown.length) {
+        ctx.ui.notify(
+          `mcp: --mcp skipped unknown server${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`,
+          "warning",
+        );
+      }
+      runtime.manager.restoreEnabled(
+        {
+          version: 1,
+          servers: explicitNames
+            .filter((name) => servers.has(name))
+            .map((name) => ({ name, identity: identity(servers.get(name)!) })),
+        },
+        { matchIdentity: true },
+      );
+    }
+    restoreFromBranch(ctx, explicitNames === undefined && !inheritedSnapshot);
     registerMcpTool(pi, runtime, runtime.manager.list());
     updateFooter(runtime);
   });
