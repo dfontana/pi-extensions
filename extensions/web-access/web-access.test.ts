@@ -34,7 +34,7 @@ function configOrFail(global: unknown, local?: unknown) {
   return result.config;
 }
 
-describe("web-access web-access", () => {
+describe("web-access", () => {
   describe("search provider boundary", () => {
     it("builds the provider-specific search request from one common search", () => {
       const cases = [
@@ -70,6 +70,14 @@ describe("web-access web-access", () => {
         getAdapter("acme-gateway").buildBody("m", { query: "q", maxResults: 1 }, {}),
         getAdapter("openai").buildBody("m", { query: "q", maxResults: 1 }, {}),
       );
+      for (const provider of ["openrouter", "openai-codex", "acme-gateway"]) {
+        assert.deepEqual(
+          getAdapter(provider, { baseUrl: "https://api.openai.com/v1", isOAuth: true })
+            .buildBody("m", { query: "q", maxResults: 1 }, {}),
+          getAdapter(provider).buildBody("m", { query: "q", maxResults: 1 }, {}),
+          provider,
+        );
+      }
     });
 
     it("targets the openai-codex OAuth backend with its SSE-only request contract", () => {
@@ -165,6 +173,117 @@ describe("web-access web-access", () => {
         assert.throws(() => parseResponse(response), message);
       }
     });
+  });
+
+  it("uses request-time auth to switch between ChatGPT streaming and ordinary OpenAI searches", async (t) => {
+    const agentDir = mkdtempSync(join(tmpdir(), "wa-chatgpt-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "wa-chatgpt-cwd-"));
+    const before = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    writeFileSync(
+      join(agentDir, "web-access.json"),
+      JSON.stringify({
+        search: {
+          provider: "openai",
+          model: "gpt-6-luna",
+          searchContextSize: "low",
+          providerParams: { openai: { user_location: { type: "approximate", country: "US" } } },
+        },
+      }),
+    );
+
+    const model = { provider: "openai", id: "gpt-6-luna", baseUrl: "https://api.openai.com/v1" };
+    const params = { query: "kitty user variables", max_results: 6, search_context_size: "high", allowed_domains: ["sw.kovidgoyal.net"] };
+    const plainBody = {
+      model: model.id,
+      input: params.query,
+      tools: [{
+        type: "web_search",
+        user_location: { type: "approximate", country: "US" },
+        search_context_size: "high",
+        filters: { allowed_domains: params.allowed_domains },
+      }],
+    };
+    const chatGptBody = {
+      ...plainBody,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: params.query }] }],
+      stream: true,
+      store: false,
+    };
+    const cases = [
+      { name: "ChatGPT OAuth", isOAuth: true, apiKey: "chatgpt-token", baseUrl: undefined, body: chatGptBody, sse: true },
+      { name: "API key after OAuth", isOAuth: false, apiKey: "sk-api-key", baseUrl: undefined, body: plainBody, sse: false },
+      { name: "OAuth after API key", isOAuth: true, apiKey: "chatgpt-token", baseUrl: "https://api.openai.com/v1/", body: chatGptBody, sse: true },
+      { name: "custom endpoint override", isOAuth: true, apiKey: "chatgpt-token", baseUrl: "https://gateway.test/v1", body: plainBody, sse: false },
+    ];
+    let current = cases[0];
+    const annotations = [{ type: "url_citation", url: "https://sw.kovidgoyal.net/kitty/", title: "kitty" }];
+    const message = { type: "message", content: [{ type: "output_text", text: "Search answer", annotations }] };
+    const signal = new AbortController().signal;
+    let failStream = false;
+
+    try {
+      let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+      const tools = new Map<string, { execute: (...args: any[]) => Promise<any> }>();
+      const ctx = {
+        cwd,
+        modelRegistry: {
+          refresh: async () => ({ aborted: false, errors: new Map() }),
+          find: (provider: string, id: string) => provider === model.provider && id === model.id ? model : undefined,
+          getApiKeyAndHeaders: async () => ({
+            ok: true as const,
+            apiKey: current.apiKey,
+            baseUrl: current.baseUrl,
+            headers: { "X-Registry": "forwarded", "OpenAI-Beta": null },
+          }),
+          isUsingOAuth: () => current.isOAuth,
+        },
+        ui: { notify() {} },
+      };
+      extension({
+        on: (_event: string, handler: (event: unknown, ctx: any) => Promise<void>) => (sessionStart = handler),
+        registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => tools.set(tool.name, tool),
+      } as any);
+      await sessionStart!({}, ctx);
+      const search = tools.get("web_search");
+      assert.ok(search);
+
+      t.mock.method(globalThis, "fetch", async (url: string | URL | Request, init?: RequestInit) => {
+        assert.equal(url, `${(current.baseUrl ?? model.baseUrl).replace(/\/+$/, "")}/responses`, current.name);
+        assert.equal(init?.method, "POST");
+        assert.equal(init?.signal, signal);
+        assert.deepEqual(JSON.parse(init?.body as string), current.body, current.name);
+        assert.deepEqual(init?.headers, {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${current.apiKey}`,
+          ...(current.sse ? { accept: "text/event-stream" } : {}),
+          "X-Registry": "forwarded",
+        }, current.name);
+        const body = failStream
+          ? 'data: {"type":"response.failed","response":{"error":{"message":"quota"}}}\n\n'
+          : current.sse
+            ? `data: ${JSON.stringify({ type: "response.output_item.done", item: message })}\n\ndata: ${JSON.stringify({ type: "response.completed", response: { output: [] } })}\n\n`
+            : JSON.stringify({ output: [message] });
+        return new Response(body, { headers: { "Content-Type": current.sse ? "text/event-stream" : "application/json" } });
+      });
+
+      for (current of cases) {
+        assert.deepEqual(await search.execute("search-call", params, signal, undefined, ctx), {
+          content: [
+            { type: "text", text: "Search answer" },
+            { type: "text", text: `Sources (annotations):\n${JSON.stringify(annotations, null, 2)}` },
+          ],
+          details: { annotations },
+        }, current.name);
+      }
+
+      current = cases[0];
+      failStream = true;
+      await assert.rejects(search.execute("failed-search", params, signal, undefined, ctx), /provider error: quota/);
+    } finally {
+      if (before === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = before;
+    }
   });
 
   it("passes each tool signal to refresh while keeping session-start refresh signal-free", async () => {

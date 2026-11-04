@@ -4,12 +4,14 @@
  * Every supported provider speaks the OpenAI Responses API ("/responses") and
  * returns the OpenAI response shape, so a single `parseResponse` handles every
  * response. They differ in how the web-search tool is named, where its
- * parameters live on the request body, and (for openai-codex) the endpoint,
- * auth headers, and transport:
+ * parameters live on the request body, and the endpoint, auth headers, and
+ * transport:
  *
- *   - openai / openrouter: plain JSON POST to `{baseUrl}/responses` with a
- *     Bearer API key.
- *   - openai-codex: the ChatGPT OAuth backend at
+ *   - openai (API key) / openrouter: plain JSON POST to `{baseUrl}/responses`
+ *     with a Bearer API key.
+ *   - openai (ChatGPT OAuth): the same endpoint and Bearer auth, but requires
+ *     message-list input, `stream: true`, and `store: false`.
+ *   - openai-codex: the legacy ChatGPT OAuth backend at
  *     `{baseUrl}/codex/responses`. It only accepts requests that look like a
  *     codex client (chatgpt-account-id from the OAuth JWT, originator,
  *     User-Agent, OpenAI-Beta) and only replies over SSE (`stream: true`,
@@ -39,7 +41,7 @@ export interface ProviderAdapter {
   ): Record<string, unknown>;
   endpoint(baseUrl: string): string;
   headers(apiKey: string): Record<string, string>;
-  /** SSE-only backend: read the response via `readSseResponse`, not `res.json()`. */
+  /** Streaming backend: read the response via `readSseResponse`, not `res.json()`. */
   stream?: boolean;
 }
 
@@ -68,6 +70,24 @@ const openaiAdapter: ProviderAdapter = {
   },
   headers(apiKey) {
     return { Authorization: `Bearer ${apiKey}` };
+  },
+};
+
+// Sign in with ChatGPT uses the standard OpenAI endpoint, but rejects string
+// input and requires streaming without storage (matching pi-ai's transport).
+const openaiChatGptAdapter: ProviderAdapter = {
+  ...openaiAdapter,
+  stream: true,
+  buildBody(model, args, providerParams) {
+    return {
+      ...openaiAdapter.buildBody(model, args, providerParams),
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: args.query }] }],
+      stream: true,
+      store: false,
+    };
+  },
+  headers(apiKey) {
+    return { ...openaiAdapter.headers(apiKey), accept: "text/event-stream" };
   },
 };
 
@@ -164,8 +184,14 @@ const ADAPTERS: Record<string, ProviderAdapter> = {
   "openai-codex": openaiCodexAdapter,
 };
 
-/** Resolve a named adapter, or use the generic OpenAI adapter for custom gateways. */
-export function getAdapter(provider: string): ProviderAdapter {
+/** Resolve request-time OAuth transport only for the direct OpenAI endpoint. */
+export function getAdapter(
+  provider: string,
+  auth?: { baseUrl: string; isOAuth: boolean },
+): ProviderAdapter {
+  if (provider === "openai" && auth?.isOAuth && auth.baseUrl.replace(/\/+$/, "") === "https://api.openai.com/v1") {
+    return openaiChatGptAdapter;
+  }
   return ADAPTERS[provider] ?? openaiAdapter;
 }
 

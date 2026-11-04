@@ -58,7 +58,19 @@ The minimum configuration is one section with `provider` and `model`:
 
 Credentials come from pi's model registry for the configured provider — no API keys in this config. Credentials are re-resolved on every call, so mid-session key changes are picked up.
 
-### Search via ChatGPT OAuth (`openai-codex`)
+### Search via ChatGPT OAuth (`openai`)
+
+Use pi's **Sign in with ChatGPT** login under `openai` (`/login openai`), then configure:
+
+```json
+{ "search": { "provider": "openai", "model": "gpt-6-luna" } }
+```
+
+Pi 0.99.0 introduced this login and superseded `openai-codex` with it. Credentials are provider-scoped: an `openai` login does not authenticate the legacy `openai-codex` provider.
+
+Search uses `https://api.openai.com/v1/responses` with the OAuth access token. The extension selects the ChatGPT transport at request time: message-list input, `stream: true`, `store: false`, and SSE response parsing. API-key logins keep the ordinary JSON request/response path; custom endpoints and other providers keep their existing adapters. Provider-specific search parameters, domain filters, and returned citation annotations work on both paths.
+
+### Legacy search via ChatGPT/Codex OAuth (`openai-codex`)
 
 `search.provider: "openai-codex"` serves `web_search` from the ChatGPT/Codex backend (`https://chatgpt.com/backend-api/codex/responses`) using a ChatGPT Plus/Pro OAuth login instead of a metered API key — usage counts against the plan's rate limits. Details:
 

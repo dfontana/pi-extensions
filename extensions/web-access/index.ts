@@ -101,7 +101,7 @@ function mergeHeaders(...sources: Array<ProviderHeaders | undefined>): Record<st
  * POST a JSON body. Shared by web_search and web_fetch. Throws on non-2xx.
  *
  * With `sse` set the endpoint replies with an event stream instead of a JSON
- * body (openai-codex is SSE-only); the final response object is reassembled
+ * body (ChatGPT OAuth requires SSE); the final response object is reassembled
  * from the stream by `readSseResponse`.
  */
 async function postJson(opts: {
@@ -202,8 +202,6 @@ const fetchRenderers = compactRow<FetchArgs, { result?: FetchResult }>({
 });
 
 function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
-  const adapter = getAdapter(cfg.provider);
-
   pi.registerTool({
     name: "web_search",
     label: "Web Search",
@@ -238,6 +236,7 @@ function registerWebSearch(pi: ExtensionAPI, cfg: SearchToolConfig) {
       const resolved = await resolveModelAuth(ctx.modelRegistry, cfg.provider, cfg.model, signal);
       if (!resolved.ok) throw new Error(resolved.error);
       const { model, apiKey, baseUrl, headers } = resolved;
+      const adapter = getAdapter(cfg.provider, { baseUrl, isOAuth: ctx.modelRegistry.isUsingOAuth(model) });
 
       // Agent-supplied args win; the config's common params are the defaults.
       const body = adapter.buildBody(

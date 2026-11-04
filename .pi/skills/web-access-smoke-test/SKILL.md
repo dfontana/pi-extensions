@@ -8,7 +8,7 @@ description: >
 
 # web-access Smoke Test
 
-Run these two tool calls in order and verify the expected outcomes.
+Run these tool calls in order and verify the expected outcomes. Skip a tool if its section is omitted from `web-access.json`.
 
 ## 1. web_search
 
@@ -23,7 +23,11 @@ Run these two tool calls in order and verify the expected outcomes.
 
 **Pass:** Returns a text summary with at least one `sw.kovidgoyal.net` citation. No provider error.
 
-> With `search.provider: "openai-codex"` the backend emits no annotations, so
+> With `search.provider: "openai"` and Sign in with ChatGPT, expect the normal
+> citation-bearing summary. The extension uses message-list input and SSE for
+> this OAuth login, while keeping the ordinary JSON path for API keys.
+>
+> With the legacy `search.provider: "openai-codex"` the backend emits no annotations, so
 > expect an on-topic summary (kitty user variables / remote control) with zero
 > Sources entries — that is a pass, not a failure.
 
@@ -43,6 +47,8 @@ url: https://nill.ink/frontier/
 
 | Symptom | Likely cause |
 |---|---|
+| `no API key for openai-codex` | Config targets the legacy provider, but the current ChatGPT login is stored under `openai` — update the search provider/model |
+| 400 `Input must be a list` (OpenAI ChatGPT OAuth) | Search used the API-key request shape instead of message-list input with `stream: true`, `store: false`, and SSE parsing |
 | 404 `Unknown compliance rule for api: /messages` | `anthropicAdapter.endpoint()` is missing `/v1/` — see `web-fetch.ts` |
 | 404 on `/responses` | `baseUrl` for the OpenAI provider lost its `/v1` suffix |
 | 404 `Model not found <id>` (openai-codex) | pi's registry lists ids the ChatGPT backend doesn't serve (e.g. `gpt-5.6-luna`) — switch to one it does (`gpt-5.5`) |
