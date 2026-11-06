@@ -84,7 +84,10 @@ export function applyOps(state: TodoState, params: TodoParams): TodoState {
   const deleted = new Set<number>();
   for (const u of params.update ?? []) {
     const task = tasks.find((t) => t.id === u.id);
-    if (!task || deleted.has(u.id)) throw new Error(`update: task #${u.id} not found`);
+    if (!task || deleted.has(u.id)) {
+      if (u.status === "completed" && u.subject === undefined && u.description === undefined) continue;
+      throw new Error(`update: task #${u.id} not found`);
+    }
     if (u.subject !== undefined) {
       if (!u.subject.trim()) throw new Error(`update: subject for #${u.id} must not be empty`);
       task.subject = u.subject.trim();
@@ -265,7 +268,7 @@ Use it for work with 3+ distinct steps, when the user gives several tasks, or wh
 - update: change status, subject, or description of a task by id. Status: pending → in_progress → completed; "deleted" removes an obsolete task.
 - Call with no arguments to read the current list.
 
-Creates apply before updates. An invalid update (unknown id, empty subject) fails the whole call without changes.`,
+Creates apply before updates. A completion-only update to a missing id is ignored. Other unknown ids and empty subjects fail the whole call without changes.`,
     promptSnippet: "Track multi-step work as a task list shown to the user",
     promptGuidelines: [
       "For multi-step work, use the todo tool to create tasks, mark one in_progress before starting it, and mark it completed as soon as it is done.",

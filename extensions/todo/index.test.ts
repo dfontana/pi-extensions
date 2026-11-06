@@ -86,11 +86,57 @@ describe("todo", () => {
     assert.match(r3.content[0].text, /#2 \[in_progress\] Ship it\n {4}tag release/);
   });
 
+  for (const removal of ["auto-clear", "clear", "completed"] as const) {
+    test(`accepts repeated completion after ${removal} without changing the list`, async () => {
+      const h = host();
+      await h.call({ create: [{ subject: "A" }] });
+      await h.call({ update: [{ id: 1, status: "completed" }] });
+      if (removal === "auto-clear") await h.fire("before_agent_start");
+      else {
+        if (removal === "completed") await h.call({ create: [{ subject: "Still open" }] });
+        await h.command(removal);
+      }
+
+      const before = await h.call({});
+      const after = await h.call({ update: [{ id: 1, status: "completed" }, { id: 1, status: "completed" }] });
+      assert.deepEqual(after, before);
+      assert.deepEqual(await h.call({}), before);
+    });
+  }
+
+  test("ignores missing completions alongside creates, updates, and deletes", async () => {
+    const h = host();
+    await h.call({ create: [{ subject: "A" }] });
+    const result = await h.call({
+      create: [{ subject: "B" }],
+      update: [
+        { id: 99, status: "completed" },
+        { id: 1, status: "deleted" },
+        { id: 1, status: "completed" },
+        { id: 2, status: "in_progress", subject: "Ship B" },
+        { id: 99, status: "completed" },
+      ],
+    });
+    assert.deepEqual(result.details, { tasks: [{ id: 2, subject: "Ship B", status: "in_progress" }], nextId: 3 });
+    assert.equal(result.content[0].text, "#2 [in_progress] Ship B");
+  });
+
   for (const [name, params] of [
-    ["unknown id", { update: [{ id: 99, status: "completed" }] }],
+    ["unknown id without changes", { update: [{ id: 99 }] }],
+    ["unknown id pending", { update: [{ id: 99, status: "pending" }] }],
+    ["unknown id in progress", { update: [{ id: 99, status: "in_progress" }] }],
+    ["unknown id deleted", { update: [{ id: 99, status: "deleted" }] }],
+    ["unknown id subject", { update: [{ id: 99, subject: "Renamed" }] }],
+    ["unknown id description", { update: [{ id: 99, description: "Revised" }] }],
+    ["unknown id completion with subject", { update: [{ id: 99, status: "completed", subject: "Renamed" }] }],
+    ["unknown id completion with empty subject", { update: [{ id: 99, status: "completed", subject: "" }] }],
+    ["unknown id completion with description", { update: [{ id: 99, status: "completed", description: "Revised" }] }],
+    ["unknown id completion with empty description", { update: [{ id: 99, status: "completed", description: "" }] }],
     ["empty subject on create", { create: [{ subject: "  " }] }],
     ["empty subject on update", { update: [{ id: 1, subject: "" }] }],
-    ["update after delete in same batch", { update: [{ id: 1, status: "deleted" }, { id: 1, status: "completed" }] }],
+    ["update after delete in same batch", { update: [{ id: 1, status: "deleted" }, { id: 1, status: "in_progress" }] }],
+    ["content change after delete in same batch", { update: [{ id: 1, status: "deleted" }, { id: 1, status: "completed", description: "Revised" }] }],
+    ["missing completion followed by invalid update", { update: [{ id: 1, status: "completed" }, { id: 99, status: "completed" }, { id: 99, status: "pending" }] }],
   ] as const) {
     test(`rejects ${name} atomically`, async () => {
       const h = host();

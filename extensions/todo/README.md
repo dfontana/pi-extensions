@@ -16,7 +16,7 @@ None.
   })
   ```
   - Statuses: `pending` → `in_progress` → `completed`; `deleted` removes a task.
-  - Creates apply before updates. An unknown id or empty subject fails the whole call without changes.
+  - Creates apply before updates. A completion-only update (`{ id, status: "completed" }`) to a missing task is silently ignored. Other unknown ids and empty subjects fail the whole call without changes.
   - A call with no arguments returns the current list.
 - **Widget** — header with done / in progress / open counts, then up to 10 tasks: `✔` completed (dim, struck through), a spinner for in progress, `◻` pending. Over 10, the oldest completed tasks are hidden first, then `… and N more`. Descriptions are agent-only.
 - **Auto-clear** — if every task is completed when you send your next prompt, the list is cleared.
